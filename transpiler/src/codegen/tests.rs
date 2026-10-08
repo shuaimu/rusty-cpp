@@ -31,7 +31,11 @@ fn standard_source_locations_lower_without_a_facade_type() {
 /// parity matrix.
 fn test_codegen() -> CodeGen {
     let mut cg = CodeGen::new();
-    cg.set_tier1_default(false);
+    // `RUSTY_CPP_TEST_TIER1=1` re-runs the whole suite with the default ON —
+    // the measurement that found the default's defects (§3.2.12, step 8).
+    if std::env::var_os("RUSTY_CPP_TEST_TIER1").is_none() {
+        cg.set_tier1_default(false);
+    }
     cg
 }
 

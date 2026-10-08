@@ -38,6 +38,9 @@ struct TypeInfo {
     params: Vec<String>,
     repr_c_or_transparent: bool,
     inherent_methods: BTreeSet<String>,
+    /// A data-carrying enum: lowered to variant structs over `std::variant`,
+    /// no single class to carry an interface base (`emit_enum` adds none).
+    is_enum: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +193,7 @@ fn collect(items: &[syn::Item], module: &mut Vec<String>, c: &mut Census) {
                     params: s.generics.params.iter().filter_map(|p| match p { syn::GenericParam::Type(tp) => Some(tp.ident.to_string()), _ => None }).collect(),
                     repr_c_or_transparent: repr_c_or_transparent(&s.attrs),
                     inherent_methods: BTreeSet::new(),
+                    is_enum: false,
                 });
             }
             syn::Item::Enum(e) => {
@@ -201,6 +205,7 @@ fn collect(items: &[syn::Item], module: &mut Vec<String>, c: &mut Census) {
                         params: e.generics.params.iter().filter_map(|p| match p { syn::GenericParam::Type(tp) => Some(tp.ident.to_string()), _ => None }).collect(),
                         repr_c_or_transparent: repr_c_or_transparent(&e.attrs),
                         inherent_methods: BTreeSet::new(),
+                        is_enum: true,
                     });
                 }
             }
@@ -220,7 +225,7 @@ fn collect(items: &[syn::Item], module: &mut Vec<String>, c: &mut Census) {
                                 }
                             }
                             // also queue for types declared later (two-pass simplification: store under leaf)
-                            c.types.entry(format!("?inherent?::{}", leaf)).or_insert(TypeInfo { key: leaf.clone(), params: vec![], repr_c_or_transparent: false, inherent_methods: BTreeSet::new() }).inherent_methods.extend(names);
+                            c.types.entry(format!("?inherent?::{}", leaf)).or_insert(TypeInfo { key: leaf.clone(), params: vec![], repr_c_or_transparent: false, is_enum: false, inherent_methods: BTreeSet::new() }).inherent_methods.extend(names);
                         }
                     }
                     Some((_, path, _)) => {
@@ -502,6 +507,9 @@ pub fn pair_verdicts_for_units(units: &[(Vec<String>, &syn::File)]) -> CensusOut
             if ty.repr_c_or_transparent {
                 return Err("A2 repr(C)/repr(transparent)".into());
             }
+            if ty.is_enum {
+                return Err("A2 enum self type: variant-lowered, no base".into());
+            }
             let t = &c.traits[tk];
             for m in &t.methods {
                 if ty.inherent_methods.contains(&m.name) {
@@ -650,6 +658,8 @@ mod tests {
             pub struct Bw { pub v: i32 }
             impl BoxTr for Bw { fn b(&self) -> i32 { self.v } }
             impl BoxTr for Box<Bw> { fn b(&self) -> i32 { self.v + 1 } }
+            pub enum Ev { A(i32), B }
+            impl Fine for Ev { fn v(&self) -> i32 { 0 } }
             "#,
         )
         .unwrap();
@@ -673,6 +683,7 @@ mod tests {
         assert!(find("RefTr", "Tw").unwrap_err().contains("twin"));
         assert!(find("RefTr", "& Tw").unwrap_err().contains("A2 self type"));
         assert!(find("BoxTr", "Bw").unwrap_err().contains("twin"));
+        assert!(find("Fine", "Ev").unwrap_err().contains("A2 enum self type"));
         // the same-name post-pass demotes BOTH tier-1 pairs on one type
         assert!(find("A", "Q").unwrap_err().contains("declared by two tier-1 traits"));
         assert!(find("B", "Q").unwrap_err().contains("declared by two tier-1 traits"));

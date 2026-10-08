@@ -2776,6 +2776,15 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   lane through the option; the inline-rust lookalike fixture is census-ineligible (an inherent `value`),
   so a base there can only come from an authenticated attribute. **Phase 1 status:** steps 1–8 landed;
   open: the cross-crate tier decision (`impl DepTrait for LocalType`; no matrix cell measures it).
+- *2026-10-08 — phase 1, step 9 (the review after the default flip).* The three unit tests the
+  default-flip triage had not examined were run through the tier-1-by-default binary: an enum
+  implementor (`impl<L, R> IterLike for Either<L, R>`), a trait with no-receiver defaults scoped by
+  trait path, and the `Weak<dyn Pollable>` module surface — all three compile (`--precompile`, syntax)
+  with no behavior change; the enum pair had stayed on the lane. Made explicit: a data-carrying enum
+  implementor is `A2 enum self type: variant-lowered, no base` in the census (`emit_enum` carries no
+  interface base; the variant structs over `std::variant` are the type), pinned in the census unit
+  test. The unit suite's lane pin (`test_codegen()`) is re-measurable: `RUSTY_CPP_TEST_TIER1=1` runs the
+  whole suite with the default ON — the measurement that found the default's defects.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
