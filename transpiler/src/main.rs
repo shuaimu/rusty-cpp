@@ -16,6 +16,7 @@ mod crate_graph;
 mod inline_rust;
 mod metadata;
 mod slots;
+mod tier_census;
 mod transpile;
 mod types;
 mod verus_exec;

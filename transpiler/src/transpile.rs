@@ -3524,6 +3524,11 @@ fn transpile_full_with_options_impl(
     } else {
         let file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
             .map_err(|e| format!("Parse error: {}", e))?;
+        // Book §3.2.1 tier census (§3.2.16 (p)): a read-only pass, printed to
+        // stderr when `RUSTY_CPP_TIER_CENSUS` is set — the phase-0/1 metric.
+        if std::env::var_os("RUSTY_CPP_TIER_CENSUS").is_some() {
+            crate::tier_census::run(&file, module_name.unwrap_or("<single-file>"));
+        }
         log_profile("parse_with_expand_hygiene_fallback");
         let has_cpp_defaults = validate_cpp_defaults(&file)?;
         match crate::cpp_abi::lower(&file, options.flat_import_namespace.as_deref())? {

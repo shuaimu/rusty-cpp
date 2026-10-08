@@ -1208,7 +1208,19 @@ whole Rust dependency graph, and may use that for optimization), but correctness
 and a trait exposed to hand-written C++ implementors needs no freezing rule.
 
 **What the boundary costs in coverage.** A census of the local parity-matrix crates (§3.2.16 (p))
-finds roughly **4 of ~288** crate-trait `(trait, impl)` pairs in tier 1. Library crates are made of
+finds roughly **4 of ~288** crate-trait `(trait, impl)` pairs in tier 1 (the 2026-09 hand count).
+*Measured 2026-10-08 by the census pass* (`RUSTY_CPP_TIER_CENSUS=1`, `transpiler/src/tier_census.rs`:
+every impl of a crate-declared trait in the 55 expanded sources of the matrix, macro-generated
+primitive impls included; foreign supertraits other than `Sized`/`Send`/`Sync`/`Copy`/`Unpin` count as
+failures): **13 of 801** pairs — serde_core alone contributes 487 pairs and 2 tier-1 (`de::Expected`
+for `ExpectedInSeq` / `ExpectedInMap`), itertools 108 and 2 (`KeyXorValue`), indexmap 14 and 3 (the
+`Sealed` markers on `IndexMap` / `IndexSet`), cfg-if 1 and 1, the five probe crates 29 and 5. The
+excluding tests, in order: a generic required method (392 — `Deserialize::deserialize<D>` 167,
+`Serialize::serialize<S>` 148, `Deserializer` 29), `Self` outside the receiver (207 — `Visitor` 83,
+`IntoDeserializer` 54, `TupleCollect`, `Flags`), a self type not declared in this crate or not a
+struct/enum (127 — primitives, std types, references), a foreign supertrait (47 — `Iterator` 31,
+`Clone` 12), an extra bound on the impl's parameters (7), an inherent same-named method (2), a
+second instantiation of a generic trait (1). Library crates are made of
 blanket impls, generic required methods (`serialize<S>`), `Self`-taking methods (`PartialEq`-shaped),
 and impls on foreign types; tier 1's coverage there is negligible by construction. Tier 1 is the
 tier of *application* code and of the C++-interop surface — the code a team writes against its own
@@ -2476,8 +2488,9 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   needed them — every classified call spells `<Tr>_::m` from its resolved owner (steps 2, 6, 7, 5a, 5b),
   default bodies and forwarder slots call the CPO, and the member-fallback ladders name the dispatcher
   by its qualified path. The two expectations that pinned the directive are updated (the Phase-4
-  ordering test asserts that none is emitted and the call is qualified). Oracle: see the gate row for
-  this step.
+  ordering test asserts that none is emitted and the call is qualified). Oracle (gate, main @ 6c15c2a1): the matrix identical to step 5b's in every row's error
+  set — 28 rows, 20 PASS, the pre-existing 5 FAIL, 3 known-fail; unit 2581 after four
+  directive-expectation updates. Phase 2 is complete.
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
   needs a pointer or reference-wrapper element spelling; phase 0, the `dyn` coercion family) and the
@@ -2495,6 +2508,11 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   routes, the hand-written `ser::impls::rusty_ext` block, and (aa). (8) indexmap/hashbrown's `fill_empty`
   on a `std::span<MaybeUninit<Tag>>` (a mapping gap of a known-fail row). (9) The incumbent-surface note
   under (aa): the deleted directive was half of what two `cpp_inherit` tests asserted.
+- *2026-10-08 — phase 0 opens with the census (§3.2.16 (p)):* `transpiler/src/tier_census.rs` is the
+  read-only pass applying §3.2.1's two axes to every crate-trait `(trait, impl)` pair of a file,
+  printed to stderr under `RUSTY_CPP_TIER_CENSUS=1`, one line per pair with the excluding test; the
+  driver over the matrix corpus and the 2026-10-08 figures are in §3.2.1 ("What the boundary costs").
+  It is phase 1's gate metric; every phase-0 widening is judged against it.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
