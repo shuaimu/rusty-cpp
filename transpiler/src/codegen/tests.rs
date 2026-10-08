@@ -8130,11 +8130,16 @@ fn test_interface_traits_basic_class_and_methods() {
         out.contains("virtual void rename(rusty::String name) = 0;"),
         "{out}"
     );
-    // Non-copyable / non-movable to prevent slicing
-    assert!(out.contains("Animal(const Animal&) = delete;"), "{out}");
-    assert!(out.contains("Animal(Animal&&) = delete;"), "{out}");
+    // Book §3.2.2 / C.67: the special members are protected and DEFAULTED,
+    // never deleted — a deleted base copy would delete every tier-1
+    // implementor's copy and move; `protected` still keeps a base-typed copy
+    // or assignment (slicing) out of reach.
+    assert!(!out.contains("Animal(const Animal&) = delete;"), "{out}");
     assert!(out.contains("protected:"), "{out}");
     assert!(out.contains("Animal() = default;"), "{out}");
+    assert!(out.contains("Animal(const Animal&) = default;"), "{out}");
+    assert!(out.contains("Animal(Animal&&) = default;"), "{out}");
+    assert!(out.contains("Animal& operator=(Animal&&) = default;"), "{out}");
     // Adapter primary template forward declarations
     assert!(
         out.contains("template <class U> class AnimalAdapter;"),
@@ -10092,6 +10097,222 @@ int main() {
         run.status.success(),
         "Ref-forwarder stub runtime proof failed (exit {:?}): the &mut slot through a non-const binding must trap, the RefMut forwarder must work",
         run.status.code()
+    );
+}
+
+#[test]
+fn test_tier1_phase0_emission_cells_clang_runtime() {
+    // Book §3.2.16 phase 0, the emission-only items, measured as one clang
+    // runtime proof on UNEXPANDED source (cargo-expand strips the inert
+    // `cfg_attr(any(), …)` markers, so the parity matrix cannot exercise
+    // tier 1 — §3.2.12). Each cell is one measured defect of the tier-1 lane:
+    //   copy          — interface special members protected + defaulted (C.67),
+    //                   no synthesized lone move constructor: a `Copy`
+    //                   implementor copies, and `derive(PartialEq)` compares
+    //                   its fields (member-wise, never the base subobject);
+    //   clone_literal — `clone()` and every literal through the fieldwise
+    //                   constructor (a struct with a base is no aggregate);
+    //   tuple_unit    — constructors for tuple and unit structs, boxed as `dyn`;
+    //   early         — the interface hoisted ahead of an implementor that
+    //                   precedes its trait in source order;
+    //   hidden        — a non-`pub` trait with a `pub` implementor stays out of
+    //                   the anonymous namespace;
+    //   foreign       — `cpp_inherit` on a foreign self type is a diagnosed
+    //                   no-op; the impl takes the tier-2 lane, and path syntax
+    //                   `Named::name(&x)` is the method call (per receiver).
+    // By-value `self` slots (`&&`) are the next phase-0 item and are not here.
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping tier-1 phase-0 cells: no clang++ in PATH");
+        return;
+    };
+    let mut cpp = transpile_str_interface_traits_with_authenticated_cpp_inherit(
+        r#"
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Area {
+            fn area(&self) -> i32;
+        }
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        pub struct Sq { pub s: i32 }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Area for Sq {
+            fn area(&self) -> i32 { self.s * self.s }
+        }
+        #[derive(Clone, Debug, PartialEq, PartialOrd)]
+        pub struct Owned { pub a: i32, pub b: i32 }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Area for Owned {
+            fn area(&self) -> i32 { self.a + self.b }
+        }
+        pub fn cell_copy() -> String {
+            let p = Sq { s: 3 };
+            let q = p;
+            format!("{} {} {}", p.area(), q.area(), p == q)
+        }
+        pub fn cell_clone_literal() -> String {
+            let o = Owned { a: 5, b: 6 };
+            let c = o.clone();
+            let l = Owned { a: 7, b: 0 };
+            format!("{} {} {} {}", c.area(), l.area(), o == c, l < o)
+        }
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Named { fn name(&self) -> String; }
+        pub struct Pair(pub i32, pub i32);
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Named for Pair { fn name(&self) -> String { format!("pair({},{})", self.0, self.1) } }
+        #[derive(PartialEq, PartialOrd)]
+        pub struct Unit;
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Named for Unit { fn name(&self) -> String { "unit".to_string() } }
+        pub fn cell_tuple_unit() -> String {
+            let p = Pair(1, 2);
+            let u = Unit;
+            let d: [Box<dyn Named>; 2] = [Box::new(Pair(3, 4)), Box::new(Unit)];
+            format!("{} {} {}+{} {}", p.name(), u.name(), d[0].name(), d[1].name(), u <= Unit)
+        }
+        pub struct Early { pub x: i32 }
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Late { fn twice(&self) -> i32; }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Late for Early { fn twice(&self) -> i32 { self.x * 2 } }
+        pub fn cell_early() -> String {
+            let e = Early { x: 21 };
+            let d: &dyn Late = &e;
+            format!("{} {}", e.twice(), d.twice())
+        }
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        trait Hidden { fn secret(&self) -> i32; }
+        pub struct Exposed { pub k: i32 }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Hidden for Exposed { fn secret(&self) -> i32 { self.k + 1 } }
+        pub fn cell_hidden() -> String { format!("{}", Exposed { k: 41 }.secret()) }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Named for i32 { fn name(&self) -> String { format!("i{}", self) } }
+        pub fn cell_foreign() -> String {
+            let x: i32 = 7;
+            format!("{} {}", x.name(), Named::name(&x))
+        }
+        "#,
+    );
+    // The emitted shapes the cells rest on (each a §3.2.16 phase-0 item).
+    assert!(cpp.contains("Area(const Area&) = default;"), "{cpp}");
+    assert!(!cpp.contains("Area(const Area&) = delete;"), "{cpp}");
+    assert!(cpp.contains("Sq(const Sq&) = default;"), "{cpp}");
+    assert!(!cpp.contains("Sq(Sq&& other) noexcept"), "lone move ctor: {cpp}");
+    assert!(cpp.contains("bool operator==(const Sq& other) const { return this->s == other.s; }"), "{cpp}");
+    assert!(cpp.contains("Owned clone() const { return Owned(rusty::clone(this->a), rusty::clone(this->b)); }"), "{cpp}");
+    assert!(cpp.contains("Pair(int32_t _0_init, int32_t _1_init) : Named(), _0(std::move(_0_init)), _1(std::move(_1_init)) {}"), "{cpp}");
+    let late_def = cpp.find("class Late {").expect("Late interface");
+    let early_def = cpp.find("struct Early : public Late {").expect("Early implementor");
+    assert!(late_def < early_def, "interface must precede its implementor: {cpp}");
+    // (vii) `Hidden` is non-`pub` but `Exposed` is `pub`: the class, its
+    // forward declaration and its forwarders stay at namespace scope.
+    assert!(
+        cpp.contains("template <class U> class HiddenAdapter;\ntemplate <class U> class HiddenAdapterRef;\ntemplate <class U> class HiddenAdapterRefMut;\nclass Hidden {"),
+        "{cpp}"
+    );
+    assert!(!cpp.contains("namespace {\ntemplate <class U> class HiddenAdapter;"), "{cpp}");
+    assert!(!cpp.contains("namespace {\nclass Hidden;"), "{cpp}");
+    assert!(cpp.contains("struct Exposed : public Hidden {"), "{cpp}");
+    // (viii) the i32 impl took the tier-2 lane.
+    assert!(cpp.contains("lowered via the Named_ free functions above"), "cpp_inherit on i32 must be a no-op: {cpp}");
+    assert!(!cpp.contains("struct int32_t"), "{cpp}");
+    // (ix) path syntax on a foreign receiver is the method call.
+    assert!(!cpp.contains("(&x)->name()"), "path syntax on a foreign receiver: {cpp}");
+    cpp.push_str(
+        r#"
+#include <cstdio>
+#include <string>
+static int check(const char* cell, const std::string& got, const char* want) {
+    if (got != want) { std::printf("FAIL %s: got [%s] want [%s]\n", cell, got.c_str(), want); return 1; }
+    return 0;
+}
+int main() {
+    int bad = 0;
+    bad += check("copy", std::string(rusty::to_string_view(cell_copy())), "9 9 true");
+    bad += check("clone_literal", std::string(rusty::to_string_view(cell_clone_literal())), "11 7 true false");
+    bad += check("tuple_unit", std::string(rusty::to_string_view(cell_tuple_unit())), "pair(1,2) unit pair(3,4)+unit true");
+    bad += check("early", std::string(rusty::to_string_view(cell_early())), "42 42");
+    bad += check("hidden", std::string(rusty::to_string_view(cell_hidden())), "42");
+    bad += check("foreign", std::string(rusty::to_string_view(cell_foreign())), "i7 i7");
+    return bad;
+}
+"#,
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let cpp_path = temp.path().join("tier1_phase0_cells.cpp");
+    let binary_path = temp.path().join("tier1_phase0_cells");
+    std::fs::write(&cpp_path, cpp).unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+    let compile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(include_dir)
+        .arg(&cpp_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "tier-1 phase-0 cells C++ compile failed:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = std::process::Command::new(binary_path).output().unwrap();
+    assert!(
+        run.status.success(),
+        "tier-1 phase-0 cells runtime proof failed (exit {:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout)
+    );
+    // (vii) in MODULE mode, where the rule bites: an exported class with a
+    // TU-local base is an exposure ([basic.link]); the wrap must not apply.
+    let module_cpp = transpile_str_module(
+        r#"
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        trait Hidden { fn secret(&self) -> i32; }
+        pub struct Exposed { pub k: i32 }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Hidden for Exposed { fn secret(&self) -> i32 { self.k + 1 } }
+        pub fn cell_hidden() -> i32 { Exposed { k: 41 }.secret() }
+        "#,
+        "tier1_hidden_cell",
+    );
+    let module_source = temp.path().join("tier1_hidden_cell.cppm");
+    let module_pcm = temp.path().join("tier1_hidden_cell.pcm");
+    std::fs::write(&module_source, module_cpp).unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+    let precompile = std::process::Command::new(compiler)
+        .arg("-w")
+        .arg("-std=c++23")
+        .arg("-stdlib=libc++")
+        .arg("-I")
+        .arg(&include_dir)
+        .arg("--precompile")
+        .arg(&module_source)
+        .arg("-o")
+        .arg(&module_pcm)
+        .output()
+        .unwrap();
+    assert!(
+        precompile.status.success(),
+        "hidden-trait / pub-implementor module precompile failed:\n{}",
+        String::from_utf8_lossy(&precompile.stderr)
     );
 }
 

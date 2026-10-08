@@ -3114,6 +3114,28 @@ pub struct CodeGen {
     /// ctor, and the 3 `TraitAdapter<Type>` specializations are suppressed.
     /// Opt-in only — absent types keep the default adapter-wrapper emission.
     pub(crate) cpp_inherit_trait: HashMap<String, String>,
+    /// §3.2.16 phase 0: the trait items behind `cpp_inherit_trait`, keyed by
+    /// the module-scoped trait name (`nonvtable_trait_key_here`) and by the
+    /// short name. A base class must be complete where the derived class is
+    /// defined, so `emit_struct` hoists an interface that follows its first
+    /// implementor in source order.
+    pub(crate) cpp_inherit_trait_items: HashMap<String, syn::ItemTrait>,
+    /// Scoped trait keys whose definition `emit_struct` already hoisted; the
+    /// later source-order visit of that trait is a no-op.
+    pub(crate) hoisted_trait_interfaces: HashSet<String>,
+    /// Scoped trait keys `emit_trait` has visited (hoisted or in source order).
+    pub(crate) visited_trait_keys: HashSet<String>,
+    /// Trait short name → simple names of its `#[cpp_inherit]` implementors.
+    pub(crate) cpp_inherit_implementors: HashMap<String, Vec<String>>,
+    /// Simple names of the structs and enums declared `pub` (in any form) in
+    /// this crate. Phase 0: a non-`pub` trait with a `pub` implementor is not
+    /// wrapped in an anonymous namespace — an exported class may not have a
+    /// TU-local base ([basic.link] exposure).
+    pub(crate) pub_declared_type_names: HashSet<String>,
+    /// Traits (short and module-scoped keys) with at least one `pub`
+    /// `#[cpp_inherit]` implementor: their class is never TU-local, whatever
+    /// the trait's own visibility (phase 0; see `pub_declared_type_names`).
+    pub(crate) traits_with_pub_cpp_inherit_implementor: HashSet<String>,
     /// Tracks `(trait_name, self_cpp)` pairs we've already emitted
     /// Adapter specs for under `--interface-traits`. Prevents duplicate
     /// `template <> class TraitAdapter<U>` definitions when the same
@@ -3895,6 +3917,12 @@ impl CodeGen {
             trait_associated_type_names: HashMap::new(),
             trait_declared_path_by_short_name: HashMap::new(),
             cpp_inherit_trait: HashMap::new(),
+            cpp_inherit_trait_items: HashMap::new(),
+            hoisted_trait_interfaces: HashSet::new(),
+            visited_trait_keys: HashSet::new(),
+            cpp_inherit_implementors: HashMap::new(),
+            pub_declared_type_names: HashSet::new(),
+            traits_with_pub_cpp_inherit_implementor: HashSet::new(),
             emitted_foreign_adapter_specs: HashSet::new(),
             crate_name: None,
             module_stack: Vec::new(),
@@ -13964,7 +13992,11 @@ impl CodeGen {
         // Anonymous namespaces in one TU unify, so declaring it here too
         // makes decl and definition one class, and the implicit
         // using-directive keeps every root-scope reference working.
-        let wrap_in_anon_ns = !Self::visibility_is_any_pub(&t.vis) && export_prefix.is_empty();
+        let wrap_in_anon_ns = !Self::visibility_is_any_pub(&t.vis)
+            && export_prefix.is_empty()
+            && !self
+                .traits_with_pub_cpp_inherit_implementor
+                .contains(&t.ident.to_string());
         if wrap_in_anon_ns {
             self.writeln("namespace {");
         }

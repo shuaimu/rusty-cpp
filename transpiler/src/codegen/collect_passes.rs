@@ -3272,12 +3272,83 @@ impl CodeGen {
                                 .last()
                                 .map(|seg| seg.ident.to_string())
                                 .unwrap_or_else(|| raw_type_name.clone());
-                            self.cpp_inherit_trait
-                                .insert(simple_type_name.clone(), trait_short.clone());
-                            self.cpp_inherit_trait
-                                .insert(type_name.clone(), trait_short.clone());
-                            let scoped = self.scoped_type_key(&simple_type_name);
-                            self.cpp_inherit_trait.insert(scoped, trait_short.clone());
+                            // Book §3.2.16 phase 0: `cpp_inherit` on a self
+                            // type this crate does not declare (a primitive,
+                            // a std type, another crate's type) or on a
+                            // concrete instantiation of a generic local type
+                            // (`impl Tr for W<i32>`: one base cannot carry two
+                            // bodies) is a DIAGNOSED no-op — the impl takes
+                            // the tier-2 lane like any other.
+                            let self_is_local = self.declared_item_names.contains(&simple_type_name)
+                                || self.local_declared_types.contains(&simple_type_name)
+                                || self.local_declared_types.contains(&type_name);
+                            let concrete_on_generic = self_is_local
+                                && tp.path.segments.last().is_some_and(|seg| match &seg.arguments {
+                                    syn::PathArguments::AngleBracketed(ab) => {
+                                        let params = self
+                                            .declared_type_params
+                                            .get(&simple_type_name)
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        ab.args.iter().any(|arg| match arg {
+                                            syn::GenericArgument::Type(syn::Type::Path(p)) => {
+                                                !(p.qself.is_none()
+                                                    && p.path.segments.len() == 1
+                                                    && params.contains(
+                                                        &p.path.segments[0].ident.to_string(),
+                                                    ))
+                                            }
+                                            syn::GenericArgument::Type(_) => true,
+                                            _ => false,
+                                        })
+                                    }
+                                    _ => false,
+                                });
+                            if !self_is_local || concrete_on_generic {
+                                eprintln!(
+                                    "[rusty-cpp] warning: `#[cpp_inherit]` on `impl {} for {}` is ignored ({}); the impl is lowered through the trait's `{}_` namespace (book §3.2.16, phase 0)",
+                                    trait_short,
+                                    raw_type_name,
+                                    if concrete_on_generic {
+                                        "a concrete instantiation of a generic local type cannot inherit"
+                                    } else {
+                                        "the self type is not declared in this crate"
+                                    },
+                                    trait_short
+                                );
+                            } else {
+                                self.cpp_inherit_trait
+                                    .insert(simple_type_name.clone(), trait_short.clone());
+                                self.cpp_inherit_trait
+                                    .insert(type_name.clone(), trait_short.clone());
+                                let scoped = self.scoped_type_key(&simple_type_name);
+                                self.cpp_inherit_trait.insert(scoped, trait_short.clone());
+                                let implementors = self
+                                    .cpp_inherit_implementors
+                                    .entry(trait_short.clone())
+                                    .or_default();
+                                if !implementors.contains(&simple_type_name) {
+                                    implementors.push(simple_type_name.clone());
+                                }
+                                // A `pub` implementor lifts the trait's class
+                                // out of the anonymous namespace (an exported
+                                // class may not have a TU-local base); the
+                                // linkage registry filled by the earlier
+                                // `collect_call_arg_pass_styles` pass follows.
+                                if self.pub_declared_type_names.contains(&simple_type_name) {
+                                    self.traits_with_pub_cpp_inherit_implementor
+                                        .insert(trait_short.clone());
+                                    if let Some(scoped_trait) =
+                                        self.trait_declared_path_by_short_name.get(trait_short)
+                                    {
+                                        self.traits_with_pub_cpp_inherit_implementor
+                                            .insert(scoped_trait.clone());
+                                    }
+                                    let suffix = format!("::{}", trait_short);
+                                    self.internal_linkage_traits
+                                        .retain(|k| k != trait_short && !k.ends_with(&suffix));
+                                }
+                            }
                         }
                     }
                     // Borrowed `IntoIterator` impls (`impl IntoIterator for &T` / `&mut T`)
@@ -4344,8 +4415,16 @@ impl CodeGen {
                         .unwrap_or(&scoped_trait_name)
                         .to_string();
                     self.trait_declared_path_by_short_name
-                        .entry(short)
+                        .entry(short.clone())
                         .or_insert_with(|| scoped_trait_name.clone());
+                    // Phase 0: keep the item so `emit_struct` can hoist the
+                    // interface ahead of an implementor that precedes it.
+                    self.cpp_inherit_trait_items
+                        .entry(scoped_trait_name.clone())
+                        .or_insert_with(|| t.clone());
+                    self.cpp_inherit_trait_items
+                        .entry(short)
+                        .or_insert_with(|| t.clone());
                     let mut static_defaults = Vec::new();
                     for trait_item in &t.items {
                         // Book §3.2.2 non-vtable members (step 8): the trait's
@@ -4429,6 +4508,12 @@ impl CodeGen {
                         nested_path.push(m.ident.to_string());
                         self.collect_trait_static_default_methods(nested_items, &nested_path);
                     }
+                }
+                syn::Item::Struct(s) if Self::visibility_is_any_pub(&s.vis) => {
+                    self.pub_declared_type_names.insert(s.ident.to_string());
+                }
+                syn::Item::Enum(e) if Self::visibility_is_any_pub(&e.vis) => {
+                    self.pub_declared_type_names.insert(e.ident.to_string());
                 }
                 _ => {}
             }

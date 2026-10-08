@@ -2635,6 +2635,40 @@ impl CodeGen {
         // default TraitAdapter wrapper. The base spelling is reused for the
         // base clause and the synthesized/cpp_ctor base-init.
         let cpp_inherit_base: Option<String> = self.cpp_inherit_base_name(&name_str);
+        // Book §3.2.16 phase 0: a base class must be complete at the derived
+        // class, and Rust lets the trait follow its implementor. Emit the
+        // trait (interface, forwarders, namespace) here when its own
+        // source-order visit has not happened yet; that visit then skips it.
+        // Only a trait of THIS module is hoisted — one from another module
+        // would land in the wrong namespace.
+        if cpp_inherit_base.is_some() {
+            let scoped_owner = self.scoped_type_key(&name_str);
+            let trait_short = self
+                .cpp_inherit_trait
+                .get(&name_str)
+                .or_else(|| self.cpp_inherit_trait.get(&scoped_owner))
+                .cloned();
+            if let Some(trait_short) = trait_short {
+                let key = self.nonvtable_trait_key_here(&trait_short);
+                let declared_here = self
+                    .trait_declared_path_by_short_name
+                    .get(&trait_short)
+                    .is_some_and(|declared| declared == &key);
+                if declared_here
+                    && !self.hoisted_trait_interfaces.contains(&key)
+                    && !self.visited_trait_keys.contains(&key)
+                    && let Some(t) = self.cpp_inherit_trait_items.get(&key).cloned()
+                {
+                    self.writeln(&format!(
+                        "// `{}` hoisted ahead of its implementor `{}` (a base must be complete here)",
+                        trait_short, name_str
+                    ));
+                    self.emit_trait(&t);
+                    self.newline();
+                    self.hoisted_trait_interfaces.insert(key);
+                }
+            }
+        }
         // Preserve the established cpp_inherit behavior: any `#[cpp_ctor]`
         // takes over construction for that path.
         let cpp_ctor_methods: Vec<&syn::ImplItemFn> = merged_impl_items
@@ -3371,39 +3405,60 @@ impl CodeGen {
         // `#[cpp_inherit]` structs are polymorphic (virtual base + overrides),
         // so they are NOT C++ aggregates — aggregate/designated init is
         // illegal. Synthesize an explicit fieldwise ctor (the positional
-        // struct-literal lowering targets it) plus a move ctor that
-        // reconstructs a fresh base subobject. The interface base deletes its
-        // move ctor, which would implicitly delete the subclass move and break
-        // `Arc<Self>::new_(Self::new_(...))`; reconstructing the (stateless)
-        // base sidesteps that without touching the shared base class. Only the
-        // named-fields case is handled (the inheritance migrations are all
-        // record-shaped); unit/tuple cpp_inherit types fall through unchanged.
+        // struct-literal lowering and the derived `clone()` target it):
+        // `Self(F0 f0_init, ...) : Base(), f0(std::move(f0_init)), ... {}`,
+        // for named and for tuple fields alike; a unit struct keeps its
+        // implicit default constructor (the base's is protected, reachable
+        // from a derived constructor).
+        //
+        // Book §3.2.2 / §3.2.16 phase 0: NO synthesized lone move
+        // constructor — a user-declared move constructor deletes the copy
+        // constructor whatever the base does (measured §3.2.15), which broke
+        // every `Copy` implementor. The interface's special members are
+        // protected and defaulted (C.67), so the implicit copy and move of
+        // the implementor are well-formed; a `Copy`/`Clone` implementor
+        // spells all four defaulted, a non-`Clone` one declares none.
         if let Some(base) = &cpp_inherit_base {
             if !has_drop_impl && !has_cpp_ctor_method {
-                if let syn::Fields::Named(fields) = &s.fields {
-                    let member_of = |rust_name: &str| -> String {
-                        named_field_cpp_names
-                            .get(rust_name)
-                            .cloned()
-                            .unwrap_or_else(|| escape_cpp_keyword(rust_name))
-                    };
-                    // Fieldwise ctor: `Self(F0 f0_init, ...) : Base(), f0(...) {}`
-                    let ctor_params: Vec<String> = fields
+                let member_of = |rust_name: &str| -> String {
+                    named_field_cpp_names
+                        .get(rust_name)
+                        .cloned()
+                        .unwrap_or_else(|| escape_cpp_keyword(rust_name))
+                };
+                // (rust field name, C++ member, type, is_reference)
+                let fieldwise: Vec<(String, String, syn::Type, bool)> = match &s.fields {
+                    syn::Fields::Named(fields) => fields
                         .named
                         .iter()
                         .filter_map(|field| {
                             let fname = field.ident.as_ref()?.to_string();
-                            Some(format!("{} {}_init", self.map_type(&field.ty), fname))
+                            let member = member_of(&fname);
+                            let is_ref = matches!(&field.ty, syn::Type::Reference(_));
+                            Some((fname, member, field.ty.clone(), is_ref))
                         })
+                        .collect(),
+                    syn::Fields::Unnamed(fields) => fields
+                        .unnamed
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, field)| {
+                            let fname = format!("_{}", idx);
+                            let is_ref = matches!(&field.ty, syn::Type::Reference(_));
+                            (fname.clone(), fname, field.ty.clone(), is_ref)
+                        })
+                        .collect(),
+                    syn::Fields::Unit => Vec::new(),
+                };
+                if !fieldwise.is_empty() {
+                    let ctor_params: Vec<String> = fieldwise
+                        .iter()
+                        .map(|(fname, _, ty, _)| format!("{} {}_init", self.map_type(ty), fname))
                         .collect();
                     let mut ctor_inits: Vec<String> = vec![format!("{}()", base)];
-                    for field in &fields.named {
-                        let Some(fname) = field.ident.as_ref().map(|i| i.to_string()) else {
-                            continue;
-                        };
-                        let member = member_of(&fname);
+                    for (fname, member, _, is_ref) in &fieldwise {
                         let param = format!("{}_init", fname);
-                        if matches!(&field.ty, syn::Type::Reference(_)) {
+                        if *is_ref {
                             ctor_inits.push(format!("{}({})", member, param));
                         } else {
                             ctor_inits.push(format!("{}(std::move({}))", member, param));
@@ -3415,27 +3470,15 @@ impl CodeGen {
                         ctor_params.join(", "),
                         ctor_inits.join(", ")
                     ));
-                    // Move ctor: `Self(Self&& other) noexcept : Base(), f0(...) {}`
-                    let mut move_inits: Vec<String> = vec![format!("{}()", base)];
-                    for field in &fields.named {
-                        let Some(fname) = field.ident.as_ref().map(|i| i.to_string()) else {
-                            continue;
-                        };
-                        let member = member_of(&fname);
-                        if matches!(&field.ty, syn::Type::Reference(_)) {
-                            move_inits.push(format!("{}(other.{})", member, member));
-                        } else {
-                            move_inits.push(format!("{}(std::move(other.{}))", member, member));
-                        }
-                    }
-                    self.writeln(&format!(
-                        "{}({}&& other) noexcept : {} {{}}",
-                        name,
-                        name,
-                        move_inits.join(", ")
-                    ));
-                    self.newline();
                 }
+                let derives_here = self.extract_derives(&s.attrs);
+                if derives_here.iter().any(|d| d == "Copy" || d == "Clone") {
+                    self.writeln(&format!("{}(const {}&) = default;", name, name));
+                    self.writeln(&format!("{}({}&&) = default;", name, name));
+                    self.writeln(&format!("{}& operator=(const {}&) = default;", name, name));
+                    self.writeln(&format!("{}& operator=({}&&) = default;", name, name));
+                }
+                self.newline();
             }
         }
 
@@ -3985,7 +4028,20 @@ impl CodeGen {
                                     }
                                 })
                                 .collect();
-                            format!("return {}{{{}}};", name, field_inits.join(", "))
+                            if cpp_inherit_base.is_some() {
+                                // Phase 0: a non-aggregate (it has a base) is
+                                // built through its fieldwise constructor, never
+                                // a designated initializer (book §3.2.2).
+                                let positional: Vec<String> = field_inits
+                                    .iter()
+                                    .map(|init| {
+                                        init.split_once(" = ").map(|(_, v)| v.to_string()).unwrap_or_default()
+                                    })
+                                    .collect();
+                                format!("return {}({});", name, positional.join(", "))
+                            } else {
+                                format!("return {}{{{}}};", name, field_inits.join(", "))
+                            }
                         }
                         syn::Fields::Unnamed(fields) => {
                             let elems: Vec<String> = (0..fields.unnamed.len())
@@ -3998,7 +4054,11 @@ impl CodeGen {
                                     }
                                 })
                                 .collect();
-                            format!("return {}{{{}}};", name, elems.join(", "))
+                            if cpp_inherit_base.is_some() {
+                                format!("return {}({});", name, elems.join(", "))
+                            } else {
+                                format!("return {}{{{}}};", name, elems.join(", "))
+                            }
                         }
                         syn::Fields::Unit => format!("return {}{{}};", name),
                     };
@@ -4014,10 +4074,26 @@ impl CodeGen {
                     // Dedup against PartialEq + Eq both deriving the
                     // same operator.
                     if !emitted_eq_operator {
-                        self.writeln(&format!(
-                            "bool operator==(const {}&) const = default;",
-                            name
-                        ));
+                        if cpp_inherit_base.is_some() {
+                            // Phase 0: a defaulted comparison would compare
+                            // the interface base subobject too (whose members
+                            // are protected: implicitly deleted). Compare the
+                            // fields, as Rust's derive does.
+                            let terms = Self::cpp_inherit_field_member_names(s, &named_field_cpp_names)
+                                .into_iter()
+                                .map(|m| format!("this->{m} == other.{m}", m = m))
+                                .collect::<Vec<_>>();
+                            let body = if terms.is_empty() { "true".to_string() } else { terms.join(" && ") };
+                            self.writeln(&format!(
+                                "bool operator==(const {}& other) const {{ return {}; }}",
+                                name, body
+                            ));
+                        } else {
+                            self.writeln(&format!(
+                                "bool operator==(const {}&) const = default;",
+                                name
+                            ));
+                        }
                         emitted_eq_operator = true;
                     }
                 }
@@ -4026,10 +4102,30 @@ impl CodeGen {
                     // dedup against PartialOrd + Ord both deriving
                     // the same operator.
                     if !emitted_ord_operator {
-                        self.writeln(&format!(
-                            "auto operator<=>(const {}&) const = default;",
-                            name
-                        ));
+                        if cpp_inherit_base.is_some() {
+                            // Phase 0: lexicographic over the fields (std::tie's
+                            // `<=>` synthesizes three-way from `<`/`==` where a
+                            // field has no `<=>`), never over the base.
+                            let members = Self::cpp_inherit_field_member_names(s, &named_field_cpp_names);
+                            if members.is_empty() {
+                                self.writeln(&format!(
+                                    "std::strong_ordering operator<=>(const {}&) const {{ return std::strong_ordering::equal; }}",
+                                    name
+                                ));
+                            } else {
+                                let lhs = members.iter().map(|m| format!("this->{}", m)).collect::<Vec<_>>().join(", ");
+                                let rhs = members.iter().map(|m| format!("other.{}", m)).collect::<Vec<_>>().join(", ");
+                                self.writeln(&format!(
+                                    "auto operator<=>(const {}& other) const {{ return std::tie({}) <=> std::tie({}); }}",
+                                    name, lhs, rhs
+                                ));
+                            }
+                        } else {
+                            self.writeln(&format!(
+                                "auto operator<=>(const {}&) const = default;",
+                                name
+                            ));
+                        }
                         emitted_ord_operator = true;
                     }
                 }
@@ -6009,6 +6105,15 @@ impl CodeGen {
             self.emit_cpp_marker_trait(t);
             return;
         }
+        // Phase 0: `emit_struct` may have hoisted this trait ahead of an
+        // implementor (see `hoisted_trait_interfaces`); the source-order
+        // visit then emits nothing. `visited_trait_keys` is the mark the
+        // hoist consults so a trait visited in source order is not re-emitted.
+        let key = self.nonvtable_trait_key_here(&t.ident.to_string());
+        if self.hoisted_trait_interfaces.contains(&key) {
+            return;
+        }
+        self.visited_trait_keys.insert(key);
         // Interface + Adapter design (replaces Pro facade). See § 3.2.9 of
         // docs/rusty-cpp-transpiler.md.
         self.emit_trait_interface_pattern(t);
@@ -6273,6 +6378,57 @@ impl CodeGen {
         }
     }
 
+    /// A struct's C++ member names in declaration order (`_0, _1` for tuple
+    /// fields), for the member-wise comparisons a `cpp_inherit` implementor
+    /// spells instead of `= default` (phase 0).
+    fn cpp_inherit_field_member_names(
+        s: &syn::ItemStruct,
+        named_field_cpp_names: &HashMap<String, String>,
+    ) -> Vec<String> {
+        match &s.fields {
+            syn::Fields::Named(fields) => fields
+                .named
+                .iter()
+                .filter_map(|field| field.ident.as_ref())
+                .map(|ident| {
+                    let rust_name = ident.to_string();
+                    named_field_cpp_names
+                        .get(&rust_name)
+                        .cloned()
+                        .unwrap_or_else(|| escape_cpp_keyword(&rust_name))
+                })
+                .collect(),
+            syn::Fields::Unnamed(fields) => {
+                (0..fields.unnamed.len()).map(|idx| format!("_{}", idx)).collect()
+            }
+            syn::Fields::Unit => Vec::new(),
+        }
+    }
+
+    /// The interface's special members (book §3.2.2, Core Guidelines C.67):
+    /// `protected` and DEFAULTED, never deleted. A `dyn Trait` is unsized in
+    /// Rust and is only ever reached through a reference or a smart pointer;
+    /// `protected` keeps a base-typed copy or assignment (`Tr& a = x; a = y`,
+    /// slicing) out of reach, while a tier-1 implementor's own copy and move
+    /// stay implicitly defined — a deleted base copy would delete every
+    /// implementor's copy and move (measured §3.2.17).
+    fn emit_interface_protected_special_members(&mut self, trait_name: &str) {
+        self.writeln("protected:");
+        self.indent += 1;
+        self.writeln(&format!("{}() = default;", trait_name));
+        self.writeln(&format!("{}(const {}&) = default;", trait_name, trait_name));
+        self.writeln(&format!(
+            "{}& operator=(const {}&) = default;",
+            trait_name, trait_name
+        ));
+        self.writeln(&format!("{}({}&&) = default;", trait_name, trait_name));
+        self.writeln(&format!(
+            "{}& operator=({}&&) = default;",
+            trait_name, trait_name
+        ));
+        self.indent -= 1;
+    }
+
     pub(super) fn emit_trait_interface_pattern(&mut self, t: &syn::ItemTrait) {
         let trait_name = &t.ident;
         let trait_name_str = trait_name.to_string();
@@ -6296,7 +6452,14 @@ impl CodeGen {
         // This mirrors what the transpiler effectively does for
         // structs (always namespace scope) but driven by the actual
         // `vis` field, which is the Rust idiom.
-        let wrap_in_anon_ns = !Self::visibility_is_any_pub(&t.vis);
+        // Phase 0 (§3.2.16): a non-`pub` trait with a `pub` `cpp_inherit`
+        // implementor stays at namespace scope — an exported class may not
+        // have a TU-local base ([basic.link] exposure, C++23 modules).
+        let has_pub_cpp_inherit_implementor = self
+            .traits_with_pub_cpp_inherit_implementor
+            .contains(&trait_name_str);
+        let wrap_in_anon_ns =
+            !Self::visibility_is_any_pub(&t.vis) && !has_pub_cpp_inherit_implementor;
         // Checkpoint contract 4/10: register the trait so every later phase
         // that synthesizes machinery FOR it (Adapter primary templates, Adapter
         // specializations) puts that machinery in the SAME anonymous namespace.
@@ -6519,21 +6682,8 @@ impl CodeGen {
             self.writeln("public:");
             self.indent += 1;
             self.writeln(&format!("virtual ~{}() noexcept(false) {{}}", trait_name));
-            self.writeln(&format!("{}(const {}&) = delete;", trait_name, trait_name));
-            self.writeln(&format!(
-                "{}& operator=(const {}&) = delete;",
-                trait_name, trait_name
-            ));
-            self.writeln(&format!("{}({}&&) = delete;", trait_name, trait_name));
-            self.writeln(&format!(
-                "{}& operator=({}&&) = delete;",
-                trait_name, trait_name
-            ));
             self.indent -= 1;
-            self.writeln("protected:");
-            self.indent += 1;
-            self.writeln(&format!("{}() = default;", trait_name));
-            self.indent -= 1;
+            self.emit_interface_protected_special_members(&trait_name.to_string());
             self.writeln("};");
             if wrap_in_anon_ns {
                 self.writeln("}");
@@ -7034,27 +7184,11 @@ impl CodeGen {
             });
         }
 
-        // dyn objects are unsized in Rust and must not be stored by value in
-        // C++ either. Force all access through references / smart pointers.
+        self.indent -= 1;
         // Inside a class template the bare name `T` refers to the current
         // instantiation, so no generic-arg suffix is needed on the
-        // copy/move special-member declarations.
-        self.writeln(&format!("{}(const {}&) = delete;", trait_name, trait_name));
-        self.writeln(&format!(
-            "{}& operator=(const {}&) = delete;",
-            trait_name, trait_name
-        ));
-        self.writeln(&format!("{}({}&&) = delete;", trait_name, trait_name));
-        self.writeln(&format!(
-            "{}& operator=({}&&) = delete;",
-            trait_name, trait_name
-        ));
-
-        self.indent -= 1;
-        self.writeln("protected:");
-        self.indent += 1;
-        self.writeln(&format!("{}() = default;", trait_name));
-        self.indent -= 1;
+        // special-member declarations.
+        self.emit_interface_protected_special_members(&trait_name.to_string());
         self.writeln("};");
         // Close the anonymous namespace if we opened one above.
         if wrap_in_anon_ns {

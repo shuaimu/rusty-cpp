@@ -2513,6 +2513,45 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   printed to stderr under `RUSTY_CPP_TIER_CENSUS=1`, one line per pair with the excluding test; the
   driver over the matrix corpus and the 2026-10-08 figures are in §3.2.1 ("What the boundary costs").
   It is phase 1's gate metric; every phase-0 widening is judged against it.
+- *2026-10-08 — phase 0, the emission-only items (one commit, gate-green):* measured on the
+  tier-1 cells of `test_tier1_phase0_emission_cells_clang_runtime` — a clang runtime proof on
+  UNEXPANDED source, because cargo-expand strips the inert `cfg_attr(any(), …)` markers and the
+  parity matrix cannot exercise tier 1 (the `trait_probes_tier1a` crate measured vacuous and was
+  dropped). Seven cells: `copy`, `by_value`, `clone_literal`, `tuple_unit`, `early`, `hidden`,
+  `foreign`; before the change six failed to compile. Landed: (i) the interface's special members are
+  `protected` and **defaulted** (one helper, both class shapes; the §3.2.2 text was already this) —
+  a `Copy` implementor had `call to implicitly-deleted copy constructor` through the deleted base
+  copy; (ii) no synthesized lone move constructor on a `cpp_inherit` implementor; a `Copy`/`Clone`
+  one spells all four defaulted, a non-`Clone` one declares none; (iii) the fieldwise constructor is
+  synthesized for tuple fields too (`Pair(int32_t _0_init, int32_t _1_init) : Named(), …`), a unit
+  struct keeps its implicit default constructor (the base's is protected, reachable from a derived
+  constructor); (iv) `clone()` goes through the fieldwise constructor, never a designated initializer
+  (a struct with a base is no aggregate: `initialization of non-aggregate type 'Owned' with a
+  designated initializer list`); (v) `derive(PartialEq)` / `derive(PartialOrd)` on an implementor are
+  **member-wise** (`this->s == other.s`; `std::tie(…) <=> std::tie(…)`) — a defaulted comparison
+  compares the base subobject too, and its members are protected, so it was implicitly deleted; the
+  interface itself grows no `operator==` (comparing two `dyn Tr` is not a Rust operation); (vi) the
+  interface is hoisted ahead of an implementor that precedes its trait in source order
+  (`emit_struct` emits the trait of ITS module through `emit_trait` and marks it; the source-order
+  visit is then a no-op — `base class has incomplete type` otherwise); (vii) the anonymous-namespace
+  wrap applies only to a non-`pub` trait with no `pub` `cpp_inherit` implementor, at all three sites
+  (definition, forward declaration, the collect-time linkage registry — the forward declaration
+  alone made `reference to 'Hidden' is ambiguous`); (viii) `cpp_inherit` on a self type this crate
+  does not declare, or on a concrete instantiation of a generic local type, is a **diagnosed no-op**
+  (stderr warning; the impl takes the tier-2 lane) — the forwarder over `int32_t` was
+  `member reference base type 'const int' is not a structure or union`; (ix) path syntax on a
+  tier-1 trait is decided per receiver: `Tr::m(&x, …)` lowers as the method call `x.m(…)` at the top
+  of the call lowering (a tier-1 implementor's override IS the member; a foreign receiver reaches the
+  extension route) — the generic owner-has-a-receiver rewrite spelled `(&x)->name()`. Not changed:
+  the synthesized `dyn A + B` combined class keeps deleted special members (nothing inherits from
+  it). Still open in phase 0, in the advisor's order: `&&` slots for by-value `self` with call-site
+  move/copy (the direct calls already pass — `by_value` is green through the shipped const/non-const
+  member — the slot is for the vtable and the tier-2 bridge), then the tier-decision items (the
+  skip-list deciding tier: `Self` parameters, RPITIT, APIT, `-> Self`, async, GAT, `where Self:
+  Sized`; assoc-const traits), then the structural items (multiple/virtual bases, generic defaults
+  as explicit-object members, supertrait-calling defaults). Measured but deferred to phase 1: a
+  tier-1 trait has no `Tr_` namespace in the shipped lane, so `&dyn Tr` over a foreign tier-2
+  implementor cannot reach its impl through the generic forwarder until every trait emits `Tr_`.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
@@ -3029,7 +3068,8 @@ on failure), and the `using namespace Tr_;` deletion waits until every call site
 > with the `is_final` guard of step 7), and the call-site `&dyn` / `&mut dyn` coercion (step 4). The
 > remaining phase-0 list is as written below, less those three.
 
-**Phase 0 — prerequisites in the tier-1 lane** (every item is a measured defect, §3.2.12): multiple and
+**Phase 0 — prerequisites in the tier-1 lane** (every item is a measured defect, §3.2.12; the
+emission-only items landed 2026-10-08, see the §3.2.12 entry of that date): multiple and
 virtual bases; `&&` slots for `self` receivers and move/copy insertion at their call sites; generic
 defaults and their transitive callers as explicit-object members; supertrait-calling defaults kept as
 virtual bodies (and the `operator-` mis-emission); the interface skip-list extended to `Self` in

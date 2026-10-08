@@ -7016,6 +7016,60 @@ impl CodeGen {
         Some(owner)
     }
 
+    /// Phase 0 (book §3.2.16): `Tr::m(&x, a…)` on a `cpp_trait_member_dispatch`
+    /// trait lowers as the method call `x.m(a…)` (see the call site in
+    /// `emit_call_expr_to_string_lowered`). Only a declared receiver method
+    /// of such a trait qualifies; associated functions keep their path form.
+    fn try_emit_member_dispatch_trait_path_call_as_method_call(
+        &self,
+        call: &syn::ExprCall,
+    ) -> Option<String> {
+        let syn::Expr::Path(func_path) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return None;
+        };
+        if func_path.qself.is_some() || func_path.path.segments.len() < 2 || call.args.is_empty() {
+            return None;
+        }
+        let segments: Vec<String> = func_path
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        let owner = &segments[segments.len() - 2];
+        let scoped_owner = segments[..segments.len() - 1].join("::");
+        let is_member_dispatch = self.cpp_trait_member_dispatch_traits.iter().any(|t| {
+            t == owner || t == &scoped_owner || t.rsplit("::").next() == Some(owner.as_str())
+        });
+        if !is_member_dispatch {
+            return None;
+        }
+        let method_name = segments.last()?.clone();
+        if !Self::path_tail_looks_like_method_name(&method_name) {
+            return None;
+        }
+        let has_receiver = self.trait_static_call_has_receiver_for_segments(&segments);
+        if has_receiver == Some(false) {
+            return None;
+        }
+        let first = self.peel_paren_group_expr(&call.args[0]);
+        let receiver: syn::Expr = match first {
+            syn::Expr::Reference(r) => r.expr.as_ref().clone(),
+            other if has_receiver == Some(true) => other.clone(),
+            _ => return None,
+        };
+        let method_call = syn::ExprMethodCall {
+            attrs: Vec::new(),
+            receiver: Box::new(receiver),
+            dot_token: Default::default(),
+            method: syn::Ident::new(&method_name, func_path.path.segments.last()?.ident.span()),
+            turbofish: None,
+            paren_token: Default::default(),
+            args: call.args.iter().skip(1).cloned().collect(),
+        };
+        Some(self.emit_expr_to_string(&syn::Expr::MethodCall(method_call)))
+    }
+
     fn try_emit_default_body_self_trait_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
         let trait_name = self.ufcs_default_body_trait.as_ref()?;
         if mc.turbofish.is_some() {
@@ -19304,6 +19358,11 @@ impl CodeGen {
         if let Some(constructed) = self.try_emit_cpp_ctor_direct_construction(call) {
             return constructed;
         }
+        // Book §3.2.16 phase 0: `Tr::m(&x, …)` on a tier-1 trait is the method
+        // call `x.m(…)` (see try_emit_member_dispatch_trait_path_call_as_method_call).
+        if let Some(lowered) = self.try_emit_member_dispatch_trait_path_call_as_method_call(call) {
+            return lowered;
+        }
         // `Box<dyn FnMut(..)>` already maps to rusty::Function. Construct that
         // erased owner directly from its closure instead of first allocating a
         // Box<std::function<..>> and then wrapping the Box as another callable.
@@ -20751,6 +20810,19 @@ impl CodeGen {
                 }
             }
         }
+
+        // Book §3.2.16 phase 0: path syntax is decided per (trait, declared
+        // receiver), not per trait. For a tier-1 (`cpp_trait_member_dispatch`)
+        // trait, `Tr::m(&x, …)` / `Tr::m(x, …)` IS the method call `x.m(…)` —
+        // a tier-1 implementor's override is the member, and a tier-2
+        // implementor (a foreign self type, whose `cpp_inherit` was a diagnosed
+        // no-op) is reached through the method call's extension route. The
+        // generic rewrites below would spell a raw member call on the
+        // reference (`(&x)->m()`), which no primitive has, or the C++
+        // qualified call `x.Tr::m()`, which suppresses virtual dispatch
+        // (measured §3.2.17).
+        // (the route itself runs at the top of this function — an earlier
+        // rewrite would otherwise claim the call first)
 
         // Phase 18 Blocker 2 (leaf 2): Rewrite UFCS trait-method calls from:
         // `Trait::method(&receiver, args...)` to `receiver.method(args...)`.
