@@ -6360,6 +6360,30 @@ impl CodeGen {
             ));
             self.skipped_interface_traits
                 .insert(trait_name.to_string());
+            // Book §3.2.2 non-vtable members (step 8): the trait's `<Tr>Traits`
+            // map — its assoc types, consts and no-receiver fns — exists for an
+            // assoc-const trait too; generic code reads `T::K` / `T::new(..)`
+            // through it, and the runtime helper's statics below name it, so it
+            // precedes them (the interface stays skipped: such a trait is not
+            // `dyn`-compatible in Rust either).
+            let cls_export = if self.should_export_item(&t.vis, &trait_name_str) {
+                "export "
+            } else {
+                ""
+            };
+            let assoc_names: Vec<String> = t
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    syn::TraitItem::Type(a) => Some(a.ident.to_string()),
+                    _ => None,
+                })
+                .collect();
+            if !assoc_names.is_empty() {
+                self.trait_associated_type_names
+                    .insert(trait_name_str.clone(), assoc_names.clone());
+            }
+            self.emit_trait_assoc_traits_maps(trait_name, &assoc_names, cls_export);
             // Fall back to the Pro-path module-mode helper so callers like
             // `Trait::method(self, ...)` still resolve to the trait's
             // default-body static. Without this, the UFCS-trait-call
@@ -6387,6 +6411,7 @@ impl CodeGen {
                     ));
                 }
             }
+            self.emit_nonvtable_traits_map_for_skipped_trait(t);
             return;
         }
 
@@ -6547,6 +6572,8 @@ impl CodeGen {
                 self.emit_trait_assoc_traits_maps(trait_name, &marker_assoc_names, &cls_export);
                 self.writeln("");
             }
+            // Step 8: the map precedes the helper (its statics name it).
+            self.emit_nonvtable_traits_map_for_skipped_trait(t);
             // Module-mode static helper for qualified UFCS calls — see the
             // same call below for the substantive comment.
             if self.emit_module_mode_trait_runtime_helper(t) {
@@ -7098,6 +7125,34 @@ impl CodeGen {
         let _ = trait_generic_arglist;
     }
 
+    /// Step 8: a trait the interface emitter skips (assoc consts, every method
+    /// non-virtual, …) still gets its `<Tr>Traits` map when it has non-vtable
+    /// members — generic code reads `T::K` / `T::new(..)` through it.
+    pub(super) fn emit_nonvtable_traits_map_for_skipped_trait(&mut self, t: &syn::ItemTrait) {
+        let trait_name_str = t.ident.to_string();
+        if !self.trait_has_nonvtable_members(&trait_name_str) {
+            return;
+        }
+        let cls_export = if self.should_export_item(&t.vis, &trait_name_str) {
+            "export "
+        } else {
+            ""
+        };
+        let assoc_names: Vec<String> = t
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                syn::TraitItem::Type(a) => Some(a.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        if !assoc_names.is_empty() && !self.trait_associated_type_names.contains_key(&trait_name_str) {
+            self.trait_associated_type_names
+                .insert(trait_name_str.clone(), assoc_names.clone());
+        }
+        self.emit_trait_assoc_traits_maps(&t.ident, &assoc_names, cls_export);
+    }
+
     /// Emit a trait's associated-type helper maps: the `<Tr>Traits` primary,
     /// its pointer/reference forwarding specialisations, and the per-arity
     /// tuple specialisations.
@@ -7114,7 +7169,20 @@ impl CodeGen {
         trait_assoc_type_names: &[String],
         cls_export: &str,
     ) {
-        if !trait_assoc_type_names.is_empty() {
+        let trait_short = trait_name.to_string();
+        let has_nonvtable = self.trait_has_nonvtable_members(&trait_short);
+        // Step 8: a map forward-declared in the early marker pass keeps that
+        // declaration's export (an exported redeclaration of a non-exported
+        // entity is ill-formed), and a map is defined at most once.
+        let cls_export: String = match self.traits_map_forward_export.get(&trait_short) {
+            Some(e) => e.clone(),
+            None => cls_export.to_string(),
+        };
+        let cls_export: &str = cls_export.as_str();
+        if has_nonvtable && !self.traits_map_defined.insert(trait_short.clone()) {
+            return;
+        }
+        if !trait_assoc_type_names.is_empty() || has_nonvtable {
             // Primary template: default each associated type to the nested
             // typedef on the impl type B (`typename B::Assoc`). A concrete impl
             // that materializes its assoc types as nested members — e.g.
@@ -7137,6 +7205,9 @@ impl CodeGen {
             for name in trait_assoc_type_names {
                 primary.push_str(&format!("using {0} = typename B::{0}; ", name));
             }
+            // Step 8: consts and no-receiver fns — the self type's own static
+            // member first, the keyed CPO otherwise.
+            primary.push_str(&self.nonvtable_traits_members(&trait_short, "B", None));
             primary.push_str("};");
             self.writeln(&primary);
             // STEP B (task #39): reference/pointer forwarding partial specs —
@@ -7158,6 +7229,11 @@ impl CodeGen {
                         name, trait_name
                     ));
                 }
+                spec.push_str(&self.nonvtable_traits_members(
+                    &trait_short,
+                    "S",
+                    Some(&format!("{}Traits<S>", trait_name)),
+                ));
                 spec.push_str("};");
                 self.writeln(&spec);
             }
@@ -7191,6 +7267,11 @@ impl CodeGen {
                         cpp
                     ));
                 }
+                spec.push_str(&self.nonvtable_traits_members(
+                    &trait_short,
+                    &format!("std::tuple<{}>", tuple_args),
+                    None,
+                ));
                 spec.push_str("};");
                 self.writeln(&spec);
                 self.pop_type_param_scope();

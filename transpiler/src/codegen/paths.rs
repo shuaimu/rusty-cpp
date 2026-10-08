@@ -3280,6 +3280,14 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
         let owner = path.segments[0].ident.to_string();
         let const_name = path.segments[1].ident.to_string();
+        // Book §3.2.2 non-vtable members (step 8): a crate trait's const on a
+        // type-parameter owner (or on `Self` in a default template) reads
+        // through the `<Tr>Traits<T>` map — the implementor's own value, not
+        // the trait default inlined (`impl Shape for i32 { const TAG = "int" }`
+        // read as "shape" was silent-wrong).
+        if let Some(rendered) = self.try_emit_trait_assoc_const_via_traits(&owner, &const_name) {
+            return Some(rendered);
+        }
         let (body, _trait) = self.trait_default_const_exprs.get(&const_name)?;
         // Only for an owner that cannot define the member itself: a generic type
         // parameter in scope, or `Self`. A concrete type keeps the normal
@@ -3299,6 +3307,41 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             rewriter.visit_expr_mut(&mut substituted);
         }
         Some(format!("({})", self.emit_expr_to_string(&substituted)))
+    }
+
+    /// Step 8: `Owner::NAME` for an associated const of a crate trait, where
+    /// `Owner` is a type parameter in scope or `Self` inside a `Self_`-templated
+    /// body — `<Tr>Traits<Owner>::NAME()`.
+    pub(super) fn try_emit_trait_assoc_const_via_traits(&self, owner: &str, name: &str) -> Option<String> {
+        let owner_cpp = if owner == "Self" {
+            if self.ufcs_template_self_body || self.current_struct.as_deref() == Some("Self_") {
+                "Self_".to_string()
+            } else {
+                return None;
+            }
+        } else if self.is_type_param_in_scope(owner) {
+            escape_cpp_keyword(owner)
+        } else {
+            return None;
+        };
+        let trait_short = self.nonvtable_owner_trait(owner, name, true)?;
+        // A universally blanket-implemented trait (`impl<T> Tr for T {}`) never
+        // overrides a defaulted const, so the default body inlined with the
+        // owner substituted (the shipped lowering, below) is exact and stays
+        // a constant expression — hashbrown's `T::NEEDS_DROP`.
+        let has_default = self
+            .trait_nonvtable_consts
+            .get(&trait_short)
+            .is_some_and(|v| v.iter().any(|(n, _, d)| n == name && d.is_some()));
+        if has_default && self.ufcs_universal_blanket_traits.contains(&trait_short) {
+            return None;
+        }
+        Some(format!(
+            "{}<{}>::{}()",
+            self.nonvtable_traits_map_spelling(&trait_short),
+            owner_cpp,
+            escape_cpp_keyword(name)
+        ))
     }
 
     pub(super) fn emit_expr_path_to_string(&self, path: &syn::Path) -> String {

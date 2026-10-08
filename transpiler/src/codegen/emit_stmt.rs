@@ -121,6 +121,8 @@ impl CodeGen {
                     .zip(trait_args[tail_start..].iter())
                     .map(|(n, t)| (n.clone(), t.clone()))
                     .collect();
+                let prev_block_scope = self.traits_spec_at_block_scope;
+                self.traits_spec_at_block_scope = true;
                 self.emit_assoc_type_helper_spec(
                     trait_name,
                     &qualified_self_cpp,
@@ -128,6 +130,7 @@ impl CodeGen {
                     &[],
                     &[],
                 );
+                self.traits_spec_at_block_scope = prev_block_scope;
             }
             if anon_adapter {
                 self.writeln("}");

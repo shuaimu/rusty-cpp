@@ -10567,7 +10567,10 @@ fn test_leaf415433_module_mode_trait_default_method_self_const_uses_self_alias()
     );
     assert!(out.contains("struct CapRuntimeHelper {"));
     assert!(out.contains("using Self_ = std::remove_cvref_t<decltype(self_)>;"));
-    assert!(out.contains("Self_::CAPACITY"));
+    // Step 8 (book §3.2.2 non-vtable members): `Self::CAPACITY` in a default
+    // body reads through the trait's map — the implementor's static member
+    // when it has one, the keyed `impl_` function otherwise.
+    assert!(out.contains("CapTraits<Self_>::CAPACITY()"), "{out}");
     assert!(out.contains("rusty::len(self_)"));
 }
 
@@ -40422,9 +40425,16 @@ fn test_leaf105409_recursive_bitflags_forwarders_are_skipped() {
         !out.contains("return (*this).bits();"),
         "recursive bits forwarder should be skipped\nGot: {out}"
     );
+    // Step 8 (book §3.2.2 non-vtable members): the trait impl's no-receiver
+    // fn is ALSO a keyed `impl_` free function whose body forwards to the
+    // (synthetic, non-recursive) member — that one forwarding site is not the
+    // member-level recursion this test guards.
+    let keyed_impl_fn = out
+        .contains("from_bits_retain(FlagLike_::impl_::tag, rusty::self_tag<Flags>, uint8_t bits)");
+    let forwarding_sites = out.matches("return Flags::from_bits_retain(").count();
     assert!(
-        !out.contains("return Flags::from_bits_retain("),
-        "recursive from_bits_retain forwarder should be skipped\nGot: {out}"
+        forwarding_sites == usize::from(keyed_impl_fn),
+        "recursive from_bits_retain forwarder should be skipped (only the keyed impl_ function may forward to the member)\nGot: {out}"
     );
     assert!(
         !out.contains("std::declval<Flags>()._0"),
@@ -48833,4 +48843,97 @@ fn test_ufcs_trait_namespace_is_a_dispatcher_over_tagged_impl_functions() {
         "the default template takes the tag as parameter 0:\n{out}"
     );
     assert!(out.contains("Speak_::speak(") && out.contains("Speak_::twice("), "{out}");
+}
+
+#[test]
+fn test_ufcs_step8_non_vtable_members_through_traits_map() {
+    // Book §3.2.2 "non-vtable members" (phase-2 step 8): an associated const
+    // and a no-receiver fn are keyed `impl_` functions (`rusty::self_tag<Self>`
+    // in the receiver's place), the trait's `<Tr>Traits<B>` map forwards to
+    // the self type's own static member first and to the keyed CPO otherwise,
+    // and every type-parameter / `Self` / `<X as Tr>` use reads through it.
+    let out = transpile_str(
+        r#"
+        trait Shape {
+            const SIDES: u32;
+            const TAG: &'static str = "shape";
+            fn new(x: i32) -> Self;
+            fn unit() -> Self where Self: Sized { Self::new(1) }
+            fn area(&self) -> i32;
+            fn label(&self) -> String { format!("{}:{}", Self::TAG, Self::SIDES) }
+        }
+        struct Sq { s: i32 }
+        impl Shape for Sq {
+            const SIDES: u32 = 4;
+            fn new(x: i32) -> Self { Sq { s: x } }
+            fn area(&self) -> i32 { self.s * self.s }
+        }
+        impl Shape for i32 {
+            const SIDES: u32 = 1;
+            const TAG: &'static str = "int";
+            fn new(x: i32) -> Self { x }
+            fn area(&self) -> i32 { *self + 100 }
+        }
+        fn make<T: Shape>(x: i32) -> (T, u32) { (T::new(x), T::SIDES) }
+        fn tag_of<T: Shape>() -> &'static str { T::TAG }
+        fn unit_area<T: Shape>() -> i32 { T::unit().area() }
+        fn explicit() -> u32 { <i32 as Shape>::SIDES + <i32 as Shape>::new(7) as u32 }
+        "#,
+    );
+    // Impl functions: the key in the receiver's place; a literal const is constexpr.
+    assert!(
+        out.contains("constexpr uint32_t SIDES(Shape_::impl_::tag, rusty::self_tag<int32_t>)"),
+        "assoc const as a keyed constexpr impl function: {out}"
+    );
+    assert!(
+        out.contains("int32_t new_(Shape_::impl_::tag, rusty::self_tag<int32_t>, int32_t x)"),
+        "no-receiver fn keyed by self_tag: {out}"
+    );
+    assert!(
+        out.contains("constexpr uint32_t SIDES(Shape_::impl_::tag, rusty::self_tag<Sq>)"),
+        "the local struct's const is an impl function too: {out}"
+    );
+    // Defaults: `Self_`-templates keyed the same way, bodies through the map.
+    assert!(
+        out.contains("Self_ unit(Shape_::impl_::tag, rusty::self_tag<Self_>)")
+            && out.contains("ShapeTraits<Self_>::new_(1)"),
+        "default no-receiver fn as a keyed Self_ template reading Self::new through the map: {out}"
+    );
+    assert!(
+        out.contains("std::string_view TAG(Shape_::impl_::tag, rusty::self_tag<Self_>)"),
+        "defaulted const as a keyed Self_ template: {out}"
+    );
+    assert!(
+        out.contains("ShapeTraits<Self_>::TAG()") && out.contains("ShapeTraits<Self_>::SIDES()"),
+        "`Self::TAG` / `Self::SIDES` in a default body read the implementor's value: {out}"
+    );
+    // The map: member first, keyed CPO otherwise; every item has a dispatcher.
+    assert!(
+        out.contains("template <class B> struct ShapeTraits {")
+            && out.contains("template<class B_ = B> static constexpr decltype(auto) SIDES() { if constexpr (requires { B_::SIDES; }) { return B_::SIDES; } else { return Shape_::SIDES(rusty::self_tag<B_>{}); } }")
+            && out.contains("else { return Shape_::new_(rusty::self_tag<B_>{}, std::forward<A>(a)...); }"),
+        "Traits map forwarders: {out}"
+    );
+    assert!(
+        out.contains("void SIDES(impl_::adl_enabler_);") && out.contains("void TAG(impl_::adl_enabler_);"),
+        "a dispatcher per const: {out}"
+    );
+    assert!(
+        out.contains("template <class S> struct ShapeTraits<S&> { static constexpr decltype(auto) SIDES() { return ShapeTraits<S>::SIDES(); }"),
+        "reference specialization forwards: {out}"
+    );
+    // Call sites.
+    assert!(
+        out.contains("ShapeTraits<T>::new_(std::move(x)), ShapeTraits<T>::SIDES()"),
+        "`T::new(x)` / `T::SIDES` through the map: {out}"
+    );
+    assert!(out.contains("ShapeTraits<T>::TAG()"), "`T::TAG` is the implementor's, not the default: {out}");
+    assert!(!out.contains("rusty::to_string_view((\"shape\"))") || !out.contains("tag_of"), "the default must not be inlined for a type-param owner: {out}");
+    assert!(out.contains("ShapeTraits<T>::unit()"), "`T::unit()` (a default) through the map: {out}");
+    assert!(
+        out.contains("ShapeTraits<int32_t>::SIDES()") && out.contains("ShapeTraits<int32_t>::new_(7)"),
+        "`<i32 as Shape>::SIDES` / `::new(7)`: {out}"
+    );
+    // A concrete local owner keeps its member.
+    assert!(!out.contains("ShapeTraits<Sq>::SIDES()"), "a concrete owner is not routed: {out}");
 }

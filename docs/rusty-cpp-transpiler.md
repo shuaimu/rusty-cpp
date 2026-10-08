@@ -2361,6 +2361,43 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   `T::new(x)` / `T::SIDES` on the same bound with `T = i32` is `type 'int' cannot be used prior to
   '::'` — the step-(8) cell (`TrTraits<T>::new_()`, `TrTraits<T>::SIDES`); a local struct passes
   through its static members.
+- *2026-10-07 — step (8), the non-vtable members:* an associated const and a no-receiver associated
+  function (`fn new(x) -> Self`) are impl functions in the `impl_` lane like any method, with
+  **`rusty::self_tag<Self>` in the receiver's place** (never defaulted — it is the deduction source;
+  an assoc const is a nullary function, `constexpr` when its initializer is a literal); the trait's
+  defaults (`fn unit() -> Self`, `const TAG = "shape"`) are `Self_`-templates keyed the same way, and
+  an assoc-const trait now gets default templates (its runtime-helper struct stays beside them; the
+  interface stays skipped — such a trait is not `dyn`-compatible in Rust either). The trait's
+  **`<Tr>Traits<B>` map** — emitted for any trait with assoc types, consts or no-receiver fns, and
+  *before* the runtime helper whose statics name it — carries one lazy forwarder per item: the self
+  type's own static member first (a local struct; a consumer-crate implementor emitted as members
+  only), the keyed CPO otherwise (`Tr_::NAME(rusty::self_tag<B>{})`, `Tr_::new_(rusty::self_tag<B>{},
+  x)`); the `S*` / `S&` specializations forward to `<Tr>Traits<S>`, the tuple and per-impl
+  specializations re-state the forwarders; a dispatcher exists per const name. **Call sites:** `T::NAME`
+  → `<Tr>Traits<T>::NAME()`; `T::f(args)`, `Self::f(args)` in a `Self_` body, `<X as Tr>::f(args)`, and
+  `Tr::f(args)` with the self type from the expected type (a `-> Self` fn) → `<Tr>Traits<Owner>::f(args)`;
+  the trait is the owner's bound (or a supertrait of it), the default body's own trait for `Self`,
+  else the unique crate trait declaring the name; a concrete local owner keeps its static member.
+  Found on the way: a type-parameter read of a *defaulted* const inlined the trait default
+  (`tag_of::<i32>()` = "shape" where `impl Shape for i32 { const TAG = "int" }`) — silent-wrong, now
+  the implementor's value. Two shapes measured on serde_core: a probe inside an *explicit*
+  specialization names a concrete self type (`int8_t::NAME` is a hard error, not a false
+  requirement), so every probe is dependent through a defaulted template parameter (`template<class
+  B_ = B>`); and a block-scope specialization (an impl inside a function body) carries no forwarders —
+  a local class cannot hold member templates. serde's `Deserialize::deserialize` /
+  `deserialize_in_place` keep the shipped skip in the impl lane and their `::de::rusty_ext::` route
+  at call sites: the primitive impls are the hand-written runtime, and the transpiled bodies hold
+  local visitor classes with member templates that no free function can carry. A no-receiver
+  *default* of a nested-module trait gets the defaults' Fix B: it is declared and defined in the
+  module's helper namespace `<mod>::__ufcs_<Tr>_defaults` — where its body and signature's
+  module-relative names resolve (`de::Error::unknown_variant` builds `OneOf`, takes `&dyn
+  Expected`) — and bridged into `<Tr>_::impl_` with an (exported) using-declaration, which tag-ADL
+  finds like any other overload; receiver defaults keep the flat `<Tr>_::impl_` shape. Oracle:
+  `trait_probes_nonvtable` (new; six cells, all on a primitive
+  implementor through a bound or the explicit `<i32 as Shape>::` forms) 6/6; thin/defaults/scoping/
+  collapse unchanged. Not covered: a generic trait's consts and no-receiver fns (no `rusty::tag<A…>`
+  key on the Traits forwarders yet — `TraitsG` is the home, §3.2.8) and dependency-crate traits (the
+  registries are per crate; the manifest gains them with its tier-1 fields, §3.2.16 phase 1).
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

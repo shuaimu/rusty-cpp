@@ -38,6 +38,10 @@ declare -a MATRIX_CRATES=(
     "trait_probes_defaults"
     "trait_probes_collapse"
     "trait_probes_scoping"
+    # trait_probes_nonvtable: §3.2.2 non-vtable members (assoc consts,
+    # no-receiver fns, -> Self, generic required methods) through a bounded
+    # type parameter on a PRIMITIVE implementor — step (8)'s oracle.
+    "trait_probes_nonvtable"
     # alloc: the CONSOLIDATED stdlib module — Rust's `alloc` crate
     # (vec + raw_vec + collections/vec_deque) emitted as ONE C++20 module via
     # --expand, dissolving the Vec<->VecDeque cycle stubs and the per-port

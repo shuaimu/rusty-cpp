@@ -68,6 +68,16 @@ pub(crate) struct ExtensionImplMethod {
     /// trailing `rusty::tag<…>` key (book §3.2.2 rule 7). Empty for a trait
     /// default and for a non-generic trait.
     trait_args: Vec<syn::Type>,
+    /// Book §3.2.2 "non-vtable members" (phase-2 step 8): a no-receiver
+    /// associated function (`fn new(x: i32) -> Self`) or an associated const
+    /// (synthesized as a nullary `fn NAME() -> T { EXPR }`). Emitted in the
+    /// `impl_` lane keyed by `rusty::self_tag<Self>` in the receiver's place —
+    /// the only deduction source without a receiver — and reached through the
+    /// trait's `<Tr>Traits<T>` map (`<Tr>Traits<T>::new_(x)`, `::NAME()`).
+    no_receiver: bool,
+    /// The spec is an associated const (see `no_receiver`); its synthesized
+    /// body is the const's initializer.
+    is_assoc_const: bool,
 }
 
 /// One crate-local `impl<G…> From<SRC> for S<TARG>` shape, kept in Rust-type
@@ -2098,6 +2108,24 @@ pub struct CodeGen {
     /// `T::NEEDS_DROP` → `rusty::mem::needs_drop<T>()`. Avoids the unsupported
     /// associated-const-trait emission for the blanket-impl-default case.
     pub(crate) trait_default_const_exprs: HashMap<String, (syn::Expr, String)>,
+    /// Book §3.2.2 "non-vtable members" (phase-2 step 8): per trait — keyed by
+    /// its short name AND its module-scoped path — the associated consts it
+    /// declares as `(name, type, default initializer)` …
+    pub(crate) trait_nonvtable_consts: HashMap<String, Vec<(String, syn::Type, Option<syn::Expr>)>>,
+    /// … and its no-receiver associated functions as `(name, has_default,
+    /// returns_self)`. Both feed the `<Tr>Traits<T>` forwarders, the keyed
+    /// `impl_` functions and the `T::NAME` / `T::f(..)` call-site routes.
+    pub(crate) trait_nonvtable_fns: HashMap<String, Vec<(String, bool, bool)>>,
+    /// Step 8: traits whose `<Tr>Traits` map was forward-declared in the early
+    /// marker pass (hoisted generic code names it before the trait's own
+    /// position) → the export prefix that declaration used.
+    pub(crate) traits_map_forward_export: HashMap<String, String>,
+    /// Step 8: traits whose `<Tr>Traits` map definition has been emitted.
+    pub(crate) traits_map_defined: HashSet<String>,
+    /// Step 8: set while a `<Tr>Traits` specialization is emitted at BLOCK scope
+    /// (an impl inside a function body): a local class cannot hold member
+    /// templates, so such a specialization carries no forwarders.
+    pub(crate) traits_spec_at_block_scope: bool,
     /// INNER enclosing-namespace segments of the UFCS helper currently being
     /// emitted (`segments[1..]` of `<segments>::__ufcs_<Tr>`). A free function's
     /// SIGNATURE (return/param types) that names a top-level module matching one of
@@ -3641,6 +3669,11 @@ impl CodeGen {
             callable_type_param_arg_scopes: Vec::new(),
             trait_static_default_methods: HashMap::new(),
             trait_default_const_exprs: HashMap::new(),
+            trait_nonvtable_consts: HashMap::new(),
+            trait_nonvtable_fns: HashMap::new(),
+            traits_map_forward_export: HashMap::new(),
+            traits_map_defined: HashSet::new(),
+            traits_spec_at_block_scope: false,
             ufcs_helper_shadowing_segments: Vec::new(),
             trait_declared_paths: HashSet::new(),
             internal_linkage_traits: HashSet::new(),
@@ -21181,6 +21214,25 @@ impl CodeGen {
         )
     }
 
+    /// Step 8: no-receiver functions with a DEDICATED lowering keep the shipped
+    /// skip in the impl lane and the shipped call-site route: serde's
+    /// `Deserialize::deserialize` / `deserialize_in_place` — their primitive
+    /// impls are the hand-written `de::impls::rusty_ext` runtime, and their
+    /// transpiled bodies hold local visitor classes with member templates,
+    /// which a free function cannot carry.
+    pub(super) fn nonvtable_fn_has_dedicated_lowering(name: &str) -> bool {
+        matches!(name, "deserialize" | "deserialize_in_place")
+    }
+
+    /// Step 8: an associated const as a nullary function `fn NAME() -> T { EXPR }`
+    /// so it rides the impl-function lane (keyed, bridged, deduped) unchanged;
+    /// the emitters spell it `constexpr` when the initializer is a literal.
+    fn synthesize_assoc_const_fn(ident: &syn::Ident, ty: &syn::Type, expr: &syn::Expr) -> syn::ImplItemFn {
+        syn::parse_quote! {
+            fn #ident() -> #ty { #expr }
+        }
+    }
+
     fn ufcs_trait_impl_specs(
         impl_block: &syn::ItemImpl,
         trait_default_methods: &std::collections::BTreeMap<String, Vec<String>>,
@@ -21220,12 +21272,29 @@ impl CodeGen {
 
         let mut specs: Vec<ExtensionImplMethod> = Vec::new();
         for impl_item in &impl_block.items {
-            let syn::ImplItem::Fn(method) = impl_item else {
-                continue;
-            };
-            if !matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
-                continue;
-            }
+            // Book §3.2.2 non-vtable members (step 8): a no-receiver fn and an
+            // associated const (as a nullary fn) are impl functions like any
+            // other, keyed by `rusty::self_tag<Self>` (see the emitters).
+            let (method_owned, no_receiver, is_assoc_const): (syn::ImplItemFn, bool, bool) =
+                match impl_item {
+                    syn::ImplItem::Fn(method) => {
+                        let has_receiver =
+                            matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_)));
+                        if !has_receiver
+                            && Self::nonvtable_fn_has_dedicated_lowering(&method.sig.ident.to_string())
+                        {
+                            continue;
+                        }
+                        (method.clone(), !has_receiver, false)
+                    }
+                    syn::ImplItem::Const(c) => (
+                        Self::synthesize_assoc_const_fn(&c.ident, &c.ty, &c.expr),
+                        true,
+                        true,
+                    ),
+                    _ => continue,
+                };
+            let method = &method_owned;
             if blanket_forwarding
                 && blanket_default_methods
                     .iter()
@@ -21256,6 +21325,8 @@ impl CodeGen {
                 impl_generics: Some(impl_block.generics.clone()),
                 impl_module_path: module_path.to_vec(),
                 trait_args: trait_type_args.clone(),
+                no_receiver,
+                is_assoc_const,
             });
         }
         if specs.is_empty() {
@@ -21838,6 +21909,24 @@ impl CodeGen {
                 "{}template<class U> concept has_{} = impls_{}<std::remove_cvref_t<U>>::value;",
                 export, cpp, cpp
             ));
+            // Step 8: forward-declare the `<Tr>Traits` map here, in the trait's
+            // module namespace — generic code hoisted ahead of the trait's own
+            // position names it (`<Tr>Traits<A>::size()`); the definition
+            // later reuses this export.
+            if self.trait_has_nonvtable_members(&name) {
+                let spelled = self.nonvtable_traits_map_spelling(&name);
+                let (ns, map_name) = match spelled.rsplit_once("::") {
+                    Some((ns, last)) => (Some(ns.to_string()), last.to_string()),
+                    None => (None, spelled.clone()),
+                };
+                let decl = format!("{}template<class B> struct {};", export, map_name);
+                match ns {
+                    Some(ns) => self.writeln(&format!("namespace {} {{ {} }}", ns, decl)),
+                    None => self.writeln(&decl),
+                }
+                self.traits_map_forward_export
+                    .insert(name.clone(), export.to_string());
+            }
             // Book §3.2.2 rules 1-3: the trait namespace holds the tag anchor
             // and ONE dispatcher per method — a function template whose
             // unqualified inner call does tag-ADL at the point of
@@ -21858,6 +21947,15 @@ impl CodeGen {
             for (method, owners) in &self.ufcs_method_trait_owners {
                 if owners.contains(&name) && !methods.contains(method) {
                     methods.push(method.clone());
+                }
+            }
+            // Step 8: an associated const is reached through a dispatcher too
+            // (`Tr_::NAME(rusty::self_tag<T>{})` from the Traits map).
+            if let Some(consts) = self.trait_nonvtable_consts.get(&name) {
+                for (c, _, _) in consts {
+                    if !methods.contains(c) {
+                        methods.push(c.clone());
+                    }
                 }
             }
             methods.sort();
@@ -22284,6 +22382,12 @@ impl CodeGen {
         ));
     }
 
+    /// Step 8: the per-module helper namespace of a nested-module trait's
+    /// no-receiver DEFAULT templates (the defaults' Fix B).
+    fn ufcs_default_helper_namespace_name(trait_name: &str) -> String {
+        format!("__ufcs_{}_defaults", escape_cpp_keyword(trait_name))
+    }
+
     fn ufcs_impl_helper_namespace_name(trait_name: &str) -> String {
         format!("__ufcs_{}", trait_name)
     }
@@ -22318,9 +22422,8 @@ impl CodeGen {
     /// function in `<Tr>_`. `None` for assoc-const (runtime-helper) traits or
     /// traits with no default methods.
     fn ufcs_trait_default_specs(t: &syn::ItemTrait) -> Option<(String, Vec<ExtensionImplMethod>)> {
-        if t.items.iter().any(|i| matches!(i, syn::TraitItem::Const(_))) {
-            return None;
-        }
+        // Step 8: an assoc-const trait's defaults are namespace templates like
+        // any other (§3.2.13); the runtime-helper struct stays beside them.
         let trait_name = t.ident.to_string();
         let impl_generic_names: Vec<String> = t
             .generics
@@ -22333,17 +22436,35 @@ impl CodeGen {
             .collect();
         let mut specs: Vec<ExtensionImplMethod> = Vec::new();
         for item in &t.items {
-            let syn::TraitItem::Fn(m) = item else { continue };
-            let Some(block) = &m.default else { continue }; // default-bodied only
-            if !matches!(m.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
-                continue;
-            }
-            let method = syn::ImplItemFn {
-                attrs: m.attrs.clone(),
-                vis: syn::Visibility::Inherited,
-                defaultness: None,
-                sig: m.sig.clone(),
-                block: block.clone(),
+            // Step 8: a default no-receiver fn and a defaulted assoc const are
+            // `Self_`-templates keyed by `rusty::self_tag<Self_>`.
+            let (method, no_receiver, is_assoc_const): (syn::ImplItemFn, bool, bool) = match item {
+                syn::TraitItem::Fn(m) => {
+                    let Some(block) = &m.default else { continue }; // default-bodied only
+                    let has_receiver =
+                        matches!(m.sig.inputs.first(), Some(syn::FnArg::Receiver(_)));
+                    if !has_receiver
+                        && Self::nonvtable_fn_has_dedicated_lowering(&m.sig.ident.to_string())
+                    {
+                        continue;
+                    }
+                    (
+                        syn::ImplItemFn {
+                            attrs: m.attrs.clone(),
+                            vis: syn::Visibility::Inherited,
+                            defaultness: None,
+                            sig: m.sig.clone(),
+                            block: block.clone(),
+                        },
+                        !has_receiver,
+                        false,
+                    )
+                }
+                syn::TraitItem::Const(c) => {
+                    let Some((_, default_expr)) = &c.default else { continue };
+                    (Self::synthesize_assoc_const_fn(&c.ident, &c.ty, default_expr), true, true)
+                }
+                _ => continue,
             };
             let callable_param_metadata = Self::collect_callable_param_bound_metadata_from_generics(
                 &method.sig.generics,
@@ -22361,6 +22482,8 @@ impl CodeGen {
                 impl_generics: None,
                 impl_module_path: Vec::new(),
                 trait_args: Vec::new(),
+                no_receiver,
+                is_assoc_const,
             });
         }
         if specs.is_empty() {
@@ -22447,8 +22570,15 @@ impl CodeGen {
                         "// UFCS trait migration: default methods for trait `{}`",
                         trait_name
                     ));
-                    self.writeln(&format!("namespace {}_::impl_ {{", trait_name));
-                    self.indent += 1;
+                    // Step 8: a NO-receiver default of a nested-module trait is
+                    // defined in the module's helper namespace (Fix B: its body
+                    // and signature name module-relative entities — serde's
+                    // `de::Error::unknown_variant` builds `OneOf`, takes `&dyn
+                    // Expected`) and was bridged into `<Tr>_::impl_` by the
+                    // declaration pass; receiver defaults keep the flat shape.
+                    let (nested_specs, flat_specs): (Vec<_>, Vec<_>) = specs
+                        .iter()
+                        .partition(|spec| spec.no_receiver && !module_path.is_empty());
                     // Book §3.2.13 rule 6: while these DEFAULT bodies emit, a
                     // `self.m()` on a method of this trait (or a supertrait)
                     // resolves to the trait's `m`, never member-first
@@ -22456,15 +22586,42 @@ impl CodeGen {
                     self.ufcs_default_body_trait = Some(trait_name.clone());
                     self.ufcs_default_body_module_path = module_path.to_vec();
                     self.ufcs_tag_namespace = Some(format!("{}_", trait_name));
-                    for spec in &specs {
-                        self.emit_extension_trait_free_function(spec);
-                        self.newline();
+                    if !flat_specs.is_empty() {
+                        self.writeln(&format!("namespace {}_::impl_ {{", trait_name));
+                        self.indent += 1;
+                        for spec in &flat_specs {
+                            self.emit_extension_trait_free_function(spec);
+                            self.newline();
+                        }
+                        self.indent -= 1;
+                        self.writeln("}");
+                    }
+                    if !nested_specs.is_empty() {
+                        let helper = Self::ufcs_default_helper_namespace_name(&trait_name);
+                        let segments = self.renamed_module_scope_segments(module_path);
+                        for seg in &segments {
+                            self.writeln(&format!("namespace {} {{", seg));
+                            self.indent += 1;
+                        }
+                        self.writeln(&format!("namespace {} {{", helper));
+                        self.indent += 1;
+                        self.ufcs_helper_shadowing_segments =
+                            segments.iter().skip(1).cloned().collect();
+                        for spec in &nested_specs {
+                            self.emit_extension_trait_free_function(spec);
+                            self.newline();
+                        }
+                        self.ufcs_helper_shadowing_segments.clear();
+                        self.indent -= 1;
+                        self.writeln("}");
+                        for _ in &segments {
+                            self.indent -= 1;
+                            self.writeln("}");
+                        }
                     }
                     self.ufcs_tag_namespace = None;
                     self.ufcs_default_body_trait = None;
                     self.ufcs_default_body_module_path.clear();
-                    self.indent -= 1;
-                    self.writeln("}");
                 }
                 syn::Item::Mod(m) => {
                     // #[cfg(test)] modules are omitted from output; their
@@ -22526,35 +22683,94 @@ impl CodeGen {
                     if specs.is_empty() {
                         continue;
                     }
-                    self.writeln(&format!("namespace {}_::impl_ {{", trait_name));
-                    self.indent += 1;
-                    // Fix A part 2: if this trait has a constrained (multi-owner)
-                    // default, guarantee `<Tr>_::__ufcs_impls` EXISTS even when
-                    // the trait has no concrete impl (hence no per-impl marker) —
-                    // a 0-arg base declaration. Then the default template's
-                    // `requires { <Tr>_::__ufcs_impls(s) }` is SFINAE-FALSE (soft,
-                    // no matching 1-arg overload) instead of a hard "no member
-                    // named __ufcs_impls" error. Per-impl `__ufcs_impls(const X&)`
-                    // overloads (from the impl decls) are the real witnesses.
+                    // Step 8: no-receiver defaults of a nested-module trait are
+                    // declared in the module's helper namespace and bridged into
+                    // `<Tr>_::impl_` (see the definition pass).
+                    let (nested_specs, flat_specs): (Vec<_>, Vec<_>) = specs
+                        .iter()
+                        .partition(|spec| spec.no_receiver && !module_path.is_empty());
                     self.ufcs_tag_namespace = Some(format!("{}_", trait_name));
-                    for spec in &specs {
-                        if self.emit_extension_trait_free_function_declaration(spec) {
-                            let m = spec.method.sig.ident.to_string();
-                            self.ufcs_emitted_trait_methods
-                                .insert((trait_name.clone(), m.clone()));
-                            // Only trait DEFAULT methods carry `Self_`, and this
-                            // decl pass runs before any body — so the map is
-                            // complete by the time a call site is emitted.
-                            if spec.self_is_template_param {
-                                let n = self.extension_bare_prefix_len_for_spec(spec);
-                                self.ufcs_default_method_bare_prefix_len
-                                    .insert(format!("{}::{}", trait_name, m), n as u8);
+                    if !flat_specs.is_empty() {
+                        self.writeln(&format!("namespace {}_::impl_ {{", trait_name));
+                        self.indent += 1;
+                        // Fix A part 2: if this trait has a constrained (multi-owner)
+                        // default, guarantee `<Tr>_::__ufcs_impls` EXISTS even when
+                        // the trait has no concrete impl (hence no per-impl marker) —
+                        // a 0-arg base declaration. Then the default template's
+                        // `requires { <Tr>_::__ufcs_impls(s) }` is SFINAE-FALSE (soft,
+                        // no matching 1-arg overload) instead of a hard "no member
+                        // named __ufcs_impls" error. Per-impl `__ufcs_impls(const X&)`
+                        // overloads (from the impl decls) are the real witnesses.
+                        for spec in &flat_specs {
+                            if self.emit_extension_trait_free_function_declaration(spec) {
+                                let m = spec.method.sig.ident.to_string();
+                                self.ufcs_emitted_trait_methods
+                                    .insert((trait_name.clone(), m.clone()));
+                                // Only trait DEFAULT methods carry `Self_`, and this
+                                // decl pass runs before any body — so the map is
+                                // complete by the time a call site is emitted.
+                                if spec.self_is_template_param {
+                                    let n = self.extension_bare_prefix_len_for_spec(spec);
+                                    self.ufcs_default_method_bare_prefix_len
+                                        .insert(format!("{}::{}", trait_name, m), n as u8);
+                                }
                             }
+                        }
+                        self.indent -= 1;
+                        self.writeln("}");
+                    }
+                    if !nested_specs.is_empty() {
+                        let helper = Self::ufcs_default_helper_namespace_name(&trait_name);
+                        let segments = self.renamed_module_scope_segments(module_path);
+                        for seg in &segments {
+                            self.writeln(&format!("namespace {} {{", seg));
+                            self.indent += 1;
+                        }
+                        self.writeln(&format!("namespace {} {{", helper));
+                        self.indent += 1;
+                        self.ufcs_helper_shadowing_segments =
+                            segments.iter().skip(1).cloned().collect();
+                        let mut bridged: Vec<String> = Vec::new();
+                        for spec in &nested_specs {
+                            if self.emit_extension_trait_free_function_declaration(spec) {
+                                let m = spec.method.sig.ident.to_string();
+                                self.ufcs_emitted_trait_methods
+                                    .insert((trait_name.clone(), m.clone()));
+                                if spec.self_is_template_param {
+                                    let n = self.extension_bare_prefix_len_for_spec(spec);
+                                    self.ufcs_default_method_bare_prefix_len
+                                        .insert(format!("{}::{}", trait_name, m), n as u8);
+                                }
+                                let escaped = escape_cpp_keyword_in_member_position(&m);
+                                if !bridged.contains(&escaped) {
+                                    bridged.push(escaped);
+                                }
+                            }
+                        }
+                        self.ufcs_helper_shadowing_segments.clear();
+                        self.indent -= 1;
+                        self.writeln("}");
+                        for _ in &segments {
+                            self.indent -= 1;
+                            self.writeln("}");
+                        }
+                        if !bridged.is_empty() {
+                            let helper_path = {
+                                let mut p = segments.clone();
+                                p.push(helper.clone());
+                                p.join("::")
+                            };
+                            let bridge_export = if self.module_name.is_some() { "export " } else { "" };
+                            self.writeln(&format!("namespace {}_::impl_ {{", trait_name));
+                            self.indent += 1;
+                            for m in &bridged {
+                                self.writeln(&format!("{}using ::{}::{};", bridge_export, helper_path, m));
+                            }
+                            self.indent -= 1;
+                            self.writeln("}");
                         }
                     }
                     self.ufcs_tag_namespace = None;
-                    self.indent -= 1;
-                    self.writeln("}");
                     self.writeln(&format!("using namespace {}_;", trait_name));
                 }
                 syn::Item::Mod(m) => {
@@ -22882,6 +23098,12 @@ impl CodeGen {
         self.indent += 1;
         for (assoc_name, ty_cpp) in assoc_pairs {
             self.writeln(&format!("using {} = {};", assoc_name, ty_cpp));
+        }
+        // Step 8: an explicit specialization replaces the primary wholesale,
+        // so it re-states the const / no-receiver forwarders.
+        if !self.traits_spec_at_block_scope && self.trait_has_nonvtable_members(trait_name) {
+            let members = self.nonvtable_traits_members(trait_name, self_cpp, None);
+            self.writeln(&members);
         }
         self.indent -= 1;
         self.writeln("};");
@@ -23827,9 +24049,17 @@ impl CodeGen {
         let method_name = method.sig.ident.to_string();
         let escaped_method_name = escape_cpp_keyword_in_member_position(&method_name);
 
-        let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
-            return false;
+        // Step 8: a no-receiver item is emitted only in the `impl_` lane (the
+        // tag namespace is set); elsewhere it keeps the shipped skip.
+        let receiver_opt: Option<&syn::Receiver> = match method.sig.inputs.first() {
+            Some(syn::FnArg::Receiver(r)) => Some(r),
+            _ => None,
         };
+        if receiver_opt.is_none()
+            && !(method_spec.no_receiver && self.ufcs_tag_namespace.is_some())
+        {
+            return false;
+        }
 
         let mut free_generics = self.extension_free_function_generics(
             method,
@@ -23898,17 +24128,24 @@ impl CodeGen {
         let associated_type_cpp_bindings =
             self.extension_assoc_cpp_bindings(&method_spec.associated_type_bindings);
 
-        let receiver_param = format!(
-            "{} self_",
-            self.extension_receiver_param_cpp_type(&self_cpp_ty, receiver)
-        );
+        // Step 8: without a receiver the self key takes the receiver's place
+        // (`rusty::self_tag<Self>`, never defaulted — it is the deduction
+        // source for a default template's `Self_`).
+        let receiver_param = match receiver_opt {
+            Some(receiver) => format!(
+                "{} self_",
+                self.extension_receiver_param_cpp_type(&self_cpp_ty, receiver)
+            ),
+            None => format!("rusty::self_tag<{}>", self_cpp_ty),
+        };
 
         let mut params = vec![receiver_param];
         if let Some(ns) = &self.ufcs_tag_namespace {
             // Book §3.2.2 rule 2: parameter 0 of every impl / default function.
             params.insert(0, format!("{}::impl_::tag", ns));
         }
-        for (idx, arg) in method.sig.inputs.iter().enumerate().skip(1) {
+        let typed_params_start = if receiver_opt.is_some() { 1 } else { 0 };
+        for (idx, arg) in method.sig.inputs.iter().enumerate().skip(typed_params_start) {
             let syn::FnArg::Typed(pat_type) = arg else {
                 continue;
             };
@@ -23929,7 +24166,13 @@ impl CodeGen {
             };
             params.push(format!("{} {}", ty, param_name));
         }
-        params.extend(self.ufcs_trailing_key_params(method_spec, &self_cpp_ty, &mut free_generics, true));
+        let mut trailing_keys =
+            self.ufcs_trailing_key_params(method_spec, &self_cpp_ty, &mut free_generics, true);
+        if receiver_opt.is_none() {
+            // The self key already leads the parameter list.
+            trailing_keys.retain(|p| !p.starts_with("rusty::self_tag<"));
+        }
+        params.extend(trailing_keys);
 
         if method_name == "serialize"
             && method.sig.inputs.len() == 2
@@ -24005,15 +24248,200 @@ impl CodeGen {
             &free_generics,
             export_prefix,
             &format!(
-                "{}{}{} {}({});",
+                "{}{}{}{} {}({});",
                 requires_prefix,
                 self.ufcs_free_function_inline_prefix(),
+                Self::ufcs_assoc_const_constexpr_prefix(method_spec),
                 return_type,
                 escaped_method_name,
                 params.join(", ")
             ),
         );
         true
+    }
+
+    /// Step 8: the `<Tr>Traits` map of a crate trait as spelled from a use
+    /// site — qualified by the trait's declaring module (renames applied)
+    /// when one is recorded, else the bare name.
+    pub(super) fn nonvtable_traits_map_spelling(&self, trait_short: &str) -> String {
+        let mut segments: Vec<String> = self
+            .trait_declared_path_by_short_name
+            .get(trait_short)
+            .map(|q| q.split("::").filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+            .unwrap_or_else(|| vec![trait_short.to_string()]);
+        let n = segments.len();
+        let mut cumulative: Vec<String> = Vec::new();
+        for seg in segments.iter_mut().take(n.saturating_sub(1)) {
+            cumulative.push(seg.clone());
+            let qualified = cumulative.join("::");
+            if let Some(renamed) = self.module_namespace_renames.get(&qualified) {
+                *seg = renamed.clone();
+                *cumulative.last_mut().unwrap() = renamed.clone();
+            } else {
+                *seg = escape_cpp_keyword(seg);
+            }
+        }
+        if let Some(last) = segments.last_mut() {
+            *last = format!("{}Traits", escape_cpp_keyword(last));
+        }
+        segments.join("::")
+    }
+
+    /// Step 8: does crate trait `trait_short` declare the associated const /
+    /// no-receiver fn `name`?
+    pub(super) fn trait_declares_nonvtable(&self, trait_short: &str, name: &str, is_const: bool) -> bool {
+        // A GENERIC trait's consts and no-receiver fns are not routed through
+        // the map yet (they need the `rusty::tag<A…>` key; `TraitsG` is their
+        // home, book §3.2.8) — such calls keep the shipped lowering (the
+        // bound-args static of `trait_static_undeducible_methods`).
+        if self
+            .ufcs_trait_generic_params
+            .get(trait_short)
+            .is_some_and(|g| !g.is_empty())
+        {
+            return false;
+        }
+        if is_const {
+            self.trait_nonvtable_consts
+                .get(trait_short)
+                .is_some_and(|v| v.iter().any(|(n, _, _)| n == name))
+        } else {
+            self.trait_nonvtable_fns
+                .get(trait_short)
+                .is_some_and(|v| v.iter().any(|(n, _, _)| n == name))
+        }
+    }
+
+    /// Step 8: the trait (short name) that `Owner::name` means for an
+    /// associated const / no-receiver fn — the owner's bound (or its
+    /// supertraits) when the owner is a type parameter, the default
+    /// template's own trait (or its supertraits) for `Self`, else the unique
+    /// crate trait declaring `name`.
+    pub(super) fn nonvtable_owner_trait(&self, owner: &str, name: &str, is_const: bool) -> Option<String> {
+        let is_generic = |t: &str| {
+            self.ufcs_trait_generic_params.get(t).is_some_and(|g| !g.is_empty())
+        };
+        let mut candidates: Vec<String> = Vec::new();
+        if owner == "Self" || owner == "Self_" {
+            if let Some(t) = self.ufcs_default_body_trait.as_deref() {
+                candidates.push(t.to_string());
+            }
+        } else {
+            for scope in self.trait_bound_type_param_scopes.iter().rev() {
+                for (bound_trait, bound_param) in scope {
+                    if bound_param == owner {
+                        candidates.push(
+                            bound_trait.rsplit("::").next().unwrap_or(bound_trait).to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        for c in &candidates {
+            if self.trait_declares_nonvtable(c, name, is_const) {
+                return Some(c.clone());
+            }
+            for sup in self.ufcs_elaborate_supertraits(std::slice::from_ref(c)) {
+                if self.trait_declares_nonvtable(&sup, name, is_const) {
+                    return Some(sup);
+                }
+            }
+        }
+        let mut unique: Vec<String> = if is_const {
+            self.trait_nonvtable_consts
+                .iter()
+                .filter(|(k, v)| !k.contains("::") && v.iter().any(|(n, _, _)| n == name))
+                .map(|(k, _)| k.clone())
+                .collect()
+        } else {
+            self.trait_nonvtable_fns
+                .iter()
+                .filter(|(k, v)| !k.contains("::") && v.iter().any(|(n, _, _)| n == name))
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        unique.sort();
+        unique.dedup();
+        unique.retain(|t| !is_generic(t));
+        if unique.len() == 1 { unique.pop() } else { None }
+    }
+
+    /// Step 8: the `<Tr>Traits` members for a trait's associated consts and
+    /// no-receiver functions. In the primary (and any specialization that is
+    /// not a pure forwarder) each member probes the self type's own static
+    /// member first — a local struct, or a consumer-crate implementor emitted
+    /// as members only — and falls back to the trait's CPO keyed by
+    /// `rusty::self_tag<Self>` (the `impl_` lane: primitives, references,
+    /// blanket impls, the defaults). A forwarding specialization (`S*`, `S&`)
+    /// delegates to `<Tr>Traits<S>`.
+    pub(super) fn nonvtable_traits_members(
+        &self,
+        trait_short: &str,
+        self_spelling: &str,
+        forward_to: Option<&str>,
+    ) -> String {
+        let consts = self.trait_nonvtable_consts.get(trait_short).cloned().unwrap_or_default();
+        let fns = self.trait_nonvtable_fns.get(trait_short).cloned().unwrap_or_default();
+        let ns = format!("{}_", escape_cpp_keyword(trait_short));
+        let b = self_spelling;
+        let mut out = String::new();
+        for (name, _, _) in &consts {
+            let n = escape_cpp_keyword(name);
+            match forward_to {
+                Some(target) => out.push_str(&format!(
+                    "static constexpr decltype(auto) {n}() {{ return {target}::{n}(); }} "
+                )),
+                // The probe must be DEPENDENT (an explicit specialization names a
+                // concrete self type, where `int8_t::NAME` is a hard error, not a
+                // false requirement): a defaulted template parameter carries it.
+                None => out.push_str(&format!(
+                    "template<class B_ = {b}> static constexpr decltype(auto) {n}() {{ if constexpr (requires {{ B_::{n}; }}) {{ return B_::{n}; }} else {{ return {ns}::{n}(rusty::self_tag<B_>{{}}); }} }} "
+                )),
+            }
+        }
+        for (name, _, _) in &fns {
+            let n = escape_cpp_keyword_in_member_position(name);
+            match forward_to {
+                Some(target) => out.push_str(&format!(
+                    "template<class... A> static decltype(auto) {n}(A&&... a) {{ return {target}::{n}(std::forward<A>(a)...); }} "
+                )),
+                None => out.push_str(&format!(
+                    "template<class B_ = {b}, class... A> static decltype(auto) {n}(A&&... a) {{ if constexpr (requires {{ B_::{n}(std::forward<A>(a)...); }}) {{ return B_::{n}(std::forward<A>(a)...); }} else {{ return {ns}::{n}(rusty::self_tag<B_>{{}}, std::forward<A>(a)...); }} }} "
+                )),
+            }
+        }
+        out
+    }
+
+    /// Step 8: does the trait have any non-vtable member?
+    pub(super) fn trait_has_nonvtable_members(&self, trait_short: &str) -> bool {
+        self.trait_nonvtable_consts.get(trait_short).is_some_and(|v| !v.is_empty())
+            || self.trait_nonvtable_fns.get(trait_short).is_some_and(|v| !v.is_empty())
+    }
+
+    /// Step 8: an associated-const function is `constexpr` when its
+    /// initializer is a literal (possibly negated or cast), so `T::N` stays
+    /// usable in constant expressions; any other initializer may call
+    /// non-constexpr runtime helpers and stays a plain inline function.
+    fn ufcs_assoc_const_constexpr_prefix(method_spec: &ExtensionImplMethod) -> &'static str {
+        if !method_spec.is_assoc_const {
+            return "";
+        }
+        fn literal_like(e: &syn::Expr) -> bool {
+            match e {
+                syn::Expr::Lit(_) => true,
+                syn::Expr::Unary(u) => literal_like(&u.expr),
+                syn::Expr::Cast(c) => literal_like(&c.expr),
+                syn::Expr::Paren(p) => literal_like(&p.expr),
+                syn::Expr::Group(g) => literal_like(&g.expr),
+                _ => false,
+            }
+        }
+        let is_literal = match method_spec.method.block.stmts.as_slice() {
+            [syn::Stmt::Expr(e, _)] => literal_like(e),
+            _ => false,
+        };
+        if is_literal { "constexpr " } else { "" }
     }
 
     /// The TYPE arguments of a trait path (`Tr<'a, u8>` → `[u8]`).
@@ -24453,13 +24881,21 @@ impl CodeGen {
         let method_name = method.sig.ident.to_string();
         let escaped_method_name = escape_cpp_keyword_in_member_position(&method_name);
 
-        let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
+        // Step 8: see the declaration emitter — no-receiver items exist in the
+        // `impl_` lane only.
+        let receiver_opt: Option<&syn::Receiver> = match method.sig.inputs.first() {
+            Some(syn::FnArg::Receiver(r)) => Some(r),
+            _ => None,
+        };
+        if receiver_opt.is_none()
+            && !(method_spec.no_receiver && self.ufcs_tag_namespace.is_some())
+        {
             self.writeln(&format!(
                 "// Rust-only extension method skipped (no receiver): {}",
                 method_name
             ));
             return;
-        };
+        }
 
         let mut free_generics = self.extension_free_function_generics(
             method,
@@ -24531,17 +24967,21 @@ impl CodeGen {
         }
         let associated_type_cpp_bindings =
             self.extension_assoc_cpp_bindings(&method_spec.associated_type_bindings);
-        let receiver_param = format!(
-            "{} self_",
-            self.extension_receiver_param_cpp_type(&self_cpp_ty, receiver)
-        );
+        let receiver_param = match receiver_opt {
+            Some(receiver) => format!(
+                "{} self_",
+                self.extension_receiver_param_cpp_type(&self_cpp_ty, receiver)
+            ),
+            None => format!("rusty::self_tag<{}>", self_cpp_ty),
+        };
 
         let mut params = vec![receiver_param];
         if let Some(ns) = &self.ufcs_tag_namespace {
             // Book §3.2.2 rule 2: parameter 0 of every impl / default function.
             params.insert(0, format!("{}::impl_::tag", ns));
         }
-        for (idx, arg) in method.sig.inputs.iter().enumerate().skip(1) {
+        let typed_params_start = if receiver_opt.is_some() { 1 } else { 0 };
+        for (idx, arg) in method.sig.inputs.iter().enumerate().skip(typed_params_start) {
             let syn::FnArg::Typed(pat_type) = arg else {
                 continue;
             };
@@ -24562,7 +25002,12 @@ impl CodeGen {
             };
             params.push(format!("{} {}", ty, param_name));
         }
-        params.extend(self.ufcs_trailing_key_params(method_spec, &self_cpp_ty, &mut free_generics, false));
+        let mut trailing_keys =
+            self.ufcs_trailing_key_params(method_spec, &self_cpp_ty, &mut free_generics, false);
+        if receiver_opt.is_none() {
+            trailing_keys.retain(|p| !p.starts_with("rusty::self_tag<"));
+        }
+        params.extend(trailing_keys);
 
         if method_name == "serialize"
             && method.sig.inputs.len() == 2
@@ -24708,9 +25153,10 @@ impl CodeGen {
             &free_generics,
             export_prefix,
             &format!(
-                "{}{}{} {}({}) {{",
+                "{}{}{}{} {}({}) {{",
                 requires_prefix,
                 self.ufcs_free_function_inline_prefix(),
+                Self::ufcs_assoc_const_constexpr_prefix(method_spec),
                 return_type,
                 escaped_method_name,
                 params.join(", ")
@@ -24771,7 +25217,11 @@ impl CodeGen {
         // `Self` can't be a C++/syn template-param name), so this becomes
         // `using Self = Self_;` — bridging the body's `Self` to the real param
         // exactly as it bridges to a concrete self type otherwise.
-        self.writeln("using Self = std::remove_reference_t<decltype(self_)>;");
+        if receiver_opt.is_some() {
+            self.writeln("using Self = std::remove_reference_t<decltype(self_)>;");
+        } else {
+            self.writeln(&format!("using Self = {};", self_cpp_ty));
+        }
         self.push_return_value_scope(&return_type);
         // Push the hint in the free fn's own type language: `Self` IS the
         // `Self_` template param here. Substituting before the push lets
@@ -24809,10 +25259,12 @@ impl CodeGen {
         };
         self.push_return_type_hint(&hint_output);
         self.push_param_bindings(&method.sig.inputs);
-        self.override_current_param_self_binding_with_type(&method_spec.self_ty, receiver);
+        if let Some(receiver) = receiver_opt {
+            self.override_current_param_self_binding_with_type(&method_spec.self_ty, receiver);
+        }
         self.push_callable_param_bound_scope(method_spec.callable_param_metadata.clone());
         self.push_self_receiver_ref_scope(&method.sig.inputs);
-        self.push_self_path_override(Some("self_".to_string()));
+        self.push_self_path_override(receiver_opt.map(|_| "self_".to_string()));
         // UFCS free-function form replaces a destructuring parameter pattern
         // with a synthetic `_arg{idx}` param (see the param emitter in
         // emit_items.rs). The member emitter then emits the matching binding

@@ -14869,6 +14869,10 @@ impl CodeGen {
                 if let Some(marker_assoc) = self.try_emit_cpp_marker_assoc_expr(path) {
                     return marker_assoc;
                 }
+                // Step 8: `<X as Tr>::NAME` keeps its `qself` on this route too.
+                if let Some(assoc_const) = self.try_emit_trait_assoc_const_qself_expr(path) {
+                    return assoc_const;
+                }
                 if let Some(clone_expr) =
                     self.try_emit_self_path_clone_for_expected_value(&path.path, expected_ty)
                 {
@@ -19770,6 +19774,12 @@ impl CodeGen {
         // `slice::from_raw_parts[_mut]` — feed the result's element type to the
         // pointer-arg cast so `span<T>` deduces instead of `span<void>`.
         if let Some(emitted) = self.try_emit_slice_from_raw_parts_call(call, expected_ty) {
+            return emitted;
+        }
+        // Book §3.2.2 non-vtable members (step 8): `T::new(x)` / `Self::new(x)`
+        // / `<X as Tr>::new(x)` on a crate trait's no-receiver fn goes through
+        // the `<Tr>Traits` map — a C++ type param (an `int`) has no statics.
+        if let Some(emitted) = self.try_emit_trait_nonvtable_fn_call(call, expected_ty) {
             return emitted;
         }
         // `T::trait_method(a0, ...)` on a generic param T: lower through the
@@ -25276,6 +25286,124 @@ impl CodeGen {
         Some(format!("{}::new_({})", expected_cpp_ty, args.join(", ")))
     }
 
+    /// Step 8: `<X as Tr>::NAME` for an associated const of a crate trait —
+    /// `<Tr>Traits<X>::NAME()` (the shipped path dropped the `qself` and
+    /// routed `Tr::NAME` to the runtime helper, which has no such member).
+    fn try_emit_trait_assoc_const_qself_expr(&self, path: &syn::ExprPath) -> Option<String> {
+        let qself = path.qself.as_ref()?;
+        let segs = &path.path.segments;
+        if qself.position == 0 || segs.len() != qself.position + 1 {
+            return None;
+        }
+        let trait_short = segs[qself.position - 1].ident.to_string();
+        let name = segs.last()?.ident.to_string();
+        if !self.trait_declares_nonvtable(&trait_short, &name, true) {
+            return None;
+        }
+        let self_cpp = self.map_type(&qself.ty);
+        if self_cpp == "auto" || self_cpp.contains("/* TODO") {
+            return None;
+        }
+        Some(format!(
+            "{}<{}>::{}()",
+            self.nonvtable_traits_map_spelling(&trait_short),
+            self.normalize_qself_base_for_assoc(&self_cpp),
+            escape_cpp_keyword(&name)
+        ))
+    }
+
+    /// Step 8: a no-receiver associated function of a crate trait called on a
+    /// type parameter (`T::new(x)`), on `Self` inside a `Self_`-templated body,
+    /// through `<X as Tr>::new(x)`, or as `Tr::new(x)` with the self type
+    /// taken from the expected type (a `-> Self` fn only) —
+    /// `<Tr>Traits<Owner>::new_(x)`.
+    fn try_emit_trait_nonvtable_fn_call(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let syn::Expr::Path(fp) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return None;
+        };
+        let segs = &fp.path.segments;
+        let method = segs.last()?.ident.to_string();
+        if !matches!(segs.last()?.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        // Dedicated lowerings win over the map: `A::size()` on a type parameter
+        // keeps its type-level helper (`rusty::detail::type_level_size<A>()`,
+        // smallvec's `Array::size`, generic over every arity), and serde's
+        // `T::deserialize(de)` / `T::deserialize_in_place(de, place)` keep the
+        // `::de::rusty_ext::deserialize(PhantomData<T>{}, &de)` route that
+        // preserves the deserializer's `&mut` (measured by the unit suite).
+        if matches!(method.as_str(), "deserialize" | "deserialize_in_place")
+            || (method == "size"
+                && call.args.is_empty()
+                && fp.qself.is_none()
+                && segs.len() == 2
+                && self.is_type_param_in_scope(&segs[0].ident.to_string()))
+        {
+            return None;
+        }
+        let (owner_cpp, trait_short): (String, String) = if let Some(q) = &fp.qself {
+            if q.position == 0 || segs.len() != q.position + 1 {
+                return None;
+            }
+            let t = segs[q.position - 1].ident.to_string();
+            if !self.trait_declares_nonvtable(&t, &method, false) {
+                return None;
+            }
+            let self_cpp = self.map_type(&q.ty);
+            if self_cpp == "auto" || self_cpp.contains("/* TODO") {
+                return None;
+            }
+            (self.normalize_qself_base_for_assoc(&self_cpp), t)
+        } else {
+            if segs.len() != 2 || !matches!(segs[0].arguments, syn::PathArguments::None) {
+                return None;
+            }
+            let owner = segs[0].ident.to_string();
+            if owner == "Self" {
+                if !(self.ufcs_template_self_body
+                    || self.current_struct.as_deref() == Some("Self_"))
+                {
+                    return None;
+                }
+                let t = self.nonvtable_owner_trait("Self", &method, false)?;
+                ("Self_".to_string(), t)
+            } else if self.is_type_param_in_scope(&owner) {
+                let t = self.nonvtable_owner_trait(&owner, &method, false)?;
+                (escape_cpp_keyword(&owner), t)
+            } else if self.trait_declares_nonvtable(&owner, &method, false)
+                && !self.local_declared_types.contains(&owner)
+            {
+                let returns_self = self
+                    .trait_nonvtable_fns
+                    .get(&owner)
+                    .is_some_and(|v| v.iter().any(|(n, _, rs)| n == &method && *rs));
+                if !returns_self {
+                    return None;
+                }
+                let exp = expected_ty?;
+                let cpp = self.map_type(exp);
+                if cpp == "auto" || cpp.contains("/* TODO") || type_string_has_auto_placeholder(&cpp) {
+                    return None;
+                }
+                (self.normalize_qself_base_for_assoc(&cpp), owner)
+            } else {
+                return None;
+            }
+        };
+        let args: Vec<String> = call.args.iter().map(|a| self.emit_expr_maybe_move(a)).collect();
+        Some(format!(
+            "{}<{}>::{}({})",
+            self.nonvtable_traits_map_spelling(&trait_short),
+            owner_cpp,
+            escape_cpp_keyword_in_member_position(&method),
+            args.join(", ")
+        ))
+    }
+
     fn try_emit_cpp_marker_assoc_expr(&self, path: &syn::ExprPath) -> Option<String> {
         let qself = path.qself.as_ref()?;
         if qself.position == 0 || qself.position >= path.path.segments.len() {
@@ -25313,6 +25441,9 @@ impl CodeGen {
             syn::Expr::Path(path) => {
                 if let Some(marker_assoc) = self.try_emit_cpp_marker_assoc_expr(path) {
                     return marker_assoc;
+                }
+                if let Some(assoc_const) = self.try_emit_trait_assoc_const_qself_expr(path) {
+                    return assoc_const;
                 }
                 if let Some(_qself) = &path.qself {
                     if path.path.segments.len() == 1 {

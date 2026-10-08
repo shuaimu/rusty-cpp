@@ -4348,6 +4348,45 @@ impl CodeGen {
                         .or_insert_with(|| scoped_trait_name.clone());
                     let mut static_defaults = Vec::new();
                     for trait_item in &t.items {
+                        // Book §3.2.2 non-vtable members (step 8): the trait's
+                        // associated consts and no-receiver functions, under
+                        // the short and the module-scoped key.
+                        match trait_item {
+                            syn::TraitItem::Const(c) => {
+                                let name = c.ident.to_string();
+                                for key in [trait_name.clone(), scoped_trait_name.clone()] {
+                                    let entry = self.trait_nonvtable_consts.entry(key).or_default();
+                                    if !entry.iter().any(|(n, _, _)| n == &name) {
+                                        entry.push((
+                                            name.clone(),
+                                            c.ty.clone(),
+                                            c.default.as_ref().map(|(_, e)| e.clone()),
+                                        ));
+                                    }
+                                }
+                            }
+                            syn::TraitItem::Fn(f)
+                                if !matches!(f.sig.inputs.first(), Some(syn::FnArg::Receiver(_)))
+                                    && !Self::nonvtable_fn_has_dedicated_lowering(
+                                        &f.sig.ident.to_string(),
+                                    ) =>
+                            {
+                                let name = f.sig.ident.to_string();
+                                let returns_self = matches!(
+                                    &f.sig.output,
+                                    syn::ReturnType::Type(_, ty)
+                                        if matches!(ty.as_ref(), syn::Type::Path(tp)
+                                            if tp.qself.is_none() && tp.path.is_ident("Self"))
+                                );
+                                for key in [trait_name.clone(), scoped_trait_name.clone()] {
+                                    let entry = self.trait_nonvtable_fns.entry(key).or_default();
+                                    if !entry.iter().any(|(n, _, _)| n == &name) {
+                                        entry.push((name.clone(), f.default.is_some(), returns_self));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                         // Associated CONSTS with a default body: record `NAME →
                         // (body, trait)` so a type-param access `T::NAME` lowers to
                         // the default body (the trait itself is skipped — see the
@@ -7251,6 +7290,8 @@ impl CodeGen {
                             impl_generics: Some(impl_block.generics.clone()),
                             impl_module_path: module_path.to_vec(),
                             trait_args: Self::trait_path_type_args(trait_path),
+                            no_receiver: false,
+                            is_assoc_const: false,
                         });
                     }
                 }
