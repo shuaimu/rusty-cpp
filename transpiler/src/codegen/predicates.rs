@@ -42,6 +42,18 @@ impl CodeGen {
     pub(super) fn has_exact_inactive_cpp_trait_member_dispatch_attr(
         attrs: &[syn::Attribute],
     ) -> bool {
+        Self::has_exact_inactive_marker_attr(attrs, "cpp_trait_member_dispatch")
+    }
+
+    /// Phase 1 (§3.2.16): the per-impl OPT-OUT from tier 1 under the default
+    /// switch — `#[cfg_attr(any(), cpp_no_inherit)]` on an impl keeps it on the
+    /// free-function lane whatever the census says.
+    pub(super) fn has_cpp_no_inherit_attr(attrs: &[syn::Attribute]) -> bool {
+        Self::has_exact_inactive_marker_attr(attrs, "cpp_no_inherit")
+    }
+
+    /// The exact inert spelling `#[cfg_attr(any(), <marker>)]` and nothing else.
+    fn has_exact_inactive_marker_attr(attrs: &[syn::Attribute], marker_name: &str) -> bool {
         attrs.iter().any(|attr| {
             let syn::Meta::List(list) = &attr.meta else {
                 return false;
@@ -63,7 +75,7 @@ impl CodeGen {
                 };
                 predicate.path.is_ident("any")
                     && predicate.tokens.is_empty()
-                    && marker.is_ident("cpp_trait_member_dispatch")
+                    && marker.is_ident(marker_name)
             })
         })
     }

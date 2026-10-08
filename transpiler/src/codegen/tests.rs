@@ -10801,6 +10801,43 @@ fn test_manifest_carries_tier1_traits_supertraits_and_nonvtable_defaults() {
 }
 
 #[test]
+fn test_tier1_force_attribute_limits_and_per_impl_opt_out() {
+    // Book §3.2.16 phase 1, decision (w): a force attribute (`cpp_inherit`) may
+    // override a coverage-motivated census test (`repr(C)`) but never a
+    // semantic one (an inherent method shadowing the trait's — the
+    // silent-override case); and `#[cfg_attr(any(), cpp_no_inherit)]` on an
+    // impl keeps it on the free-function lane under the default switch.
+    let src = r#"
+        #[cfg_attr(any(), cpp_trait_member_dispatch)]
+        pub trait Fine { fn v(&self) -> i32; }
+        pub struct Shadow { pub x: i32 }
+        impl Shadow { pub fn v(&self) -> i32 { self.x } }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Fine for Shadow { fn v(&self) -> i32 { self.x + 1 } }
+        #[repr(C)]
+        pub struct Packed { pub x: i32 }
+        #[cfg_attr(any(), cpp_inherit)]
+        impl Fine for Packed { fn v(&self) -> i32 { self.x } }
+        pub struct Plain { pub x: i32 }
+        #[cfg_attr(any(), cpp_no_inherit)]
+        impl Fine for Plain { fn v(&self) -> i32 { self.x } }
+        pub struct Dflt { pub x: i32 }
+        impl Fine for Dflt { fn v(&self) -> i32 { self.x } }
+    "#;
+    let file: syn::File = syn::parse_str(src).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_authenticated_cpp_inherit_roots(HashSet::from(["rusty".to_string()]));
+    cg.set_tier1_default(true);
+    cg.emit_file(&file, None);
+    let out = cg.into_output();
+    assert!(!out.contains("struct Shadow : public Fine"), "a semantic test is not overridable: {out}");
+    assert!(out.contains("struct Packed : public Fine {"), "a coverage test is: {out}");
+    assert!(!out.contains("struct Plain : public Fine"), "the opt-out: {out}");
+    assert!(out.contains("struct Dflt : public Fine {"), "the default: {out}");
+}
+
+#[test]
 fn test_interface_traits_three_forward_decls_emitted_per_trait() {
     // The trait header should forward-declare all three adapter
     // primary templates so dyn type mappings can name them even

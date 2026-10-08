@@ -2742,6 +2742,16 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   crate keys to the file's relative form. `census-crate` is printed beside the per-file lines under
   `RUSTY_CPP_TIER_CENSUS`. Measured: the matrix transpiles one cargo-expanded file per crate, so its per-file census was already crate-wide there (serde_core: 487 pairs, 2 tier 1 — `de::Expected` on `ExpectedInMap`/`ExpectedInSeq` — the row passes under the switch); the pre-pass matters for real crate mode (the mako ports), where a unit test shows a trait of one file paired with an impl of another (`pair_verdicts_for_units`), a pair the per-file census of the implementing file cannot see. Dependency crates' traits are
   still not pairs (the manifest's `tier1_traits` exists; the cross-crate decision is the next step).
+- *2026-10-08 — phase 1, step 7: decision (w) and the per-impl opt-out.* `CodeGen::pair_verdict`
+  returns the census verdict with its reason and `tier_reason_is_semantic` names the tests a force
+  attribute may NOT override — every axis-1 test, an inherent/trait name overlap (the silent-override
+  case), a same-name pair, a keyed twin — so such a `cpp_inherit` is a diagnosed no-op; `repr`, a
+  second instantiation of a generic trait and a supertrait not concretely implemented here stay
+  overridable (the coverage-motivated tests of (w)). `#[cfg_attr(any(), cpp_no_inherit)]` on an impl
+  keeps it on the free-function lane under the default switch, and wins over a force on the same
+  impl. The inert-marker recognizer is generic over the marker name. Test:
+  `test_tier1_force_attribute_limits_and_per_impl_opt_out` (`Shadow` forced but shadowing → no base;
+  `Packed` `repr(C)` forced → inherits; `Plain` opted out → no base; `Dflt` → inherits by default).
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

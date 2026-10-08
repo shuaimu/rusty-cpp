@@ -6886,6 +6886,18 @@ impl CodeGen {
     /// this file's module path plus the file-relative key, then the per-file
     /// census. `Some(true)` = tier 1.
     pub(crate) fn pair_is_tier1(&self, file_relative_trait_key: &str, written_self: &str) -> bool {
+        self.pair_verdict(file_relative_trait_key, written_self)
+            .is_some_and(|v| v.is_ok())
+    }
+
+    /// The pair's verdict with its excluding reason (`None`: not a crate-trait
+    /// pair the census saw). Decision (w) reads the reason: a force attribute
+    /// may override a coverage-motivated test, never a semantic one.
+    pub(crate) fn pair_verdict(
+        &self,
+        file_relative_trait_key: &str,
+        written_self: &str,
+    ) -> Option<Result<(), String>> {
         if let Some(cv) = &self.crate_tier_verdicts {
             let leaf = file_relative_trait_key
                 .rsplit("::")
@@ -6902,13 +6914,26 @@ impl CodeGen {
             candidates.push(prefixed.join("::"));
             for key in candidates {
                 if let Some(v) = cv.pairs.get(&(key, written_self.to_string())) {
-                    return v.is_ok();
+                    return Some(v.clone());
                 }
             }
         }
         self.tier1_pair_verdicts
             .get(&(file_relative_trait_key.to_string(), written_self.to_string()))
-            .is_some_and(|v| v.is_ok())
+            .cloned()
+    }
+
+    /// Decision (w): the census reasons a force attribute may NOT override —
+    /// the semantic ones (an inherent/trait name overlap forced to tier 1 is
+    /// the silent-override case; a same-name pair, a keyed twin, and every
+    /// axis-1 test, which is about the trait, not coverage). The
+    /// coverage-motivated ones (`repr`, a second instantiation of a generic
+    /// trait, a supertrait not concretely implemented here) it may.
+    pub(crate) fn tier_reason_is_semantic(reason: &str) -> bool {
+        reason.starts_with("A1 ")
+            || reason.contains("inherent method")
+            || reason.contains("declared by two tier-1 traits")
+            || reason.contains("twin")
     }
 
     pub fn set_interface_traits(&mut self, _enabled: bool) {

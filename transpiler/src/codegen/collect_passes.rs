@@ -3267,14 +3267,38 @@ impl CodeGen {
                     // Phase 1 step 3: with the switch on, a pair the census passes
                     // inherits without any attribute (`cpp_inherit` stays a force
                     // attribute; a demoted or failing pair keeps the lane).
+                    let pair_verdict: Option<Result<(), String>> = trait_path.and_then(|p| {
+                        let key = self.resolve_trait_scoped_key_for_impl(p, module_path);
+                        let written =
+                            quote::ToTokens::to_token_stream(&impl_block.self_ty).to_string();
+                        self.pair_verdict(&key, &written)
+                    });
                     let tier1_by_default = self.tier1_default
-                        && trait_path.is_some_and(|p| {
-                            let key = self.resolve_trait_scoped_key_for_impl(p, module_path);
-                            let written =
-                                quote::ToTokens::to_token_stream(&impl_block.self_ty).to_string();
-                            self.pair_is_tier1(&key, &written)
-                        });
-                    if self.has_cpp_inherit_attr(&impl_block.attrs, module_path) || tier1_by_default {
+                        && pair_verdict.as_ref().is_some_and(|v| v.is_ok());
+                    let forced = self.has_cpp_inherit_attr(&impl_block.attrs, module_path);
+                    // Phase 1 (§3.2.16): the per-impl opt-out, and decision (w) —
+                    // a force attribute overrides only the coverage-motivated
+                    // census tests, never a semantic one.
+                    let opt_out = Self::has_cpp_no_inherit_attr(&impl_block.attrs);
+                    let semantic_block: Option<String> = pair_verdict
+                        .as_ref()
+                        .and_then(|v| v.as_ref().err().cloned())
+                        .filter(|reason| Self::tier_reason_is_semantic(reason));
+                    if forced && opt_out {
+                        eprintln!(
+                            "[rusty-cpp] warning: `#[cpp_inherit]` and `#[cpp_no_inherit]` on one impl of `{}`: the opt-out wins (book §3.2.16, phase 1)",
+                            raw_type_name
+                        );
+                    }
+                    if forced && !opt_out && let Some(reason) = &semantic_block {
+                        eprintln!(
+                            "[rusty-cpp] warning: `#[cpp_inherit]` on `impl {} for {}` is ignored ({}): a force attribute may not override a semantic test (book §3.2.16, decision (w))",
+                            trait_name.as_deref().unwrap_or("?"),
+                            raw_type_name,
+                            reason
+                        );
+                    }
+                    if !opt_out && ((forced && semantic_block.is_none()) || tier1_by_default) {
                         if let Some(trait_short) = &trait_name {
                             let simple_type_name = tp
                                 .path
