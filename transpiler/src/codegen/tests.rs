@@ -8185,8 +8185,9 @@ fn test_interface_traits_supertrait_emits_inheritance() {
     let out = transpile_str_interface_traits(
         "trait Super { fn s(&self); } trait Sub : Super { fn x(&self); }",
     );
-    // Supertrait becomes a public base class
-    assert!(out.contains("class Sub : public Super {"), "{out}");
+    // Supertrait becomes a public VIRTUAL base class (book §3.2.2; phase 0:
+    // a diamond implemented by one type has one base subobject).
+    assert!(out.contains("class Sub : public virtual Super {"), "{out}");
 }
 
 #[test]
