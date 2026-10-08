@@ -6379,10 +6379,13 @@ impl CodeGen {
                     _ => None,
                 })
                 .collect();
-            if !assoc_names.is_empty() {
-                self.trait_associated_type_names
-                    .insert(trait_name_str.clone(), assoc_names.clone());
-            }
+            // NOT registered in `trait_associated_type_names`: a skipped trait's
+            // assoc types were never registered before step 8, and registering
+            // them here would route `T::Bits` through `<Tr>Traits<T>` in the
+            // definition pass only (the forward-declaration pass runs ahead of
+            // this position) — two spellings of one function template, "call
+            // to 'case_' is ambiguous" (bitflags, measured). The map itself
+            // still carries the `using` lines.
             self.emit_trait_assoc_traits_maps(trait_name, &assoc_names, cls_export);
             // Fall back to the Pro-path module-mode helper so callers like
             // `Trait::method(self, ...)` still resolve to the trait's
@@ -7130,7 +7133,7 @@ impl CodeGen {
     /// members — generic code reads `T::K` / `T::new(..)` through it.
     pub(super) fn emit_nonvtable_traits_map_for_skipped_trait(&mut self, t: &syn::ItemTrait) {
         let trait_name_str = t.ident.to_string();
-        if !self.trait_has_nonvtable_members(&trait_name_str) {
+        if !self.trait_has_nonvtable_members(&self.nonvtable_trait_key_here(&trait_name_str)) {
             return;
         }
         let cls_export = if self.should_export_item(&t.vis, &trait_name_str) {
@@ -7146,10 +7149,8 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
-        if !assoc_names.is_empty() && !self.trait_associated_type_names.contains_key(&trait_name_str) {
-            self.trait_associated_type_names
-                .insert(trait_name_str.clone(), assoc_names.clone());
-        }
+        // Not registered in `trait_associated_type_names` (see the assoc-const
+        // branch of emit_trait_interface_pattern: pass-dependent routing).
         self.emit_trait_assoc_traits_maps(&t.ident, &assoc_names, cls_export);
     }
 
@@ -7170,16 +7171,20 @@ impl CodeGen {
         cls_export: &str,
     ) {
         let trait_short = trait_name.to_string();
-        let has_nonvtable = self.trait_has_nonvtable_members(&trait_short);
-        // Step 8: a map forward-declared in the early marker pass keeps that
+        // Step 8: everything non-vtable is keyed by the trait's SCOPED key
+        // (two sibling modules may share a leaf: serde's `ser::Error` /
+        // `de::Error`, each with its own map).
+        let trait_key = self.nonvtable_trait_key_here(&trait_short);
+        let has_nonvtable = self.trait_has_nonvtable_members(&trait_key);
+        // A map forward-declared in the early marker pass keeps that
         // declaration's export (an exported redeclaration of a non-exported
         // entity is ill-formed), and a map is defined at most once.
-        let cls_export: String = match self.traits_map_forward_export.get(&trait_short) {
+        let cls_export: String = match self.traits_map_forward_export.get(&trait_key) {
             Some(e) => e.clone(),
             None => cls_export.to_string(),
         };
         let cls_export: &str = cls_export.as_str();
-        if has_nonvtable && !self.traits_map_defined.insert(trait_short.clone()) {
+        if has_nonvtable && !self.traits_map_defined.insert(trait_key.clone()) {
             return;
         }
         if !trait_assoc_type_names.is_empty() || has_nonvtable {
@@ -7207,7 +7212,7 @@ impl CodeGen {
             }
             // Step 8: consts and no-receiver fns — the self type's own static
             // member first, the keyed CPO otherwise.
-            primary.push_str(&self.nonvtable_traits_members(&trait_short, "B", None));
+            primary.push_str(&self.nonvtable_traits_members(&trait_key, "B", None));
             primary.push_str("};");
             self.writeln(&primary);
             // STEP B (task #39): reference/pointer forwarding partial specs —
@@ -7230,7 +7235,7 @@ impl CodeGen {
                     ));
                 }
                 spec.push_str(&self.nonvtable_traits_members(
-                    &trait_short,
+                    &trait_key,
                     "S",
                     Some(&format!("{}Traits<S>", trait_name)),
                 ));
@@ -7268,7 +7273,7 @@ impl CodeGen {
                     ));
                 }
                 spec.push_str(&self.nonvtable_traits_members(
-                    &trait_short,
+                    &trait_key,
                     &format!("std::tuple<{}>", tuple_args),
                     None,
                 ));

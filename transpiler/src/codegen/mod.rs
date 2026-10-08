@@ -2109,8 +2109,10 @@ pub struct CodeGen {
     /// associated-const-trait emission for the blanket-impl-default case.
     pub(crate) trait_default_const_exprs: HashMap<String, (syn::Expr, String)>,
     /// Book §3.2.2 "non-vtable members" (phase-2 step 8): per trait — keyed by
-    /// its short name AND its module-scoped path — the associated consts it
-    /// declares as `(name, type, default initializer)` …
+    /// its module-SCOPED path (`de::Error`; the bare name for a crate-root
+    /// trait), never by the short name, which two sibling modules may share
+    /// (serde's `ser::Error` / `de::Error`) — the associated consts it declares
+    /// as `(name, type, default initializer)` …
     pub(crate) trait_nonvtable_consts: HashMap<String, Vec<(String, syn::Type, Option<syn::Expr>)>>,
     /// … and its no-receiver associated functions as `(name, has_default,
     /// returns_self)`. Both feed the `<Tr>Traits<T>` forwarders, the keyed
@@ -2126,6 +2128,10 @@ pub struct CodeGen {
     /// (an impl inside a function body): a local class cannot hold member
     /// templates, so such a specialization carries no forwarders.
     pub(crate) traits_spec_at_block_scope: bool,
+    /// Step 8: per type-parameter scope, each parameter's trait bounds as the
+    /// FULL paths written (`de::Error`), beside `trait_bound_type_param_scopes`
+    /// which keeps leaves only — two sibling modules may share a leaf.
+    pub(crate) trait_bound_full_path_scopes: Vec<HashMap<String, Vec<String>>>,
     /// INNER enclosing-namespace segments of the UFCS helper currently being
     /// emitted (`segments[1..]` of `<segments>::__ufcs_<Tr>`). A free function's
     /// SIGNATURE (return/param types) that names a top-level module matching one of
@@ -3674,6 +3680,7 @@ impl CodeGen {
             traits_map_forward_export: HashMap::new(),
             traits_map_defined: HashSet::new(),
             traits_spec_at_block_scope: false,
+            trait_bound_full_path_scopes: Vec::new(),
             ufcs_helper_shadowing_segments: Vec::new(),
             trait_declared_paths: HashSet::new(),
             internal_linkage_traits: HashSet::new(),
@@ -5928,13 +5935,16 @@ impl CodeGen {
         let bytes = s.as_bytes();
         let mut out = String::with_capacity(s.len());
         let mut i = 0;
+        // A byte >= 0x80 belongs to a multi-byte (non-ASCII) identifier
+        // character — bitflags' test flag `TestUnicode::一` — and is consumed
+        // whole, never cast to a Latin-1 `char` (which would split the
+        // identifier inside the character: `&s[start..i]` off a boundary).
+        let ident_byte = |b: u8| b >= 0x80 || (b as char).is_alphanumeric() || b == b'_';
         while i < bytes.len() {
             let c = bytes[i] as char;
-            if c.is_alphabetic() || c == '_' {
+            if bytes[i] >= 0x80 || c.is_alphabetic() || c == '_' {
                 let start = i;
-                while i < bytes.len()
-                    && ((bytes[i] as char).is_alphanumeric() || bytes[i] == b'_')
-                {
+                while i < bytes.len() && ident_byte(bytes[i]) {
                     i += 1;
                 }
                 let ident = &s[start..i];
@@ -21221,7 +21231,10 @@ impl CodeGen {
     /// transpiled bodies hold local visitor classes with member templates,
     /// which a free function cannot carry.
     pub(super) fn nonvtable_fn_has_dedicated_lowering(name: &str) -> bool {
-        matches!(name, "deserialize" | "deserialize_in_place")
+        // `invalid_length`: `rusty::error::invalid_length<Owner>(len, expected)`
+        // (a dependent owner spelled `typename V::Error`, pinned by the unit
+        // suite) — the shipped runtime route stays.
+        matches!(name, "deserialize" | "deserialize_in_place" | "invalid_length")
     }
 
     /// Step 8: an associated const as a nullary function `fn NAME() -> T { EXPR }`
@@ -21913,8 +21926,8 @@ impl CodeGen {
             // module namespace — generic code hoisted ahead of the trait's own
             // position names it (`<Tr>Traits<A>::size()`); the definition
             // later reuses this export.
-            if self.trait_has_nonvtable_members(&name) {
-                let spelled = self.nonvtable_traits_map_spelling(&name);
+            if self.trait_has_nonvtable_members(&key) {
+                let spelled = self.nonvtable_traits_map_spelling(&key);
                 let (ns, map_name) = match spelled.rsplit_once("::") {
                     Some((ns, last)) => (Some(ns.to_string()), last.to_string()),
                     None => (None, spelled.clone()),
@@ -21925,7 +21938,7 @@ impl CodeGen {
                     None => self.writeln(&decl),
                 }
                 self.traits_map_forward_export
-                    .insert(name.clone(), export.to_string());
+                    .insert(key.clone(), export.to_string());
             }
             // Book §3.2.2 rules 1-3: the trait namespace holds the tag anchor
             // and ONE dispatcher per method — a function template whose
@@ -21951,7 +21964,7 @@ impl CodeGen {
             }
             // Step 8: an associated const is reached through a dispatcher too
             // (`Tr_::NAME(rusty::self_tag<T>{})` from the Traits map).
-            if let Some(consts) = self.trait_nonvtable_consts.get(&name) {
+            if let Some(consts) = self.trait_nonvtable_consts.get(&key) {
                 for (c, _, _) in consts {
                     if !methods.contains(c) {
                         methods.push(c.clone());
@@ -23101,8 +23114,11 @@ impl CodeGen {
         }
         // Step 8: an explicit specialization replaces the primary wholesale,
         // so it re-states the const / no-receiver forwarders.
-        if !self.traits_spec_at_block_scope && self.trait_has_nonvtable_members(trait_name) {
-            let members = self.nonvtable_traits_members(trait_name, self_cpp, None);
+        if !self.traits_spec_at_block_scope
+            && let Some(key) = self.nonvtable_trait_key(trait_name)
+            && self.trait_has_nonvtable_members(&key)
+        {
+            let members = self.nonvtable_traits_members(&key, self_cpp, None);
             self.writeln(&members);
         }
         self.indent -= 1;
@@ -24260,15 +24276,57 @@ impl CodeGen {
         true
     }
 
+    /// Step 8: the module-SCOPED key a trait reference means — `de::Error`
+    /// as written, a bare `Error` resolved in the emitting module first, then
+    /// the crate root, then the unique declaration with that leaf. Registries
+    /// and the `<Tr>Traits` map are keyed by it (two sibling modules may share
+    /// a leaf: serde's `ser::Error` / `de::Error`).
+    pub(super) fn nonvtable_trait_key(&self, trait_ref: &str) -> Option<String> {
+        let trait_ref = trait_ref.trim_start_matches("::");
+        let trait_ref = trait_ref.strip_prefix("crate::").unwrap_or(trait_ref);
+        if trait_ref.contains("::") {
+            if self.trait_declared_paths.contains(trait_ref) {
+                return Some(trait_ref.to_string());
+            }
+            let suffix = format!("::{}", trait_ref);
+            let mut hits: Vec<&String> = self
+                .trait_declared_paths
+                .iter()
+                .filter(|p| p.ends_with(&suffix))
+                .collect();
+            hits.sort();
+            hits.dedup();
+            return if hits.len() == 1 { Some(hits[0].clone()) } else { None };
+        }
+        if !self.module_stack.is_empty() {
+            let here = format!("{}::{}", self.module_stack.join("::"), trait_ref);
+            if self.trait_declared_paths.contains(&here) {
+                return Some(here);
+            }
+        }
+        if let Some(mp) = self.ufcs_default_body_module_path.first().map(|_| &self.ufcs_default_body_module_path)
+            && !mp.is_empty()
+        {
+            let here = format!("{}::{}", mp.join("::"), trait_ref);
+            if self.trait_declared_paths.contains(&here) {
+                return Some(here);
+            }
+        }
+        if self.trait_declared_paths.contains(trait_ref) {
+            return Some(trait_ref.to_string());
+        }
+        self.trait_declared_path_by_short_name.get(trait_ref).cloned()
+    }
+
     /// Step 8: the `<Tr>Traits` map of a crate trait as spelled from a use
-    /// site — qualified by the trait's declaring module (renames applied)
-    /// when one is recorded, else the bare name.
-    pub(super) fn nonvtable_traits_map_spelling(&self, trait_short: &str) -> String {
-        let mut segments: Vec<String> = self
-            .trait_declared_path_by_short_name
-            .get(trait_short)
-            .map(|q| q.split("::").filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
-            .unwrap_or_else(|| vec![trait_short.to_string()]);
+    /// site, from its scoped key — qualified by the declaring module (renames
+    /// applied); bare for a crate-root trait.
+    pub(super) fn nonvtable_traits_map_spelling(&self, trait_key: &str) -> String {
+        let mut segments: Vec<String> = trait_key
+            .split("::")
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
         let n = segments.len();
         let mut cumulative: Vec<String> = Vec::new();
         for seg in segments.iter_mut().take(n.saturating_sub(1)) {
@@ -24287,52 +24345,66 @@ impl CodeGen {
         segments.join("::")
     }
 
-    /// Step 8: does crate trait `trait_short` declare the associated const /
-    /// no-receiver fn `name`?
-    pub(super) fn trait_declares_nonvtable(&self, trait_short: &str, name: &str, is_const: bool) -> bool {
+    /// Step 8: does the crate trait with scoped key `trait_key` declare the
+    /// associated const / no-receiver fn `name`?
+    pub(super) fn trait_declares_nonvtable(&self, trait_key: &str, name: &str, is_const: bool) -> bool {
         // A GENERIC trait's consts and no-receiver fns are not routed through
         // the map yet (they need the `rusty::tag<A…>` key; `TraitsG` is their
         // home, book §3.2.8) — such calls keep the shipped lowering (the
         // bound-args static of `trait_static_undeducible_methods`).
+        let short = trait_key.rsplit("::").next().unwrap_or(trait_key);
         if self
             .ufcs_trait_generic_params
-            .get(trait_short)
+            .get(short)
             .is_some_and(|g| !g.is_empty())
         {
             return false;
         }
         if is_const {
             self.trait_nonvtable_consts
-                .get(trait_short)
+                .get(trait_key)
                 .is_some_and(|v| v.iter().any(|(n, _, _)| n == name))
         } else {
             self.trait_nonvtable_fns
-                .get(trait_short)
+                .get(trait_key)
                 .is_some_and(|v| v.iter().any(|(n, _, _)| n == name))
         }
     }
 
-    /// Step 8: the trait (short name) that `Owner::name` means for an
+    /// Step 8: the trait (scoped key) that `Owner::name` means for an
     /// associated const / no-receiver fn — the owner's bound (or its
     /// supertraits) when the owner is a type parameter, the default
     /// template's own trait (or its supertraits) for `Self`, else the unique
     /// crate trait declaring `name`.
     pub(super) fn nonvtable_owner_trait(&self, owner: &str, name: &str, is_const: bool) -> Option<String> {
-        let is_generic = |t: &str| {
-            self.ufcs_trait_generic_params.get(t).is_some_and(|g| !g.is_empty())
-        };
         let mut candidates: Vec<String> = Vec::new();
         if owner == "Self" || owner == "Self_" {
             if let Some(t) = self.ufcs_default_body_trait.as_deref() {
-                candidates.push(t.to_string());
+                let scoped = if self.ufcs_default_body_module_path.is_empty() {
+                    t.to_string()
+                } else {
+                    format!("{}::{}", self.ufcs_default_body_module_path.join("::"), t)
+                };
+                candidates.push(scoped);
             }
         } else {
+            // The bounds' FULL paths first (`E: de::Error` beside `ser::Error`),
+            // the leaf map as the fallback.
+            for scope in self.trait_bound_full_path_scopes.iter().rev() {
+                if let Some(paths) = scope.get(owner) {
+                    for p in paths {
+                        if let Some(key) = self.nonvtable_trait_key(p) {
+                            candidates.push(key);
+                        }
+                    }
+                }
+            }
             for scope in self.trait_bound_type_param_scopes.iter().rev() {
                 for (bound_trait, bound_param) in scope {
-                    if bound_param == owner {
-                        candidates.push(
-                            bound_trait.rsplit("::").next().unwrap_or(bound_trait).to_string(),
-                        );
+                    if bound_param == owner
+                        && let Some(key) = self.nonvtable_trait_key(bound_trait)
+                    {
+                        candidates.push(key);
                     }
                 }
             }
@@ -24341,28 +24413,31 @@ impl CodeGen {
             if self.trait_declares_nonvtable(c, name, is_const) {
                 return Some(c.clone());
             }
-            for sup in self.ufcs_elaborate_supertraits(std::slice::from_ref(c)) {
-                if self.trait_declares_nonvtable(&sup, name, is_const) {
-                    return Some(sup);
+            let short = c.rsplit("::").next().unwrap_or(c).to_string();
+            for sup in self.ufcs_elaborate_supertraits(std::slice::from_ref(&short)) {
+                if let Some(key) = self.nonvtable_trait_key(&sup)
+                    && self.trait_declares_nonvtable(&key, name, is_const)
+                {
+                    return Some(key);
                 }
             }
         }
         let mut unique: Vec<String> = if is_const {
             self.trait_nonvtable_consts
                 .iter()
-                .filter(|(k, v)| !k.contains("::") && v.iter().any(|(n, _, _)| n == name))
+                .filter(|(_, v)| v.iter().any(|(n, _, _)| n == name))
                 .map(|(k, _)| k.clone())
                 .collect()
         } else {
             self.trait_nonvtable_fns
                 .iter()
-                .filter(|(k, v)| !k.contains("::") && v.iter().any(|(n, _, _)| n == name))
+                .filter(|(_, v)| v.iter().any(|(n, _, _)| n == name))
                 .map(|(k, _)| k.clone())
                 .collect()
         };
         unique.sort();
         unique.dedup();
-        unique.retain(|t| !is_generic(t));
+        unique.retain(|k| self.trait_declares_nonvtable(k, name, is_const));
         if unique.len() == 1 { unique.pop() } else { None }
     }
 
@@ -24373,16 +24448,17 @@ impl CodeGen {
     /// as members only — and falls back to the trait's CPO keyed by
     /// `rusty::self_tag<Self>` (the `impl_` lane: primitives, references,
     /// blanket impls, the defaults). A forwarding specialization (`S*`, `S&`)
-    /// delegates to `<Tr>Traits<S>`.
+    /// delegates to `<Tr>Traits<S>`. `trait_key` is the scoped key.
     pub(super) fn nonvtable_traits_members(
         &self,
-        trait_short: &str,
+        trait_key: &str,
         self_spelling: &str,
         forward_to: Option<&str>,
     ) -> String {
-        let consts = self.trait_nonvtable_consts.get(trait_short).cloned().unwrap_or_default();
-        let fns = self.trait_nonvtable_fns.get(trait_short).cloned().unwrap_or_default();
-        let ns = format!("{}_", escape_cpp_keyword(trait_short));
+        let consts = self.trait_nonvtable_consts.get(trait_key).cloned().unwrap_or_default();
+        let fns = self.trait_nonvtable_fns.get(trait_key).cloned().unwrap_or_default();
+        let short = trait_key.rsplit("::").next().unwrap_or(trait_key);
+        let ns = format!("{}_", escape_cpp_keyword(short));
         let b = self_spelling;
         let mut out = String::new();
         for (name, _, _) in &consts {
@@ -24413,10 +24489,20 @@ impl CodeGen {
         out
     }
 
-    /// Step 8: does the trait have any non-vtable member?
-    pub(super) fn trait_has_nonvtable_members(&self, trait_short: &str) -> bool {
-        self.trait_nonvtable_consts.get(trait_short).is_some_and(|v| !v.is_empty())
-            || self.trait_nonvtable_fns.get(trait_short).is_some_and(|v| !v.is_empty())
+    /// Step 8: does the trait (scoped key) have any non-vtable member?
+    pub(super) fn trait_has_nonvtable_members(&self, trait_key: &str) -> bool {
+        self.trait_nonvtable_consts.get(trait_key).is_some_and(|v| !v.is_empty())
+            || self.trait_nonvtable_fns.get(trait_key).is_some_and(|v| !v.is_empty())
+    }
+
+    /// Step 8: the scoped key of the trait being emitted at the current module
+    /// position (`module_stack` + its name).
+    pub(super) fn nonvtable_trait_key_here(&self, trait_short: &str) -> String {
+        if self.module_stack.is_empty() {
+            trait_short.to_string()
+        } else {
+            format!("{}::{}", self.module_stack.join("::"), trait_short)
+        }
     }
 
     /// Step 8: an associated-const function is `constexpr` when its
@@ -54321,6 +54407,8 @@ impl CodeGen {
         self.type_param_scopes.push(scope);
         self.type_param_scope_order.push(ordered_scope);
         self.trait_bound_type_param_scopes.push(trait_bound_map);
+        self.trait_bound_full_path_scopes
+            .push(Self::collect_trait_bound_full_path_map(generics));
         self.trait_bound_args_scopes
             .push(Self::collect_trait_bound_args_map(generics));
         self.callable_type_param_return_scopes
@@ -54333,9 +54421,64 @@ impl CodeGen {
         self.type_param_scopes.pop();
         self.type_param_scope_order.pop();
         self.trait_bound_type_param_scopes.pop();
+        self.trait_bound_full_path_scopes.pop();
         self.trait_bound_args_scopes.pop();
         self.callable_type_param_return_scopes.pop();
         self.callable_type_param_arg_scopes.pop();
+    }
+
+    /// Step 8: type parameter → its trait bounds' full paths as written, from
+    /// the parameter list and the where-clause (bare type-parameter predicates).
+    pub(super) fn collect_trait_bound_full_path_map(
+        generics: &syn::Generics,
+    ) -> HashMap<String, Vec<String>> {
+        fn full_path(bound: &syn::TypeParamBound) -> Option<String> {
+            let syn::TypeParamBound::Trait(tb) = bound else {
+                return None;
+            };
+            Some(
+                tb.path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            )
+        }
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for param in &generics.params {
+            let syn::GenericParam::Type(tp) = param else {
+                continue;
+            };
+            let entry = map.entry(tp.ident.to_string()).or_default();
+            for bound in &tp.bounds {
+                if let Some(p) = full_path(bound) {
+                    entry.push(p);
+                }
+            }
+        }
+        if let Some(wc) = &generics.where_clause {
+            for pred in &wc.predicates {
+                let syn::WherePredicate::Type(tp) = pred else {
+                    continue;
+                };
+                let syn::Type::Path(type_path) = &tp.bounded_ty else {
+                    continue;
+                };
+                if type_path.qself.is_some() || type_path.path.segments.len() != 1 {
+                    continue;
+                }
+                let entry = map
+                    .entry(type_path.path.segments[0].ident.to_string())
+                    .or_default();
+                for bound in &tp.bounds {
+                    if let Some(p) = full_path(bound) {
+                        entry.push(p);
+                    }
+                }
+            }
+        }
+        map
     }
 
     fn trait_name_from_bound(bound: &syn::TypeParamBound) -> Option<String> {

@@ -4354,7 +4354,7 @@ impl CodeGen {
                         match trait_item {
                             syn::TraitItem::Const(c) => {
                                 let name = c.ident.to_string();
-                                for key in [trait_name.clone(), scoped_trait_name.clone()] {
+                                for key in [scoped_trait_name.clone()] {
                                     let entry = self.trait_nonvtable_consts.entry(key).or_default();
                                     if !entry.iter().any(|(n, _, _)| n == &name) {
                                         entry.push((
@@ -4378,7 +4378,7 @@ impl CodeGen {
                                         if matches!(ty.as_ref(), syn::Type::Path(tp)
                                             if tp.qself.is_none() && tp.path.is_ident("Self"))
                                 );
-                                for key in [trait_name.clone(), scoped_trait_name.clone()] {
+                                for key in [scoped_trait_name.clone()] {
                                     let entry = self.trait_nonvtable_fns.entry(key).or_default();
                                     if !entry.iter().any(|(n, _, _)| n == &name) {
                                         entry.push((name.clone(), f.default.is_some(), returns_self));

@@ -25295,9 +25295,15 @@ impl CodeGen {
         if qself.position == 0 || segs.len() != qself.position + 1 {
             return None;
         }
-        let trait_short = segs[qself.position - 1].ident.to_string();
+        let trait_ref = segs
+            .iter()
+            .take(qself.position)
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
         let name = segs.last()?.ident.to_string();
-        if !self.trait_declares_nonvtable(&trait_short, &name, true) {
+        let trait_key = self.nonvtable_trait_key(&trait_ref)?;
+        if !self.trait_declares_nonvtable(&trait_key, &name, true) {
             return None;
         }
         let self_cpp = self.map_type(&qself.ty);
@@ -25306,7 +25312,7 @@ impl CodeGen {
         }
         Some(format!(
             "{}<{}>::{}()",
-            self.nonvtable_traits_map_spelling(&trait_short),
+            self.nonvtable_traits_map_spelling(&trait_key),
             self.normalize_qself_base_for_assoc(&self_cpp),
             escape_cpp_keyword(&name)
         ))
@@ -25345,41 +25351,54 @@ impl CodeGen {
         {
             return None;
         }
-        let (owner_cpp, trait_short): (String, String) = if let Some(q) = &fp.qself {
+        let (owner_cpp, trait_key): (String, String) = if let Some(q) = &fp.qself {
             if q.position == 0 || segs.len() != q.position + 1 {
                 return None;
             }
-            let t = segs[q.position - 1].ident.to_string();
-            if !self.trait_declares_nonvtable(&t, &method, false) {
+            let trait_ref = segs
+                .iter()
+                .take(q.position)
+                .map(|s| s.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            let key = self.nonvtable_trait_key(&trait_ref)?;
+            if !self.trait_declares_nonvtable(&key, &method, false) {
                 return None;
             }
             let self_cpp = self.map_type(&q.ty);
             if self_cpp == "auto" || self_cpp.contains("/* TODO") {
                 return None;
             }
-            (self.normalize_qself_base_for_assoc(&self_cpp), t)
+            (self.normalize_qself_base_for_assoc(&self_cpp), key)
         } else {
-            if segs.len() != 2 || !matches!(segs[0].arguments, syn::PathArguments::None) {
+            if !matches!(segs[0].arguments, syn::PathArguments::None) {
                 return None;
             }
-            let owner = segs[0].ident.to_string();
-            if owner == "Self" {
+            let owner_segments: Vec<String> = segs
+                .iter()
+                .take(segs.len() - 1)
+                .map(|s| s.ident.to_string())
+                .collect();
+            let owner = owner_segments.join("::");
+            if segs.len() == 2 && owner == "Self" {
                 if !(self.ufcs_template_self_body
                     || self.current_struct.as_deref() == Some("Self_"))
                 {
                     return None;
                 }
-                let t = self.nonvtable_owner_trait("Self", &method, false)?;
-                ("Self_".to_string(), t)
-            } else if self.is_type_param_in_scope(&owner) {
-                let t = self.nonvtable_owner_trait(&owner, &method, false)?;
-                (escape_cpp_keyword(&owner), t)
-            } else if self.trait_declares_nonvtable(&owner, &method, false)
-                && !self.local_declared_types.contains(&owner)
+                let key = self.nonvtable_owner_trait("Self", &method, false)?;
+                ("Self_".to_string(), key)
+            } else if segs.len() == 2 && self.is_type_param_in_scope(&owner) {
+                let key = self.nonvtable_owner_trait(&owner, &method, false)?;
+                (escape_cpp_keyword(&owner), key)
+            } else if let Some(key) = self.nonvtable_trait_key(&owner)
+                && self.trait_declares_nonvtable(&key, &method, false)
             {
+                // `Tr::f(args)` — the self type comes from the expected type,
+                // for a `-> Self` fn only.
                 let returns_self = self
                     .trait_nonvtable_fns
-                    .get(&owner)
+                    .get(&key)
                     .is_some_and(|v| v.iter().any(|(n, _, rs)| n == &method && *rs));
                 if !returns_self {
                     return None;
@@ -25389,7 +25408,7 @@ impl CodeGen {
                 if cpp == "auto" || cpp.contains("/* TODO") || type_string_has_auto_placeholder(&cpp) {
                     return None;
                 }
-                (self.normalize_qself_base_for_assoc(&cpp), owner)
+                (self.normalize_qself_base_for_assoc(&cpp), key)
             } else {
                 return None;
             }
@@ -25397,7 +25416,7 @@ impl CodeGen {
         let args: Vec<String> = call.args.iter().map(|a| self.emit_expr_maybe_move(a)).collect();
         Some(format!(
             "{}<{}>::{}({})",
-            self.nonvtable_traits_map_spelling(&trait_short),
+            self.nonvtable_traits_map_spelling(&trait_key),
             owner_cpp,
             escape_cpp_keyword_in_member_position(&method),
             args.join(", ")

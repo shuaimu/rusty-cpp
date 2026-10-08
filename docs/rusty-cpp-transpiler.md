@@ -2392,7 +2392,21 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   module's helper namespace `<mod>::__ufcs_<Tr>_defaults` — where its body and signature's
   module-relative names resolve (`de::Error::unknown_variant` builds `OneOf`, takes `&dyn
   Expected`) — and bridged into `<Tr>_::impl_` with an (exported) using-declaration, which tag-ADL
-  finds like any other overload; receiver defaults keep the flat `<Tr>_::impl_` shape. Oracle:
+  finds like any other overload; receiver defaults keep the flat `<Tr>_::impl_` shape.
+  Everything non-vtable is keyed by the trait's *scoped* key (`de::Error`), never by the leaf: a
+  same-leaf probe (two modules each declaring `trait Error { const KIND; fn custom(..) -> Self; }`)
+  spelled `E: de::Error`'s calls through `ser::ErrorTraits<E>` and never defined `de`'s map when the
+  registries, the once-only set and the spelling were keyed by the short name — the first declaration
+  won, silently; a bound path resolves to the scoped key as written, then in the emitting module,
+  then at the crate root, then the unique declaration with that leaf. A skipped trait's map carries
+  its `using` lines but its assoc-type names stay *unregistered*: registering them routed `T::Bits`
+  through `FlagsTraits<T>::Bits` in the definition pass only (the function forward-declaration pass
+  runs ahead of the trait's position) — two spellings of one function template, `call to 'case_'
+  is ambiguous` (bitflags, measured); the pass-consistency rule of §13.15.3 stands. bitflags (a FAIL
+  row before and after) moves its tail: its `clone` gap is gone, and the newly emitted primitive impls
+  of `Bits` / `ParseHex` expose two primitive-owner path gaps inside free-function bodies —
+  `<u128>::MAX` spelled `::MAX`, `__int128::from_str_radix(..)` — bodies the shipped lane never
+  emitted (no struct to hold them); a general lowering item, not a step-8 one. Oracle:
   `trait_probes_nonvtable` (new; six cells, all on a primitive
   implementor through a bound or the explicit `<i32 as Shape>::` forms) 6/6; thin/defaults/scoping/
   collapse unchanged. Not covered: a generic trait's consts and no-receiver fns (no `rusty::tag<A…>`
@@ -3025,6 +3039,13 @@ mismatch (the loader today reads no version and skips unparseable files).
   marker (loud; one line per impl; required for all-default traits and for generic required methods) vs. a
   concept through the CPOs (zero per-impl lines; silent memoization). Recommendation: the marker as the
   predicate; a CPO-`requires` conjunct admissible for non-generic required methods.
+- **(aa) The incumbent's `rusty_ext` symbols vs. phase 3 (open, 2026-10-07).** rrr.serializable's
+  ratified object owns 25 `rusty_ext` symbols beside its 25 `Serialize_`/`Deserialize_` ones
+  (`test_ufcs_layer_linkage_is_narrow_and_source_authenticated`, measured with `nm`). Phase 3 deletes
+  the `rusty_ext` namespace; step (5) stops emitting the twin wherever an `impl_` function exists.
+  Either the incumbent is re-ratified against the `impl_` lane (the `Tr_` companions' precedent, the
+  ABI-pinned row of §3.2.12) or the 25 symbols are kept as non-template forwarders in `rusty_ext`
+  for that one object — a decision for the owner of the ABI, not for the emitter.
 - **(z) The tag/CPO protocol as the C++-interop surface for tier 2.** A C++ author implements a Rust
   trait for a type they cannot or will not modify by writing one free function per method — `R
   m(Tr_::impl_::tag, const Mine& self_, …)` in `Tr_::impl_` or in `Mine`'s namespace — plus `template<>

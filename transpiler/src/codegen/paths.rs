@@ -3324,21 +3324,22 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         } else {
             return None;
         };
-        let trait_short = self.nonvtable_owner_trait(owner, name, true)?;
+        let trait_key = self.nonvtable_owner_trait(owner, name, true)?;
+        let trait_short = trait_key.rsplit("::").next().unwrap_or(&trait_key).to_string();
         // A universally blanket-implemented trait (`impl<T> Tr for T {}`) never
         // overrides a defaulted const, so the default body inlined with the
         // owner substituted (the shipped lowering, below) is exact and stays
         // a constant expression — hashbrown's `T::NEEDS_DROP`.
         let has_default = self
             .trait_nonvtable_consts
-            .get(&trait_short)
+            .get(&trait_key)
             .is_some_and(|v| v.iter().any(|(n, _, d)| n == name && d.is_some()));
         if has_default && self.ufcs_universal_blanket_traits.contains(&trait_short) {
             return None;
         }
         Some(format!(
             "{}<{}>::{}()",
-            self.nonvtable_traits_map_spelling(&trait_short),
+            self.nonvtable_traits_map_spelling(&trait_key),
             owner_cpp,
             escape_cpp_keyword(name)
         ))

@@ -68,3 +68,7 @@ compile_test*
 !trait_probes_scoping/Cargo.toml
 !trait_probes_scoping/src/
 !trait_probes_scoping/src/lib.rs
+!trait_probes_nonvtable/
+!trait_probes_nonvtable/Cargo.toml
+!trait_probes_nonvtable/src/
+!trait_probes_nonvtable/src/lib.rs
