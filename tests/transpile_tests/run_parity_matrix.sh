@@ -31,8 +31,13 @@ declare -a MATRIX_CRATES=(
     # §3.2 trait lowering (book §3.2.12/§3.2.15): one #[test] per measured
     # cell of the six 2026-10-04 carrier probes, one crate per probe family so
     # each flips PASS independently. KNOWN_FAIL until the phase-2 step that
-    # fixes that family's shipped-lane cells lands.
+    # fixes that family's shipped-lane cells lands (thin/defaults/scoping/
+    # collapse flipped at steps 4 and 7; census stays known-fail).
     "trait_probes_census"
+    "trait_probes_thin"
+    "trait_probes_defaults"
+    "trait_probes_collapse"
+    "trait_probes_scoping"
     # alloc: the CONSOLIDATED stdlib module — Rust's `alloc` crate
     # (vec + raw_vec + collections/vec_deque) emitted as ONE C++20 module via
     # --expand, dissolving the Vec<->VecDeque cycle stubs and the per-port

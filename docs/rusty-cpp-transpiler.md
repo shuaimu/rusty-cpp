@@ -2346,6 +2346,21 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   is final, an interface (abstract, protected constructor) never is. Oracle: `trait_probes_collapse`
   6/6 (was a precompile failure); thin 3/3, defaults 2/2, scoping 3/3 hold; thin/defaults/collapse/
   scoping leave `KNOWN_FAIL_CRATES`, `census` stays (its two cells above are untouched by rule 7).
+- *Step (3) — closed under step (6):* default bodies already lower `self.m()` through the CPO
+  (`try_emit_default_body_self_trait_call`, rule 6: `Tr_::m(self_)` first, the implementor's member
+  only as the cross-crate fallback), and the body-kind flag is `ufcs_default_body_trait` — set for a
+  default template's body only, so impl bodies keep the ordinary lowering. Nothing of step (3)
+  remains open.
+- *Measured 2026-10-07, for steps (5), (8) and (1):* a bounded generic (`fn grow<T: Shape>(t: &T)`)
+  whose method name is *also* a local struct member (the name is not `TraitOnly`) lowers `t.scaled(3)`
+  to the member-first ladder, and that ladder's no-member arms name the **`rusty_ext` twin**
+  (`::rusty_ext::scaled(t, 3)`), not the CPO and not the directive — correct today (`grow(&5)` = 115 =
+  rustc) only because the foreign-self impl is emitted twice. Step (5) must re-point those arms to
+  `Shape_::scaled` before the twin goes; the bound-qualified spelling of step (6) (`Shape_::scaled(t,
+  3)` from `T: Shape`) must extend past `TraitOnly` names, and that is a precondition of step (1) too.
+  `T::new(x)` / `T::SIDES` on the same bound with `T = i32` is `type 'int' cannot be used prior to
+  '::'` — the step-(8) cell (`TrTraits<T>::new_()`, `TrTraits<T>::SIDES`); a local struct passes
+  through its static members.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
