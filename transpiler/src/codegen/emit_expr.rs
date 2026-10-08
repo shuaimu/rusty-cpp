@@ -13860,6 +13860,42 @@ impl CodeGen {
             "rusty"
         };
         if extension_ns == "rusty_ext" {
+            // Step 5b: a method whose single crate-trait owner the `impl_` lane
+            // covers reaches `Tr_::m` — the twin it used to name is no longer
+            // emitted. Member-first (an inherent method of the same name may
+            // exist on this receiver — the name is not `TraitOnly` here), the
+            // dispatcher first for a keyed call or a bound type-parameter
+            // receiver.
+            if let Some(owners) = self.ufcs_method_trait_owners.get(&method_name)
+                && owners.len() == 1
+                && let Some(owner) = owners.iter().next()
+                && self
+                    .nonvtable_trait_key(owner)
+                    .is_some_and(|key| self.ufcs_impl_lane_covers_trait_key(&key))
+            {
+                let escaped = escape_cpp_keyword_in_member_position(&method_name);
+                let callee = format!("{}::{}", self.ufcs_trait_namespace(owner), escaped);
+                let recv_ty = self.infer_simple_expr_type(&mc.receiver);
+                let trailing = self.ufcs_trailing_key_args(
+                    owner,
+                    &method_name,
+                    recv_ty.as_ref(),
+                    None,
+                    &[],
+                    expected_ty,
+                );
+                let cpo_first = !trailing.is_empty()
+                    || self
+                        .bound_owner_for_type_param_receiver(&mc.receiver, &method_name)
+                        .is_some();
+                return Some(self.emit_extension_call_with_receiver_autoderef_fallback_ordered(
+                    &callee,
+                    &all_args[0],
+                    &all_args[1..],
+                    &trailing,
+                    cpo_first,
+                ));
+            }
             if let Some(qualified_fn) = self
                 .resolve_scoped_namespace_function_expr_path("rusty_ext", &method_name)
                 .or_else(|| {

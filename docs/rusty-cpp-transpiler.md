@@ -2448,6 +2448,24 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   that ladder bottoms out in the runtime's `rusty::iter` as the plain member path always did
   (`T::FLAGS.iter()` on a `std::span`). This is step (1)'s precondition and the ground step (5b) stands
   on.
+- *Step (5a) gate (2026-10-07, main @ 4d9d3c68):* matrix 28 rows, 20 PASS, 5 FAIL (the pre-existing
+  set), 3 known-fail; unit 2581; the one integration red is the baseline's. Two FAIL rows moved: bitflags
+  gained `is_empty` (the `iter` hazard again — a crate trait declaring a runtime-provided name makes
+  every call of that name a candidate for its ladder; `name.is_empty()` on a `std::string_view`), so the
+  ladder's runtime final arm is now a verified allowlist (`iter`, `is_empty`, `len`); indexmap (hashbrown)
+  gained `fill_empty` on a `std::span<MaybeUninit<Tag>>` — a mapping gap of that known-fail row, no
+  runtime counterpart, not addressed here.
+- *2026-10-07 — step (5b), the placement rule's retarget:* a method name that is not `TraitOnly` (an
+  inherent method of the same name exists somewhere) with a *single* crate-trait owner the `impl_` lane
+  covers (a crate-declared trait that is not a `cpp_trait_member_dispatch` owner) reaches `Tr_::m` from
+  the extension route — member-first there (the inherent method may be on this receiver), the dispatcher
+  first for a keyed call or a bound type-parameter receiver (step 5a). The `rusty_ext` twin's *emission*
+  stays until phase 3 — **measured**: dropping it where the lane has the function broke serde_core (its
+  hardcoded `de::rusty_ext::into_deserializer<E>` routes name the twin), smallvec (`extend_from_slice`)
+  and nine unit expectations; the serde routes, the hand-written runtime block and the incumbent's 25
+  symbols ((aa) in §3.2.16) are phase 3's deletions, together, once the manifest carries the dependency
+  trait's namespace for the cross-crate bridge. The ladder's runtime final arm is a verified allowlist
+  (`iter`, `is_empty`, `len`).
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

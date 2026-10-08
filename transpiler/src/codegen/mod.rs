@@ -24514,6 +24514,23 @@ impl CodeGen {
         out
     }
 
+    /// Book §3.2.2 / §3.2.5 (phase-2 step 5b): is this trait key — the lane's
+    /// scoped key, `de::Error` — carried by the `impl_` lane (a crate-declared
+    /// trait whose impls emit `Tr_::impl_` functions), so that a call on one
+    /// of its methods reaches `Tr_::m`? (The `rusty_ext` twin stays emitted
+    /// until phase 3: serde's hardcoded `rusty_ext` routes still name it —
+    /// measured, serde_core `into_deserializer`.)
+    pub(super) fn ufcs_impl_lane_covers_trait_key(&self, trait_key: &str) -> bool {
+        if !self.trait_declared_paths.contains(trait_key) {
+            return false;
+        }
+        let short = trait_key.rsplit("::").next().unwrap_or(trait_key);
+        !self
+            .cpp_trait_member_dispatch_traits
+            .iter()
+            .any(|t| t == trait_key || t.rsplit("::").next() == Some(short))
+    }
+
     /// Step 8: does the trait (scoped key) have any non-vtable member?
     pub(super) fn trait_has_nonvtable_members(&self, trait_key: &str) -> bool {
         self.trait_nonvtable_consts.get(trait_key).is_some_and(|v| !v.is_empty())
@@ -43540,13 +43557,20 @@ impl CodeGen {
         // rusty_ext overload nor a member — Rust's IntoIterator for &[T]
         // lowers through the slice iterator. Make the member tier conditional
         // and bottom out in rusty::iter for that one method.
-        if callee_leaf == "iter" && extra_args.is_empty() {
-            // A crate trait declaring `iter` (bitflags' `Flags::iter`) makes
-            // every `.iter()` a candidate for its ladder; a receiver that is
-            // neither an implementor nor a member-carrying type — a
-            // `std::span` (`T::FLAGS.iter()`) — bottoms out in the runtime's
-            // `rusty::iter`, as the plain member path always did.
-            let iter_fallback = format!("rusty::iter({})", deref_receiver);
+        // A crate trait declaring a name the runtime also provides (bitflags'
+        // `Flags::iter` / `Flags::is_empty`) makes every call of that name a
+        // candidate for its ladder; a receiver that is neither an implementor
+        // nor a member-carrying type — a `std::span` (`T::FLAGS.iter()`), a
+        // `std::string_view` (`name.is_empty()`) — bottoms out in the runtime's
+        // free function, as the plain member path always did. A verified
+        // allowlist: the qualified `rusty::<name>` is resolved at definition
+        // time, so a name with no counterpart would break the module build.
+        if matches!(callee_leaf, "iter" | "is_empty" | "len") {
+            let iter_fallback = if deref_args.len() == 1 {
+                format!("rusty::{}({})", callee_leaf, deref_receiver)
+            } else {
+                format!("rusty::{}({})", callee_leaf, deref_args.join(", "))
+            };
             let (first, second) = if cpo_first {
                 (
                     [direct_call.clone(), deref_call.clone()],
@@ -43644,6 +43668,7 @@ impl CodeGen {
                         {
                             return None;
                         }
+
                         let module_cpp = key_module
                             .split("::")
                             .filter(|s| !s.is_empty())
