@@ -2877,6 +2877,10 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   for every `(trait, impl)` that passes §3.2.1, with the free-function lane carrying the rest; phase 2
   revises the free-function lane in place per the table above, behind a per-crate switch; phase 3 deletes
   what the revision orphaned (`rusty_ext`, the Fix A markers, the `using` injection, the per-impl adapters).
+  *Status (2026-10-08):* phases 0–2 landed; of phase 3's four deletions three are closed on main (the
+  `using` injection and the per-impl adapters by phase 2, the Fix A markers' last traces by phase 3 step
+  3) and the trait manifest is version 2; `rusty_ext` is measured on `wip/trait-phase3-rusty-ext` (the
+  twin retired, the namespace kept), awaiting (aa) — see the §3.2.12 entries.
 
 #### 3.2.13 Default methods
 
