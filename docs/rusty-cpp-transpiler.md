@@ -2412,6 +2412,42 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   collapse unchanged. Not covered: a generic trait's consts and no-receiver fns (no `rusty::tag<A…>`
   key on the Traits forwarders yet — `TraitsG` is the home, §3.2.8) and dependency-crate traits (the
   registries are per crate; the manifest gains them with its tier-1 fields, §3.2.16 phase 1).
+- *Step (8) gate (2026-10-07, main @ d1249a2a):* matrix 28 rows, 20 PASS — `trait_probes_nonvtable`
+  PASS in the matrix proper (leaves `KNOWN_FAIL_CRATES`), `trait_probes_collapse` PASS — 5 FAIL, all
+  pre-existing and outside this lane (alloc / rusty / path port builds, bitflags, the serde_bytes
+  cross-crate shadow), 3 known-fail (hashbrown, indexmap, census); unit 2581; the integration suite's
+  one red (`crate_mode_uses_one_cargo_selected_target_dependency_graph_atomically`, a fail-closed
+  expectation that `cargo metadata`'s earlier "could not execute `missing-rustc`" pre-empts) is in the
+  branch's baseline gate. The gate is therefore RED on the pre-existing set only, and `main` carries
+  steps 2–8 locally, unpushed by the no-push-while-red rule — a call for the owner, not the emitter.
+- *2026-10-07 — step (5a), the bound-qualified receiver past `TraitOnly` names:* a method-call receiver
+  whose declared type is a type parameter bounded by a crate trait that declares the method (or a
+  supertrait of the bound does) calls that trait's dispatcher through the **CPO-first ladder** (direct,
+  then through the pointer-like receiver; the implementor's member kept as the cross-crate fallback —
+  the forwarder slots' shape), whatever other owners the method *name* has; a `cpp_trait_member_dispatch`
+  owner and an ambiguous bound set keep the shipped lowering. Measured on the step-7 probe: `grow(&5)`
+  = 115 with no `rusty_ext` arm in the ladder (was 115 only through the twin). The ladder emitter
+  gains an explicit order switch; keyed calls keep the namespace first. Found on the way: the
+  method-owner map that qualifies a `TraitOnly` name as `<Tr>_::m` still *excluded assoc-const
+  traits* — a pre-step-8 rule from when such a trait had no `<Tr>_::m` (qualifying was a hard error);
+  since step 8 they carry impl functions, consts and dispatchers like any trait, so the exclusion is
+  lifted (the step-7 probe's `Shape` has `const SIDES`, and its `scaled` fell through to the member
+  ladder for that reason alone). With those traits as owners, bitflags' `Flags::iter(&self)` *default*
+  bound `T::FLAGS.iter()` on a `std::span` — an unconstrained single-owner default accepts any receiver
+  whose name is in scope — so a default template now carries `requires has_<Tr><Self_>` (the
+  table's shape; step 2 had constrained multi-owner defaults only), *except* beside a blanket or
+  conditional impl of the trait: its constrained functions must keep beating the default
+  (constrained ▷ unconstrained), and a constrained default ties them — neither `has_Score<T>` nor
+  `has_Super<Self_>` subsumes the other (thin's `impl<T: Score> Super for T`, measured) — so there only
+  a multi-owner default is constrained, as at step 2, until the blanket's own-marker conjunct
+  (`has_Score<T> && has_Super<T>`, which needs the emitter to know the blanket's marker was emitted)
+  lands. Two consequences: an *empty* impl
+  (`impl Super for Sc {}`) witnesses its self type with the marker too — with constrained defaults,
+  `Super_::s(sc)` otherwise fell past the default to a member `Sc` does not have (thin); and a crate
+  trait declaring `iter` (bitflags' `Flags::iter`) makes every `.iter()` a candidate for its ladder, so
+  that ladder bottoms out in the runtime's `rusty::iter` as the plain member path always did
+  (`T::FLAGS.iter()` on a `std::span`). This is step (1)'s precondition and the ground step (5b) stands
+  on.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

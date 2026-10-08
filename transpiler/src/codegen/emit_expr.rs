@@ -6972,6 +6972,50 @@ impl CodeGen {
     /// that emitted no free function. Rust's default body never sees an
     /// inherent same-named method; the shipped member-first lowering did
     /// (measured `2002` where rustc gives `2`).
+    /// Book §3.2.6 (step 5): the unique crate trait, among a type-parameter
+    /// receiver's bounds (or their supertraits), that declares `method` —
+    /// `None` for any other receiver, for a `cpp_trait_member_dispatch` owner
+    /// (members only), and when no bound or more than one declares it.
+    pub(super) fn bound_owner_for_type_param_receiver(
+        &self,
+        receiver: &syn::Expr,
+        method: &str,
+    ) -> Option<String> {
+        let declares = |t: &str| {
+            self.ufcs_declared_trait_methods
+                .get(t)
+                .is_some_and(|ms| ms.iter().any(|m| m == method))
+        };
+        let candidates = self.receiver_candidate_bound_traits(receiver)?;
+        let mut hits: Vec<String> = Vec::new();
+        for c in &candidates {
+            let owner = if declares(c) {
+                Some(c.clone())
+            } else {
+                self.ufcs_elaborate_supertraits(std::slice::from_ref(c))
+                    .into_iter()
+                    .find(|sup| declares(sup))
+            };
+            if let Some(o) = owner
+                && !hits.contains(&o)
+            {
+                hits.push(o);
+            }
+        }
+        if hits.len() != 1 {
+            return None;
+        }
+        let owner = hits.pop()?;
+        if self
+            .cpp_trait_member_dispatch_traits
+            .iter()
+            .any(|t| t == &owner || t.rsplit("::").next() == Some(owner.as_str()))
+        {
+            return None;
+        }
+        Some(owner)
+    }
+
     fn try_emit_default_body_self_trait_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
         let trait_name = self.ufcs_default_body_trait.as_ref()?;
         if mc.turbofish.is_some() {
@@ -7250,6 +7294,40 @@ impl CodeGen {
                     method_name,
                     self.ufcs_method_classes.get(&method_name),
                     self.ufcs_method_trait_owners.get(&method_name)
+                );
+            }
+            // Book §3.2.6 (phase-2 step 5): a receiver whose DECLARED type is a
+            // type parameter bounded by a crate trait that declares `m` calls
+            // that trait's `m`, whatever other owners the NAME has — an inherent
+            // `scaled` on a local struct does not reach a `T: Shape` receiver.
+            // The shipped member-first ladder named the `rusty_ext` twin for it
+            // (`grow(&5)` = 115 only because the foreign-self impl was emitted
+            // twice); the CPO-first ladder keeps the member as the cross-crate
+            // fallback, the forwarder slots' shape.
+            if !matches!(
+                self.ufcs_method_classes.get(&method_name),
+                Some(crate::transpile::MethodNameClass::TraitOnly)
+            ) && !Self::method_prefers_runtime_helper_namespace(&method_name)
+                && !self.method_call_is_raw_pointer_intrinsic(mc, &method_name)
+                && let Some(owner) =
+                    self.bound_owner_for_type_param_receiver(&mc.receiver, &method_name)
+            {
+                let receiver = self.emit_expr_to_string(&mc.receiver);
+                let args: Vec<String> =
+                    mc.args.iter().map(|a| self.emit_expr_to_string(a)).collect();
+                let escaped = escape_cpp_keyword_in_member_position(&method_name);
+                let callee = format!("{}::{}", self.ufcs_trait_namespace(&owner), escaped);
+                let recv_ty = self.infer_simple_expr_type(&mc.receiver);
+                let trailing = self.ufcs_trailing_key_args(
+                    &owner,
+                    &method_name,
+                    recv_ty.as_ref(),
+                    None,
+                    &[],
+                    expected_ty,
+                );
+                return self.emit_extension_call_with_receiver_autoderef_fallback_cpo_first(
+                    &callee, &receiver, &args, &trailing,
                 );
             }
             if matches!(
@@ -7585,8 +7663,15 @@ impl CodeGen {
                             &[],
                             expected_ty,
                         );
-                        return self.emit_extension_call_with_receiver_autoderef_fallback_with_trailing(
-                            &callee, &receiver, &args, &trailing,
+                        // Book §3.2.6 (step 5): a bound type-parameter receiver
+                        // calls the trait's dispatcher first (the member is the
+                        // cross-crate fallback), like a keyed call.
+                        let cpo_first = !trailing.is_empty()
+                            || self
+                                .bound_owner_for_type_param_receiver(&mc.receiver, &method_name)
+                                .is_some();
+                        return self.emit_extension_call_with_receiver_autoderef_fallback_ordered(
+                            &callee, &receiver, &args, &trailing, cpo_first,
                         );
                     }
                     // Multi-owner (Fix A): try each owner's qualified `<Tr>_::m`
@@ -7618,8 +7703,15 @@ impl CodeGen {
                             &[],
                             expected_ty,
                         );
-                        return self.emit_extension_call_with_receiver_autoderef_fallback_with_trailing(
-                            &callee, &receiver, &args, &trailing,
+                        // Book §3.2.6 (step 5): a bound type-parameter receiver
+                        // calls the trait's dispatcher first (the member is the
+                        // cross-crate fallback), like a keyed call.
+                        let cpo_first = !trailing.is_empty()
+                            || self
+                                .bound_owner_for_type_param_receiver(&mc.receiver, &method_name)
+                                .is_some();
+                        return self.emit_extension_call_with_receiver_autoderef_fallback_ordered(
+                            &callee, &receiver, &args, &trailing, cpo_first,
                         );
                     }
                     // The marker-based guard needs every owner's `impls_<Tr>`

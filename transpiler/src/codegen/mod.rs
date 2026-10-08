@@ -1855,6 +1855,11 @@ pub struct CodeGen {
     /// Traits with an unbounded `impl<T> Tr for T`: their marker primary is
     /// defined TRUE (see collect_unbounded_blanket_impl_traits).
     pub(crate) ufcs_universal_blanket_traits: HashSet<String>,
+    /// Traits with at least one impl carrying a TYPE parameter (blanket or
+    /// conditional) — their default templates stay unconstrained so the
+    /// constrained blanket beats them (book §3.2.2 rules 2–3; see
+    /// `collect_traits_with_generic_impls`).
+    pub(crate) ufcs_traits_with_generic_impls: HashSet<String>,
     /// Book §3.2.2 rules 1-3 (2026-10-07): while a `<Tr>_::impl_` impl/default
     /// function is being emitted, the trait namespace whose `impl_::tag` is
     /// parameter 0 of every function (`Some("Tr_")`); `None` for the
@@ -3627,6 +3632,7 @@ impl CodeGen {
             ufcs_marker_primaries_emitted: HashSet::new(),
             ufcs_marker_specializations_emitted: HashSet::new(),
             ufcs_universal_blanket_traits: HashSet::new(),
+            ufcs_traits_with_generic_impls: HashSet::new(),
             ufcs_tag_namespace: None,
             ufcs_abi_companion_wanted: false,
             ufcs_abi_companions_pending: Vec::new(),
@@ -8193,6 +8199,7 @@ impl CodeGen {
         self.ufcs_marker_primaries_emitted.clear();
         self.ufcs_marker_specializations_emitted.clear();
         self.ufcs_universal_blanket_traits.clear();
+        self.ufcs_traits_with_generic_impls.clear();
         self.canonical_std_hash_map_import_bindings.clear();
         self.rust_item_import_bindings.clear();
         self.native_cpp_type_names.clear();
@@ -8515,6 +8522,8 @@ impl CodeGen {
             crate::transpile::collect_trait_methods_returning_generic(&file.items);
         self.ufcs_universal_blanket_traits =
             crate::transpile::collect_unbounded_blanket_impl_traits(&file.items);
+        self.ufcs_traits_with_generic_impls =
+            crate::transpile::collect_traits_with_generic_impls(&file.items);
         self.ufcs_trait_assoc_type_names =
             crate::transpile::collect_trait_assoc_type_names(&file.items);
         // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls
@@ -21638,6 +21647,12 @@ impl CodeGen {
             })
             .collect();
         if specs.is_empty() {
+            // An EMPTY impl (`impl Super for Sc {}` — every method defaulted)
+            // still witnesses its self type: the defaults are constrained by
+            // `has_<Tr><Self_>` (step 5a), so without the marker `Super_::s(sc)`
+            // would fall past the default to a member `Sc` does not have
+            // (thin probe, measured).
+            self.emit_ufcs_impl_marker_specialization(impl_block, &trait_name);
             return;
         }
         // Book §3.2.3 (2026-10-07): each impl also witnesses its self type as
@@ -22517,16 +22532,26 @@ impl CodeGen {
     ) {
         for spec in specs.iter_mut() {
             let m = spec.method.sig.ident.to_string();
-            if self
+            let multi_owner = self
                 .ufcs_method_trait_owners
                 .get(&m)
-                .is_some_and(|o| o.len() > 1)
-            {
-                // Book §3.2.3 (2026-10-07): the exact-type marker — an
-                // `int64_t` receiver no longer satisfies B's default through
-                // `__ufcs_impls(const int32_t&)`'s integral conversion.
-                // Spelled through the CONCEPT (not the inline `impls_` expression)
-                // so a blanket constrained `has_<Tr><T> && …` can subsume it.
+                .is_some_and(|o| o.len() > 1);
+            // Book §3.2.3 / the §3.2.12 table: a default template carries
+            // `requires has_<Tr><Self_>` — the exact-type marker (an `int64_t`
+            // receiver no longer satisfies B's default through an integral
+            // conversion), and, since phase-2 step (5a) made assoc-const traits
+            // owners, the guard that keeps a default off a receiver that merely
+            // has the method's name in scope (bitflags' `Flags::iter(&self)`
+            // default bound `T::FLAGS.iter()` on a `std::span`, measured) —
+            // EXCEPT beside a blanket / conditional impl of the trait, whose
+            // constrained functions must keep beating the default (constrained
+            // ▷ unconstrained; a constrained default ties them — thin's
+            // `impl<T: Score> Super for T`, measured): there only a multi-owner
+            // default is constrained, as at step 2, until the blanket's
+            // own-marker conjunct lands (§3.2.12). Spelled through the CONCEPT
+            // (not the inline `impls_` expression) so that conjunct can subsume it.
+            let has_generic_impl = self.ufcs_traits_with_generic_impls.contains(trait_name);
+            if multi_owner || !has_generic_impl {
                 spec.extra_template_requires = Some(format!(
                     "requires has_{}<Self_>",
                     escape_cpp_keyword(trait_name)
@@ -43302,6 +43327,45 @@ impl CodeGen {
         extra_args: &[String],
         trailing: &str,
     ) -> String {
+        // A keyed call (book §3.2.2 rule 7) puts the trait namespace first.
+        self.emit_extension_call_with_receiver_autoderef_fallback_ordered(
+            callee,
+            receiver_expr,
+            extra_args,
+            trailing,
+            !trailing.is_empty(),
+        )
+    }
+
+    /// Book §3.2.6 (phase-2 step 5): the CPO-first ladder — the trait's
+    /// dispatcher (direct, then through the pointer-like receiver), the
+    /// implementor's member only as the cross-crate fallback — for a receiver
+    /// whose declared type is a type parameter bounded by the trait: the
+    /// forwarder slots' shape, whatever other owners the method NAME has.
+    pub(super) fn emit_extension_call_with_receiver_autoderef_fallback_cpo_first(
+        &self,
+        callee: &str,
+        receiver_expr: &str,
+        extra_args: &[String],
+        trailing: &str,
+    ) -> String {
+        self.emit_extension_call_with_receiver_autoderef_fallback_ordered(
+            callee,
+            receiver_expr,
+            extra_args,
+            trailing,
+            true,
+        )
+    }
+
+    fn emit_extension_call_with_receiver_autoderef_fallback_ordered(
+        &self,
+        callee: &str,
+        receiver_expr: &str,
+        extra_args: &[String],
+        trailing: &str,
+        cpo_first: bool,
+    ) -> String {
         // Each `extra_arg` is passed as a lambda parameter (`__arg{i}`)
         // rather than embedded textually in the IIFE body. This is
         // critical when `extra_args[i]` is itself a lambda that
@@ -43476,6 +43540,35 @@ impl CodeGen {
         // rusty_ext overload nor a member — Rust's IntoIterator for &[T]
         // lowers through the slice iterator. Make the member tier conditional
         // and bottom out in rusty::iter for that one method.
+        if callee_leaf == "iter" && extra_args.is_empty() {
+            // A crate trait declaring `iter` (bitflags' `Flags::iter`) makes
+            // every `.iter()` a candidate for its ladder; a receiver that is
+            // neither an implementor nor a member-carrying type — a
+            // `std::span` (`T::FLAGS.iter()`) — bottoms out in the runtime's
+            // `rusty::iter`, as the plain member path always did.
+            let iter_fallback = format!("rusty::iter({})", deref_receiver);
+            let (first, second) = if cpo_first {
+                (
+                    [direct_call.clone(), deref_call.clone()],
+                    [member_call_direct.clone(), member_call.clone()],
+                )
+            } else {
+                (
+                    [member_call_direct.clone(), member_call.clone()],
+                    [direct_call.clone(), deref_call.clone()],
+                )
+            };
+            return format!(
+                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                arg_param_list,
+                first[0], first[0],
+                first[1], first[1],
+                second[0], second[0],
+                second[1], second[1],
+                iter_fallback,
+                arg_call_list
+            );
+        }
         if callee_leaf == "into_iter" && extra_args.is_empty() {
             // Member tiers use the DIRECT receiver: deref_if_pointer_like
             // unboxes deref-view containers (rusty::Vec -> its span view),
@@ -43571,7 +43664,7 @@ impl CodeGen {
         // comes first and the member is only the cross-crate fallback
         // (`x.name()` under `X: ConvT<u8>` must not land on the struct
         // member that the i32 impl merged in).
-        if !trailing.is_empty() {
+        if cpo_first {
             return format!(
                 "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
                 arg_param_list,

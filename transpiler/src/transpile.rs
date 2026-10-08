@@ -1438,6 +1438,48 @@ pub fn collect_trait_methods_returning_generic(
 /// book §3.2.3 marker primary `impls_<Tr>` is defined TRUE (a constrained
 /// partial specialization would have nothing to constrain on and would be a
 /// redefinition of the primary — tap's `TapOps`, baseline 2026-10-07).
+/// Trait name → it has at least one impl with a TYPE parameter (a blanket
+/// `impl<T: B> Tr for T` or a conditional `impl<T> Tr for Vec<T>`). Book
+/// §3.2.2 rules 2–3: such an impl's functions are constrained by their
+/// crate-trait bounds, and a default template beside them must stay
+/// UNCONSTRAINED so the constrained blanket beats it (constrained ▷
+/// unconstrained); a default constrained by `has_Tr<Self_>` would tie it
+/// (neither constraint subsumes the other — thin's `impl<T: Score> Super for
+/// T`, measured). The conjunct that would let the blanket subsume
+/// (`has_Score<T> && has_Super<T>`) waits on tracking whether the blanket's
+/// marker specialization was emitted (§3.2.12).
+pub fn collect_traits_with_generic_impls(
+    items: &[syn::Item],
+) -> std::collections::HashSet<String> {
+    fn walk(items: &[syn::Item], out: &mut std::collections::HashSet<String>) {
+        for item in items {
+            match item {
+                syn::Item::Impl(imp) => {
+                    let Some((_, trait_path, _)) = &imp.trait_ else { continue };
+                    let Some(trait_name) = trait_path.segments.last().map(|s| s.ident.to_string()) else { continue };
+                    if imp
+                        .generics
+                        .params
+                        .iter()
+                        .any(|p| matches!(p, syn::GenericParam::Type(_)))
+                    {
+                        out.insert(trait_name);
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        walk(nested, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    walk(items, &mut out);
+    out
+}
+
 pub fn collect_unbounded_blanket_impl_traits(
     items: &[syn::Item],
 ) -> std::collections::HashSet<String> {
@@ -2595,11 +2637,13 @@ fn collect_concrete_trait_impl_method_owners_into(
                     .unwrap_or(&written_trait_name)
                     .to_string();
                 // Only crate-declared traits (foreign-trait impls aren't UFCS-
-                // lowered), skip assoc-const (runtime-helper) traits, and only
-                // concrete impls (no type-param generics) — generic/blanket
-                // impls don't reliably emit an early-declared `<Tr>_`.
+                // lowered) and only concrete impls (no type-param generics) —
+                // generic/blanket impls don't reliably emit an early-declared
+                // `<Tr>_`. An assoc-const trait is in the lane since book
+                // §3.2.2's non-vtable members landed (phase-2 step 8: its impl
+                // functions, consts and dispatchers exist), so it is an owner
+                // like any other; the runtime helper stays beside the lane.
                 if !declared_traits.contains(&trait_name)
-                    || assoc_const_traits.contains(&trait_key)
                     || excluded_traits.contains(&trait_key)
                 {
                     continue;
@@ -2633,9 +2677,8 @@ fn collect_concrete_trait_impl_method_owners_into(
                 } else {
                     format!("{}::{}", module_path.join("::"), trait_name)
                 };
-                if !assoc_const_traits.contains(&trait_key)
-                    && !excluded_traits.contains(&trait_key)
-                {
+                if !excluded_traits.contains(&trait_key) {
+                    let _ = &assoc_const_traits;
                     for ti in &t.items {
                         if let syn::TraitItem::Fn(m) = ti
                             && m.default.is_some()
