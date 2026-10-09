@@ -2811,8 +2811,8 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   four deletions §3.2.16 names for phase 3, three are closed (the `using` injection — phase 2 step 1;
   the per-impl adapters — phase 2 step 4, pinned by the step-1 regression test; the Fix A markers);
   `rusty_ext` is (aa), on its own branch for the ABI owner's call.
-- *2026-10-08 — phase 3 / (aa), step 1 (branch `wip/trait-phase3-rusty-ext`, NOT on main): a
-  lane-covered trait emits no `rusty_ext` twin.* Re-measured on top of phase 1: with the twin off
+- *2026-10-08 — phase 3 / (aa), step 1 (measured on `wip/trait-phase3-rusty-ext`, landed on main the
+  same day once the owner decided (aa)): a lane-covered trait emits no `rusty_ext` twin.* Re-measured on top of phase 1: with the twin off
   for every crate-declared trait (its functions are `Tr_::impl_` ones, reached through `Tr_::m`)
   and the four places that could still spell it gated the same way — the receiver ladder's
   `rusty_ext` fallback arm, the resolver's known-path set, the forward-declaration pass, and the
@@ -2843,11 +2843,13 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   (`de::rusty_ext::deserialize_any` and its family: 5161 references in serde_core alone), the
   de/ser crate-wrap bridges and the `ser::impls::rusty_ext` block in rusty.hpp, and the 25
   incumbent symbols of rrr.serializable's ratified object are among the twins this step stops
-  emitting — (aa) is the ABI owner's call.
+  emitting — (aa), decided 2026-10-08: no compatibility obligation, the incumbent re-ratifies
+  against the lane's 25 `<Trait>_` symbols (the mako-side `nm` measurement is still to be taken).
 - *2026-10-08 — phase 3 / (aa), step 2: a dependency's trait has no twin in a consumer either.*
   A trait a dependency declares has its lane in the dependency's module, reached bare through the
-  crate wrap's Rule-2 bridge, and a consumer's own impls of it already ride that lane (`__ufcs_<Tr>`
-  bridged into `Tr_::impl_`) — yet a consumer still forward-declared the dependency's retired twin
+  crate wrap's Rule-2 bridge, and a consumer's own impl of it takes the member tier (`Mine::tap()`,
+  measured — not the lane, as the Rule-2 comment suggests) — yet a consumer still forward-declared
+  the dependency's retired twin
   and probed it in the receiver ladder (the tap row: declared, never defined, selected only by the
   luck of arm order). The twin-retired predicate, the call-site lane route and the output retarget
   pass now recognize a dependency-declared trait (its module from the manifest), including one
@@ -2905,8 +2907,10 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   what the revision orphaned (`rusty_ext`, the Fix A markers, the `using` injection, the per-impl adapters).
   *Status (2026-10-08):* phases 0–2 landed; of phase 3's four deletions three are closed on main (the
   `using` injection and the per-impl adapters by phase 2, the Fix A markers' last traces by phase 3 step
-  3) and the trait manifest is version 2; `rusty_ext` is measured on `wip/trait-phase3-rusty-ext` (the
-  twin retired, the namespace kept), awaiting (aa) — see the §3.2.12 entries.
+  3) and the trait manifest is version 2; the `rusty_ext` twin is retired on main for every
+  lane-carried trait, local or dependency-declared (phase 3 / (aa) steps 1–3, the owner's decision
+  of 2026-10-08: no compatibility obligation); the namespace itself stays for the serde runtime
+  prelude and the foreign-trait fallback — see the §3.2.12 entries.
 
 #### 3.2.13 Default methods
 
@@ -3522,8 +3526,9 @@ mismatch (the loader today reads no version and skips unparseable files).
   marker (loud; one line per impl; required for all-default traits and for generic required methods) vs. a
   concept through the CPOs (zero per-impl lines; silent memoization). Recommendation: the marker as the
   predicate; a CPO-`requires` conjunct admissible for non-generic required methods.
-- **(aa) The incumbent's `rusty_ext` symbols vs. phase 3 (open, 2026-10-07; measured on a branch
-  2026-10-08 — see the §3.2.12 entry "phase 3 / (aa), step 1").** rrr.serializable's
+- **(aa) The incumbent's `rusty_ext` symbols vs. phase 3 (opened 2026-10-07; DECIDED 2026-10-08 —
+  no compatibility obligation, the twins are retired on main, the incumbent re-ratifies against the
+  lane; see the §3.2.12 entries "phase 3 / (aa)", steps 1–3).** rrr.serializable's
   ratified object owns 25 `rusty_ext` symbols beside its 25 `Serialize_`/`Deserialize_` ones
   (`test_ufcs_layer_linkage_is_narrow_and_source_authenticated`, measured with `nm`). Phase 3 deletes
   the `rusty_ext` namespace; step (5) stops emitting the twin wherever an `impl_` function exists.
