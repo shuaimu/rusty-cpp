@@ -6465,8 +6465,11 @@ struct Handle {
         (*new_node_shadow1).len = static_cast<uint16_t>(new_len);
         // @unsafe
         {
-            auto k = rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, this->idx_field).assume_init_read();
-            auto v = rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, this->idx_field).assume_init_read();
+            // The median slots fall outside the shortened source-node length,
+            // so this is ownership transfer, not a copy. assume_init_read()
+            // deep-copies copyable owners and strands the originals here.
+            auto k = rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, this->idx_field).assume_init();
+            auto v = rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, this->idx_field).assume_init();
             move_to_slice(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_key_area_mut{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len))), rusty::slice_to((*new_node_shadow1).keys, new_len));
             move_to_slice(rusty::as_mut_slice(rusty::deref_call(this->node, rusty::detail::__mdisp_val_area_mut{}, rusty::range(rusty::detail::deref_if_pointer_like(this->idx_field) + 1, old_len))), rusty::slice_to((*new_node_shadow1).vals, new_len));
             rusty::deref_call(this->node, rusty::detail::__mdisp_len_mut{}) = static_cast<uint16_t>(this->idx_field);
@@ -7471,7 +7474,10 @@ T slice_remove(std::span<rusty::MaybeUninit<T>> slice, size_t idx) {
         const auto len = rusty::len(slice);
         assert((rusty::detail::deref_if_pointer_like(idx) < rusty::detail::deref_if_pointer_like(len)));
         const auto slice_ptr = reinterpret_cast<std::add_pointer_t<rusty::MaybeUninit<T>>>(rusty::as_mut_ptr(slice));
-        auto ret = ((*rusty::ptr::add(slice_ptr, std::move(idx)))).assume_init_read();
+        // The removed slot becomes logically uninitialized when the remaining
+        // elements shift left.  Relocate its owner instead of cloning copyable
+        // values: a clone would be stranded in the dead trailing slot.
+        auto ret = ((*rusty::ptr::add(slice_ptr, std::move(idx)))).assume_init();
         rusty::ptr::copy(rusty::ptr::add(slice_ptr, rusty::detail::deref_if_pointer_like(idx) + 1), rusty::ptr::add(slice_ptr, std::move(idx)), (rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(idx)) - 1);
         return std::move(ret);
     }
