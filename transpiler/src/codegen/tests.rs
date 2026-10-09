@@ -49804,3 +49804,39 @@ fn test_aa_consumer_impl_of_dependency_trait_rides_the_lane_without_a_twin() {
         "no twin, no twin spelling: {out}"
     );
 }
+
+#[test]
+fn test_aa_consumer_reference_self_impl_of_dependency_trait_keeps_its_member_carrier() {
+    // Review probe for (aa) step 2: a consumer's impl of a dependency trait on
+    // a REFERENCE self type (`impl TapOps for &Mine`) was never carried by the
+    // twin — at de24691d (before the step) the consumer's `rusty_ext` block
+    // for `TapOps` was EMPTY (the method deduped as dependency-provided), and
+    // the carrier was the member tier (`Mine::tap() const`, the reference
+    // receiver normalized onto the struct), before and after the retirement.
+    // `impl TapOps for Box<Mine>` is the pre-existing orphan-impl stub
+    // (`#if 0`, a foreign host type) in both states — not a regression of this
+    // step, and not pinned here.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "tapdep".to_string(),
+        declared_traits: vec!["TapOps".to_string()],
+        declared_trait_methods: [("TapOps".to_string(), vec!["tap".to_string()])]
+            .into_iter()
+            .collect(),
+        method_owners: [("tap".to_string(), vec!["TapOps".to_string()])]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    let file: syn::File = syn::parse_quote! {
+        pub struct Mine { pub v: i32 }
+        impl TapOps for &Mine { fn tap(self) -> Self { self } }
+        pub fn f(m: &Mine) -> i32 { m.tap().v }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(out.contains("Mine Mine::tap() const"), "member carrier: {out}");
+    assert!(!out.contains("rusty_ext::tap"), "no twin spelling: {out}");
+}
