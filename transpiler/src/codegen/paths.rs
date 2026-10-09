@@ -115,13 +115,22 @@ impl CodeGen {
             if !self.rusty_ext_twin_retired_for(trait_name) {
                 continue;
             }
-            let Some(full) = self.trait_declared_path_by_short_name.get(trait_name) else {
-                continue;
+            // The module the twin spelling names: a local trait's declaring
+            // module, or (a dependency trait) the module its manifest records.
+            let module = match self.trait_declared_path_by_short_name.get(trait_name) {
+                Some(full) => full
+                    .rsplit_once("::")
+                    .map(|(m, _)| m.to_string())
+                    .unwrap_or_default(),
+                None => match self
+                    .dependency_ufcs_trait_manifests
+                    .iter()
+                    .find_map(|m| m.declared_trait_modules.get(trait_name).cloned())
+                {
+                    Some(module) => module,
+                    None => continue,
+                },
             };
-            let module = full
-                .rsplit_once("::")
-                .map(|(m, _)| m.to_string())
-                .unwrap_or_default();
             for m in methods {
                 owners
                     .entry(m.clone())

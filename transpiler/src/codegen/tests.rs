@@ -7982,11 +7982,13 @@ fn test_cpp_internal_marker_gives_private_helpers_internal_linkage() {
 #[test]
 fn test_ufcs_layer_linkage_is_narrow_and_source_authenticated() {
     // Contract 10, NARROWED. Making every `<Trait>_` UFCS free function
-    // `inline` repo-wide removes 50 symbols that rrr.serializable's INCUMBENT
-    // object genuinely owns (measured with nm: 25 Serialize_/Deserialize_ plus
+    // `inline` repo-wide removed 50 symbols that rrr.serializable's INCUMBENT
+    // object genuinely owned (measured with nm: 25 Serialize_/Deserialize_ plus
     // 25 rusty_ext, all present). So a `pub` trait keeps ordinary strong UFCS
     // symbols; a non-`pub` trait (whose machinery is internal anyway) and a
-    // trait the SOURCE marks `cpp_internal` do not.
+    // trait the SOURCE marks `cpp_internal` do not. (§3.2.16 phase 3 / (aa)
+    // retired the 25 `rusty_ext` twins; the `<Trait>_` 25 are the surface the
+    // incumbent re-ratifies against.)
     let out = transpile_str_module(
         r#"
         pub trait Surface { fn m(&self) -> i32; }
@@ -49761,4 +49763,44 @@ fn test_ufcs_step8_non_vtable_members_through_traits_map() {
     );
     // A concrete local owner keeps its member.
     assert!(!out.contains("ShapeTraits<Sq>::SIDES()"), "a concrete owner is not routed: {out}");
+}
+
+#[test]
+fn test_aa_consumer_impl_of_dependency_trait_rides_the_lane_without_a_twin() {
+    // §3.2.16 phase 3 / (aa), step 2: a trait a DEPENDENCY declares has its
+    // lane in the dependency's module, reached bare through the crate wrap's
+    // Rule-2 bridge; a consumer's own impl of it is a `Tr_::impl_` function
+    // and a call reaches `Tr_::m`. Neither side spells the retired `rusty_ext`
+    // twin (the consumer used to forward-declare and probe it).
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "tapdep".to_string(),
+        declared_traits: vec!["TapOps".to_string()],
+        declared_trait_methods: [("TapOps".to_string(), vec!["tap".to_string()])]
+            .into_iter()
+            .collect(),
+        method_owners: [("tap".to_string(), vec!["TapOps".to_string()])]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    let file: syn::File = syn::parse_quote! {
+        pub struct Mine { pub v: i32 }
+        impl TapOps for Mine { fn tap(self) -> Self { self } }
+        pub fn f(m: Mine) -> i32 { let _ = 10.tap(); m.tap().v }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    // The consumer's own impl of the dependency's trait takes the member tier
+    // (`Mine::tap()`), which the receiver ladder probes first; the call on a
+    // receiver with no member (`10.tap()`, the dependency's blanket impl)
+    // reaches the dependency's dispatcher, bare.
+    assert!(out.contains("Mine Mine::tap() const"), "member-tier impl: {out}");
+    assert!(out.contains("TapOps_::tap("), "calls must reach the dispatcher: {out}");
+    assert!(
+        !out.contains("rusty_ext::tap") && !out.contains("Extension trait TapOps lowered to rusty_ext"),
+        "no twin, no twin spelling: {out}"
+    );
 }

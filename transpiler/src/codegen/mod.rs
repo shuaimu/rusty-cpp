@@ -21771,8 +21771,10 @@ impl CodeGen {
             .to_string();
         // Contract 10 (NARROWED, C21c): only a NON-`pub` trait's UFCS layer
         // takes vague linkage. A `pub` trait's `<Trait>_` functions are the
-        // ported surface — rrr.serializable's incumbent object owns 50 of
-        // them (25 Serialize_/Deserialize_ + 25 rusty_ext), MEASURED.
+        // ported surface — rrr.serializable's incumbent object owned 50 of
+        // them (25 Serialize_/Deserialize_ + 25 rusty_ext, MEASURED); the
+        // (aa) step retired the 25 `rusty_ext` twins, so the next measurement
+        // is 25 `<Trait>_` symbols (the incumbent re-ratifies on the mako side).
         self.ufcs_emitting_internal_linkage_trait =
             self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
         if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
@@ -21964,8 +21966,10 @@ impl CodeGen {
         };
         // Contract 10 (NARROWED, C21c): only a NON-`pub` trait's UFCS layer
         // takes vague linkage. A `pub` trait's `<Trait>_` functions are the
-        // ported surface — rrr.serializable's incumbent object owns 50 of
-        // them (25 Serialize_/Deserialize_ + 25 rusty_ext), MEASURED.
+        // ported surface — rrr.serializable's incumbent object owned 50 of
+        // them (25 Serialize_/Deserialize_ + 25 rusty_ext, MEASURED); the
+        // (aa) step retired the 25 `rusty_ext` twins, so the next measurement
+        // is 25 `<Trait>_` symbols (the incumbent re-ratifies on the mako side).
         self.ufcs_emitting_internal_linkage_trait =
             self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
         if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
@@ -23122,8 +23126,10 @@ impl CodeGen {
                     };
                     // Contract 10 (NARROWED, C21c): only a NON-`pub` trait's UFCS layer
                     // takes vague linkage. A `pub` trait's `<Trait>_` functions are the
-                    // ported surface — rrr.serializable's incumbent object owns 50 of
-                    // them (25 Serialize_/Deserialize_ + 25 rusty_ext), MEASURED.
+                    // ported surface — rrr.serializable's incumbent object owned 50 of
+                    // them (25 Serialize_/Deserialize_ + 25 rusty_ext, MEASURED); the
+                    // (aa) step retired the 25 `rusty_ext` twins, so the next measurement
+                    // is 25 `<Trait>_` symbols (the incumbent re-ratifies on the mako side).
                                 self.ufcs_emitting_internal_linkage_trait =
                         self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
                     self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
@@ -23234,8 +23240,10 @@ impl CodeGen {
                     };
                     // Contract 10 (NARROWED, C21c): only a NON-`pub` trait's UFCS layer
                     // takes vague linkage. A `pub` trait's `<Trait>_` functions are the
-                    // ported surface — rrr.serializable's incumbent object owns 50 of
-                    // them (25 Serialize_/Deserialize_ + 25 rusty_ext), MEASURED.
+                    // ported surface — rrr.serializable's incumbent object owned 50 of
+                    // them (25 Serialize_/Deserialize_ + 25 rusty_ext, MEASURED); the
+                    // (aa) step retired the 25 `rusty_ext` twins, so the next measurement
+                    // is 25 `<Trait>_` symbols (the incumbent re-ratifies on the mako side).
                                 self.ufcs_emitting_internal_linkage_trait =
                         self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
                     self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
@@ -25072,10 +25080,22 @@ impl CodeGen {
     /// site that emitted, declared, resolved or spelled the twin asks this.
     pub(super) fn rusty_ext_twin_retired_for(&self, trait_short: &str) -> bool {
         !self.emit_rusty_ext_twin
-            && self
+            && (self
                 .trait_declared_path_by_short_name
                 .get(trait_short)
                 .is_some_and(|full| self.ufcs_impl_lane_covers_trait_key(full))
+                || self.dependency_declares_trait(trait_short))
+    }
+
+    /// Book §3.2.7 / (aa): is this trait (by short name) declared by a
+    /// dependency whose manifest this crate consumes? Its lane lives in the
+    /// dependency's module and is reached BARE (`Tr_::m`, the Rule-2 bridge of
+    /// the crate wrap); a consumer's own impls of it ride the same lane
+    /// (`__ufcs_<Tr>` bridged into `Tr_::impl_`), so it has no twin either.
+    pub(super) fn dependency_declares_trait(&self, trait_short: &str) -> bool {
+        self.dependency_ufcs_trait_manifests
+            .iter()
+            .any(|m| m.declared_traits.iter().any(|t| t == trait_short))
     }
 
     pub(super) fn ufcs_impl_lane_covers_trait_key(&self, trait_key: &str) -> bool {

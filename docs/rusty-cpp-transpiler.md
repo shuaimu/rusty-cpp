@@ -2844,6 +2844,17 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   de/ser crate-wrap bridges and the `ser::impls::rusty_ext` block in rusty.hpp, and the 25
   incumbent symbols of rrr.serializable's ratified object are among the twins this step stops
   emitting — (aa) is the ABI owner's call.
+- *2026-10-08 — phase 3 / (aa), step 2: a dependency's trait has no twin in a consumer either.*
+  A trait a dependency declares has its lane in the dependency's module, reached bare through the
+  crate wrap's Rule-2 bridge, and a consumer's own impls of it already ride that lane (`__ufcs_<Tr>`
+  bridged into `Tr_::impl_`) — yet a consumer still forward-declared the dependency's retired twin
+  and probed it in the receiver ladder (the tap row: declared, never defined, selected only by the
+  luck of arm order). The twin-retired predicate, the call-site lane route and the output retarget
+  pass now recognize a dependency-declared trait (its module from the manifest), including one
+  with only blanket impls in the dependency (no concrete owner reaches `method_owners`; the owner
+  comes from `declared_trait_methods`). A two-crate unit test pins it: the consumer's own impl takes
+  the member tier (`Mine::tap()`), a call on a receiver without the member reaches `TapOps_::tap`,
+  nothing spells the twin. Measured: unit 2595 green (+ the baseline integration red); full matrix 28 rows: 20 PASS, 5 FAIL (the pre-existing alloc, bitflags, path, rusty, serde_bytes), 3 known-fail — the baseline; rows tap, serde_repr, serde_core, serde, smallvec pass, and the tap consumer now spells the dependency's dispatchers (`TapOps_::tap`, `TapOptionOps_`, `TapResultOps_`) with no twin reference.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

@@ -14028,7 +14028,30 @@ impl CodeGen {
                     .collect();
                 owners.sort();
                 owners.dedup();
-                if owners.len() == 1 { owners.pop() } else { None }
+                if owners.len() == 1 {
+                    owners.pop()
+                } else if owners.is_empty() {
+                    // A dependency's trait with only BLANKET impls (`impl<T>
+                    // TapOps for T` in the dependency): no concrete owner
+                    // reaches the manifest's `method_owners`, but the trait
+                    // declares the method — its lane dispatcher is reached
+                    // bare (`TapOps_::tap(10, f)`).
+                    let mut dep_owners: Vec<String> = self
+                        .dependency_ufcs_trait_manifests
+                        .iter()
+                        .flat_map(|m| {
+                            m.declared_trait_methods
+                                .iter()
+                                .filter(|(_, methods)| methods.iter().any(|x| x == &method_name))
+                                .map(|(t, _)| t.clone())
+                        })
+                        .collect();
+                    dep_owners.sort();
+                    dep_owners.dedup();
+                    if dep_owners.len() == 1 { dep_owners.pop() } else { None }
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -14039,9 +14062,12 @@ impl CodeGen {
                 .and_then(|owners| owners.iter().next().cloned())
                 .or(blanket_owner);
             if let Some(owner) = single_owner.as_deref()
-                && self
+                && (self
                     .nonvtable_trait_key(owner)
                     .is_some_and(|key| self.ufcs_impl_lane_covers_trait_key(&key))
+                    // (aa): a dependency's trait is lane-carried too — bare
+                    // `Tr_::m` through the crate wrap's Rule-2 bridge.
+                    || (!self.emit_rusty_ext_twin && self.dependency_declares_trait(owner)))
             {
                 let escaped = escape_cpp_keyword_in_member_position(&method_name);
                 let callee = format!("{}::{}", self.ufcs_trait_namespace(owner), escaped);
