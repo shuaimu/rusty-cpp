@@ -1800,12 +1800,6 @@ pub struct CodeGen {
     /// `TranspileOptions::tier1_default`) is the opt-out; the markers stay as
     /// force attributes.
     pub(crate) tier1_default: bool,
-    /// Book §3.2.16 phase 3 / (aa): emit the `rusty_ext` twin of a trait the
-    /// `impl_` lane covers (a crate-declared trait whose impls emit
-    /// `Tr_::impl_` functions)? Off by default on this branch — a call on such
-    /// a method reaches `Tr_::m` (phase-2 step 5b); `RUSTY_CPP_RUSTY_EXT_TWIN=1`
-    /// restores the twin for measurement.
-    pub(crate) emit_rusty_ext_twin: bool,
     /// Phase 1: crate mode's crate-wide verdicts (see `TranspileOptions::
     /// crate_tier_verdicts`); consulted before the per-file census.
     pub(crate) crate_tier_verdicts: Option<std::sync::Arc<crate::tier_census::CrateTierVerdicts>>,
@@ -3686,8 +3680,6 @@ impl CodeGen {
             cpp_trait_member_dispatch_traits: std::collections::HashSet::new(),
             demoted_member_dispatch_traits: std::collections::HashSet::new(),
             tier1_pair_verdicts: HashMap::new(),
-            emit_rusty_ext_twin: std::env::var_os("RUSTY_CPP_RUSTY_EXT_TWIN")
-                .is_some_and(|v| v == "1"),
             tier1_default: std::env::var_os("RUSTY_CPP_TIER1_DEFAULT")
                 .map(|v| v != "0")
                 .unwrap_or(true),
@@ -4449,11 +4441,9 @@ impl CodeGen {
         // purview namespace (`::de::rusty_ext::X` → `::<crate>::de::rusty_ext::X` via Rule 1
         // below) and resolve in-place. The ONLY genuinely-global piece is the hardcoded
         // rusty_ext runtime prelude (in the fragment's `extern "C++"`), bridged in below.
-        // (The earlier relocate-to-global approach — `relocate_rusty_ext_blocks` /
-        // `globalize_rusty_ext_refs`, now unused — had to re-declare every purview entity
-        // the blocks reference and never converged: serde_core stuck at 19 errors.)
-        let mut global_rusty_ext = String::new();
-        let rusty_ext_skeletons = String::new();
+        // (An earlier relocate-to-global approach had to re-declare every purview
+        // entity the blocks reference and never converged: serde_core stuck at 19
+        // errors; its helpers are gone.)
         let mut exclusive = self.crate_exclusive_top_namespaces();
         // Gap (c): own top-level modules that hold no TYPE — so they are absent from
         // the type-keyed exclusive set — but do exist (e.g. bitflags's `external`,
@@ -4694,9 +4684,7 @@ impl CodeGen {
         // Gap (a): `rusty_ext` stays IN the purview (not relocated), so its references
         // must NOT be globalized — Rule 1 above already requalified `::de::rusty_ext::X`
         // to `::serde_core::de::rusty_ext::X`, which is exactly where the wrapped
-        // definitions live. (globalize_rusty_ext_refs is retained for reference but no
-        // longer applied.)
-        let _ = (&global_rusty_ext, &rusty_ext_skeletons);
+        // definitions live.
         self.output.replace_range(wrap_start..wrap_end, &wrapped);
         // Co-locate the GLOBAL hardcoded rusty_ext runtime prelude with the WRAPPED
         // per-type overloads. The prelude (`deserialize`/`deserialize_any`/
@@ -4767,140 +4755,6 @@ impl CodeGen {
         if !bridge.is_empty() {
             self.output.insert_str(wrap_start, &bridge);
         }
-    }
-
-    /// Relocate the purview's `namespace rusty_ext { … }` blocks to global scope,
-    /// at ANY nesting depth (`de::rusty_ext`, `de::value::rusty_ext`, …). Returns
-    /// `(purview_without_them, full_defs_re_wrapped_in_parent_path, fwd_decl_skeletons)`.
-    /// The defs reference purview types so they emit AFTER the purview; the purview
-    /// references THEIR namespaces, so an empty `namespace …{ namespace rusty_ext {} }`
-    /// skeleton emits BEFORE the purview to break the ordering cycle. 4-space-per-level
-    /// indented, so a `namespace rusty_ext {` at indent `n` runs to the first `}` at
-    /// indent `n`; `ns_path[L]` tracks the enclosing namespace name at level `L`.
-    fn relocate_rusty_ext_blocks(wrapped: &str) -> (String, String, String) {
-        let lines: Vec<&str> = wrapped.lines().collect();
-        let mut purview = String::with_capacity(wrapped.len());
-        let mut global = String::new();
-        let mut skeleton_set: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
-        let mut ns_path: Vec<String> = Vec::new();
-        let mut i = 0;
-        while i < lines.len() {
-            let line = lines[i];
-            let trimmed = line.trim_start();
-            let indent = line.len() - trimmed.len();
-            let level = indent / 4;
-            if trimmed == "namespace rusty_ext {" {
-                let close = format!("{}}}", " ".repeat(indent));
-                let mut j = i + 1;
-                while j < lines.len() && lines[j] != close {
-                    j += 1;
-                }
-                if j < lines.len() {
-                    let parents: Vec<String> =
-                        ns_path.iter().take(level).cloned().collect();
-                    let mut block = lines[i..=j].join("\n");
-                    let mut skel = String::from("namespace rusty_ext {}");
-                    for p in parents.iter().rev() {
-                        block = format!("namespace {} {{\n{}\n}}", p, block);
-                        skel = format!("namespace {} {{ {} }}", p, skel);
-                    }
-                    global.push_str(&block);
-                    global.push('\n');
-                    skeleton_set.insert(skel);
-                    i = j + 1;
-                    continue;
-                }
-                // Unmatched close — leave the block in place (fall through).
-            } else if let Some(rest) = trimmed.strip_prefix("namespace ") {
-                let name: String = rest
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect();
-                if !name.is_empty()
-                    && rest[name.len()..].trim_start().starts_with('{')
-                    && ns_path.len() >= level
-                {
-                    ns_path.truncate(level);
-                    ns_path.push(name);
-                }
-            }
-            purview.push_str(line);
-            purview.push('\n');
-            i += 1;
-        }
-        let skeletons: String = skeleton_set
-            .into_iter()
-            .map(|s| format!("{}\n", s))
-            .collect();
-        (purview, global, skeletons)
-    }
-
-    /// Normalize EVERY `rusty_ext`-segment reference path to absolute-global: strip a
-    /// leading `<crate>::` qualifier (Rule-1 over-qualified `::<crate>::de::…::rusty_ext`)
-    /// and ensure a leading `::` (relative `de::…::rusty_ext`). `rusty_ext` is the
-    /// extension-dispatch namespace, unified at global scope by `relocate_rusty_ext_blocks`;
-    /// every reference to it must resolve there regardless of nesting depth. The
-    /// `namespace rusty_ext {` DECLARATIONS are left alone (`rusty_ext` is preceded by a
-    /// space there, not `::`).
-    fn globalize_rusty_ext_refs(text: &str, crate_name: &str) -> String {
-        let bytes = text.as_bytes();
-        let mut out = String::with_capacity(text.len());
-        let mut scan = 0;
-        while let Some(rel) = text[scan..].find("rusty_ext") {
-            let rt_pos = scan + rel;
-            let after = rt_pos + "rusty_ext".len();
-            let preceded = rt_pos >= 2 && &text[rt_pos - 2..rt_pos] == "::";
-            let after_ok = after >= text.len()
-                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
-            if !preceded || !after_ok {
-                out.push_str(&text[scan..after]);
-                scan = after;
-                continue;
-            }
-            // Walk back over `::<ident>` segments to the path start.
-            let mut seg_starts = vec![rt_pos];
-            let mut p = rt_pos;
-            loop {
-                if p >= 2 && &text[p - 2..p] == "::" {
-                    let sep = p - 2;
-                    let mut s = sep;
-                    while s > 0 && (bytes[s - 1].is_ascii_alphanumeric() || bytes[s - 1] == b'_')
-                    {
-                        s -= 1;
-                    }
-                    if s == sep {
-                        // Leading `::` (absolute) — no segment before it.
-                        p = sep;
-                        break;
-                    }
-                    seg_starts.push(s);
-                    p = s;
-                } else {
-                    break;
-                }
-            }
-            let path_start = p;
-            let segs: Vec<&str> = seg_starts
-                .iter()
-                .rev()
-                .map(|&s| {
-                    let mut e = s;
-                    while e < text.len()
-                        && (bytes[e].is_ascii_alphanumeric() || bytes[e] == b'_')
-                    {
-                        e += 1;
-                    }
-                    &text[s..e]
-                })
-                .collect();
-            let start_idx = usize::from(segs.first() == Some(&crate_name));
-            out.push_str(&text[scan..path_start]);
-            out.push_str(&format!("::{}", segs[start_idx..].join("::")));
-            scan = after;
-        }
-        out.push_str(&text[scan..]);
-        out
     }
 
     /// Re-qualify bare crate-root references `::<sym>` -> `::<crate>::<sym>`.
@@ -25074,17 +24928,17 @@ impl CodeGen {
     /// of its methods reaches `Tr_::m`? (The `rusty_ext` twin stays emitted
     /// until phase 3: serde's hardcoded `rusty_ext` routes still name it —
     /// measured, serde_core `into_deserializer`.)
-    /// Book §3.2.16 phase 3 / (aa): is the `rusty_ext` twin of this trait (by
-    /// short name) retired — the twin off, and the trait lane-covered (a
-    /// crate-declared trait whose impls emit `Tr_::impl_` functions)? Every
-    /// site that emitted, declared, resolved or spelled the twin asks this.
+    /// Book §3.2.16 phase 3 / (aa): is this trait (by short name) lane-carried
+    /// — a crate-declared trait whose impls emit `Tr_::impl_` functions, or a
+    /// dependency-declared one reached bare — so that it has no `rusty_ext`
+    /// twin? Every site that once emitted, declared, resolved or spelled the
+    /// twin asks this; the twin remains only as the fallback for a trait
+    /// neither this crate nor a consumed manifest declares.
     pub(super) fn rusty_ext_twin_retired_for(&self, trait_short: &str) -> bool {
-        !self.emit_rusty_ext_twin
-            && (self
-                .trait_declared_path_by_short_name
-                .get(trait_short)
-                .is_some_and(|full| self.ufcs_impl_lane_covers_trait_key(full))
-                || self.dependency_declares_trait(trait_short))
+        self.trait_declared_path_by_short_name
+            .get(trait_short)
+            .is_some_and(|full| self.ufcs_impl_lane_covers_trait_key(full))
+            || self.dependency_declares_trait(trait_short)
     }
 
     /// Book §3.2.7 / (aa): is this trait (by short name) declared by a
@@ -26105,8 +25959,8 @@ impl CodeGen {
                 // twin it used to name is not emitted. The tag namespace is
                 // the owning trait's, set for the lane's emission.
                 let callee = leaf.map(|leaf| match self.ufcs_tag_namespace.as_deref() {
-                    Some(ns) if !self.emit_rusty_ext_twin => format!("{}::{}", ns, leaf),
-                    _ => format!("::de::rusty_ext::{}", leaf),
+                    Some(ns) => format!("{}::{}", ns, leaf),
+                    None => format!("::de::rusty_ext::{}", leaf),
                 });
                 if let Some(callee) = callee {
                     self.writeln(&format!(
@@ -26527,7 +26381,7 @@ impl CodeGen {
         // set for the lane's emission) is not a `rusty_ext` symbol — the twin
         // recorded its own when it was emitted; without the twin, recording
         // it here made the resolver spell a path that no longer exists.
-        if !self.emit_rusty_ext_twin && self.ufcs_tag_namespace.is_some() {
+        if self.ufcs_tag_namespace.is_some() {
             return;
         }
         let scoped_name = if self.module_stack.is_empty() {

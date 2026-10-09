@@ -2855,6 +2855,21 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   comes from `declared_trait_methods`). A two-crate unit test pins it: the consumer's own impl takes
   the member tier (`Mine::tap()`), a call on a receiver without the member reaches `TapOps_::tap`,
   nothing spells the twin. Measured: unit 2595 green (+ the baseline integration red); full matrix 28 rows: 20 PASS, 5 FAIL (the pre-existing alloc, bitflags, path, rusty, serde_bytes), 3 known-fail — the baseline; rows tap, serde_repr, serde_core, serde, smallvec pass, and the tap consumer now spells the dependency's dispatchers (`TapOps_::tap`, `TapOptionOps_`, `TapResultOps_`) with no twin reference.
+- *2026-10-08 — phase 3 / (aa), step 3: the twin switch and the dead relocation helpers go.*
+  `RUSTY_CPP_RUSTY_EXT_TWIN` had nothing left to measure; the predicate is now "lane-carried" (a
+  crate-declared trait whose impls emit `Tr_::impl_` functions, or a dependency-declared one
+  reached bare), and the twin remains only as the fallback for a trait neither the crate nor a
+  consumed manifest declares (a stdlib port's `ToOwned`). `relocate_rusty_ext_blocks` /
+  `globalize_rusty_ext_refs` — the relocate-to-global experiment the crate wrap stopped using —
+  are deleted. What `rusty_ext` still holds after this step, and why it is not deleted outright:
+  the hand-written serde runtime prelude (`de::rusty_ext::deserialize_any` and family, emitted
+  into every crate's global module fragment, bridged into the wrapped purview), the de/ser
+  crate-wrap bridges, the `ser::impls::rusty_ext` block in rusty.hpp, and the foreign-trait
+  fallback twin. The prelude cannot move under the lane namespaces (`Deserializer_::deserialize_any`
+  would overload-clash with the generated dispatcher in a crate that declares the trait), so what
+  remains is a RENAME (`rusty_ext` → a name that says "serde runtime"), cosmetic, and it touches
+  the ~40 vendored `transpiled/*.cppm` ports, their `docs/*/post_transpile_patch.py` patchers and
+  CMakeLists.txt — the owner's call. Measured: unit 2595 green (+ the baseline integration red); full matrix 28 rows: 20 PASS, 5 FAIL (the pre-existing alloc, bitflags, path, rusty, serde_bytes), 3 known-fail — the baseline; rows tap, serde_core, serde, smallvec pass.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

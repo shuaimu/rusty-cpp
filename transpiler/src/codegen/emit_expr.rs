@@ -10837,9 +10837,6 @@ impl CodeGen {
                     // into_deserializer<E>(recv)`); without this the hardcoded
                     // `::de::value::rusty_ext` spelling below is probed on a
                     // namespace that no longer exists (serde_core, measured).
-                    if self.emit_rusty_ext_twin {
-                        return None;
-                    }
                     let key = self.nonvtable_trait_key("IntoDeserializer")?;
                     if !self.ufcs_impl_lane_covers_trait_key(&key) {
                         return None;
@@ -14011,8 +14008,9 @@ impl CodeGen {
             // the fallbacks named is gone — derive the owner from the impl
             // collection: the one lane-covered trait with an impl method of
             // this name.
-            let blanket_owner: Option<String> = if !self.emit_rusty_ext_twin
-                && !self.ufcs_method_trait_owners.contains_key(&method_name)
+            let blanket_owner: Option<String> = if !self
+                .ufcs_method_trait_owners
+                .contains_key(&method_name)
             {
                 let mut owners: Vec<String> = self
                     .extension_trait_impl_methods
@@ -14067,7 +14065,7 @@ impl CodeGen {
                     .is_some_and(|key| self.ufcs_impl_lane_covers_trait_key(&key))
                     // (aa): a dependency's trait is lane-carried too — bare
                     // `Tr_::m` through the crate wrap's Rule-2 bridge.
-                    || (!self.emit_rusty_ext_twin && self.dependency_declares_trait(owner)))
+                    || self.dependency_declares_trait(owner))
             {
                 let escaped = escape_cpp_keyword_in_member_position(&method_name);
                 let callee = format!("{}::{}", self.ufcs_trait_namespace(owner), escaped);

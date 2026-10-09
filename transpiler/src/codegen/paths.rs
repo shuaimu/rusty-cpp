@@ -92,9 +92,9 @@ impl CodeGen {
     /// position (followed by `(` or `<`), and never for the hand-written
     /// runtime prelude's own members, which live in `de::rusty_ext` /
     /// `ser::rusty_ext` for real. Runs before the crate wrap (the spellings are
-    /// still crate-relative). No-op with the twin on.
+    /// still crate-relative).
     fn retarget_rusty_ext_twin_spellings_to_lane(&mut self) {
-        if self.emit_rusty_ext_twin || !self.output.contains("rusty_ext::") {
+        if !self.output.contains("rusty_ext::") {
             return;
         }
         const PRELUDE: [&str; 10] = [
