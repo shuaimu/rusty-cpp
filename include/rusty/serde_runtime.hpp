@@ -1,6 +1,6 @@
 // rusty's serde runtime: the hand-written member-tier dispatchers that
-// transpiled serde code calls (`de::rusty_ext::deserialize_any(d, v)`,
-// `ser::rusty_ext::serialize_value(v, s)` and family), the serde_test Token
+// transpiled serde code calls (`rusty::serde_rt::de::deserialize_any(d, v)`,
+// `rusty::serde_rt::ser::serialize_value(v, s)` and family), the serde_test Token
 // emulation they fall back to, and the forward declarations those fallbacks
 // need. Until 2026-10-12 this text lived inside the transpiler as a string
 // literal pasted into every crate's global module fragment (two diverged
@@ -81,8 +81,8 @@ std::remove_reference_t<T>* addr_of_temp_mut(T&& value);
 }
 
 #ifdef RUSTY_SERDE_TOKEN_OWNER
-namespace de {
-namespace rusty_ext {
+namespace rusty::serde_rt::de {
+inline namespace v1 {
 template<typename Seed, typename Deserializer>
 decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
     if constexpr (requires {
@@ -134,13 +134,13 @@ decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor) {
     } else if constexpr (
         requires {
             typename std::remove_cv_t<std::remove_reference_t<Visitor>>::Value;
-            ::de::rusty_ext::deserialize(
+            ::rusty::serde_rt::de::deserialize(
                 rusty::PhantomData<
                     typename std::remove_cv_t<std::remove_reference_t<Visitor>>::Value>{},
                 std::forward<Deserializer>(deserializer));
         }) {
         using Target = typename std::remove_cv_t<std::remove_reference_t<Visitor>>::Value;
-        return ::de::rusty_ext::deserialize(
+        return ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer));
     } else {
         return std::forward<Deserializer>(deserializer)
@@ -159,14 +159,14 @@ decltype(auto) deserialize_in_place(
         return Target::deserialize_in_place(
             std::forward<Deserializer>(deserializer), std::forward<Place>(place));
     } else if constexpr (requires {
-        { ::de::rusty_ext::deserialize(
+        { ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer)) };
-        ::de::rusty_ext::deserialize(
+        ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer)).is_ok();
-        ::de::rusty_ext::deserialize(
+        ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer)).unwrap_err();
     }) {
-        auto __res = ::de::rusty_ext::deserialize(
+        auto __res = ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer));
         using Err = std::remove_cv_t<std::remove_reference_t<decltype(__res.unwrap_err())>>;
         if (__res.is_ok()) {
@@ -184,7 +184,7 @@ decltype(auto) deserialize_in_place(
 template<typename Deserializer, typename Place>
 decltype(auto) deserialize_in_place(Deserializer&& deserializer, Place&& place) {
     using Target = std::remove_cv_t<std::remove_reference_t<Place>>;
-    return ::de::rusty_ext::deserialize_in_place(
+    return ::rusty::serde_rt::de::deserialize_in_place(
         rusty::PhantomData<Target>{},
         std::forward<Deserializer>(deserializer),
         std::forward<Place>(place));
@@ -215,12 +215,12 @@ decltype(auto) deserialize_in_place(
 }
 }
 #else
-namespace de {
+namespace rusty::serde_rt::de {
 namespace impls {
-namespace rusty_ext {
+inline namespace v1 {
 }
 }
-namespace rusty_ext {
+inline namespace v1 {
 template<typename Seed, typename Deserializer>
 decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer);
 }
@@ -393,7 +393,7 @@ struct option_visitor {
 
     template<typename E, typename Deserializer>
     rusty::Result<Value, E> visit_some(Deserializer&& deserializer) const {
-        auto __inner = ::de::rusty_ext::deserialize(
+        auto __inner = ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<Inner>{},
             std::forward<Deserializer>(deserializer));
         if (__inner.is_err()) {
@@ -437,7 +437,7 @@ struct seq_access_bridge {
             return rusty::saturating_sub(__len, static_cast<size_t>(1));
         });
 
-        auto __value = ::de::rusty_ext::deserialize(
+        auto __value = ::rusty::serde_rt::de::deserialize(
             std::forward<Seed>(seed),
             rusty::detail::deref_if_pointer_like(de));
         return __value.map([](auto&& _v) {
@@ -450,7 +450,7 @@ struct seq_access_bridge {
     }
 };
 }
-namespace rusty_ext {
+inline namespace v1 {
 template<typename Deserializer, typename Visitor>
 decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor);
 
@@ -473,7 +473,7 @@ decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
                 std::forward<Deserializer>(deserializer)));
         } else if constexpr (std::is_reference_v<Target>) {
             using Owned = std::remove_cv_t<std::remove_reference_t<Target>>;
-            auto __owned = ::de::rusty_ext::deserialize(
+            auto __owned = ::rusty::serde_rt::de::deserialize(
                 rusty::PhantomData<Owned>{},
                 std::forward<Deserializer>(deserializer));
             using Err = std::remove_cv_t<std::remove_reference_t<
@@ -529,12 +529,12 @@ decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
         } else if constexpr (
             (std::is_arithmetic_v<Target> || std::is_enum_v<Target> || std::is_same_v<Target, bool>)
             && requires {
-                ::de::rusty_ext::deserialize_any(
+                ::rusty::serde_rt::de::deserialize_any(
                     rusty::detail::deref_if_pointer_like(
                         std::forward<Deserializer>(deserializer)),
                     detail::scalar_visitor<Target>{});
             }) {
-            return ::de::rusty_ext::deserialize_any(
+            return ::rusty::serde_rt::de::deserialize_any(
                 rusty::detail::deref_if_pointer_like(
                     std::forward<Deserializer>(deserializer)),
                 detail::scalar_visitor<Target>{});
@@ -688,7 +688,7 @@ decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
                 if (rusty::detail::variant_holds<::RUSTY_SERDE_TOKEN_NS::Token_Some>(__tok)) {
                     using Inner = std::remove_cv_t<std::remove_reference_t<
                         typename Target::value_type>>;
-                    auto __inner = ::de::rusty_ext::deserialize(
+                    auto __inner = ::rusty::serde_rt::de::deserialize(
                         rusty::PhantomData<Inner>{},
                         std::forward<Deserializer>(deserializer));
                     if (__inner.is_err()) {
@@ -708,7 +708,7 @@ decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
             return Ret::Err(Err::custom("expected option token"));
         } else if constexpr (requires { std::declval<Target&>().value; }) {
             using ValueMember = std::remove_cv_t<std::remove_reference_t<decltype(std::declval<Target&>().value)>>;
-            auto __inner = ::de::rusty_ext::deserialize(
+            auto __inner = ::rusty::serde_rt::de::deserialize(
                 rusty::PhantomData<ValueMember>{},
                 std::forward<Deserializer>(deserializer));
             using Err = std::remove_cv_t<std::remove_reference_t<
@@ -732,7 +732,7 @@ decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
                 return Ret::Err(Err::custom("unsupported seed wrapper"));
             }
         } else if constexpr (requires {
-            ::de::rusty_ext::deserialize_any(
+            ::rusty::serde_rt::de::deserialize_any(
                 rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer)),
                 detail::bytes_span_visitor{});
             requires (
@@ -741,7 +741,7 @@ decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
                 || requires { Target::from(std::declval<std::span<const uint8_t>>()); }
                 || requires { Target::new_(std::declval<std::span<const uint8_t>>()); });
         }) {
-            auto __bytes_res = ::de::rusty_ext::deserialize_any(
+            auto __bytes_res = ::rusty::serde_rt::de::deserialize_any(
                 rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer)),
                 detail::bytes_span_visitor{});
             using Err = std::remove_cv_t<std::remove_reference_t<
@@ -910,11 +910,11 @@ decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
             }
             return Ret::Err(Err::custom("expected bytes token"));
         } else if constexpr (requires {
-            ::de::rusty_ext::deserialize_any(
+            ::rusty::serde_rt::de::deserialize_any(
                 rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer)),
                 detail::bytes_span_visitor{});
         }) {
-            auto __bytes_res = ::de::rusty_ext::deserialize_any(
+            auto __bytes_res = ::rusty::serde_rt::de::deserialize_any(
                 rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer)),
                 detail::bytes_span_visitor{});
             using Err = std::remove_cv_t<std::remove_reference_t<
@@ -1031,7 +1031,7 @@ decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
             }
         } else if constexpr (requires { std::declval<Target&>().value; }) {
             using ValueMember = std::remove_cv_t<std::remove_reference_t<decltype(std::declval<Target&>().value)>>;
-            auto __inner = ::de::rusty_ext::deserialize(
+            auto __inner = ::rusty::serde_rt::de::deserialize(
                 rusty::PhantomData<ValueMember>{},
                 std::forward<Deserializer>(deserializer));
             using Err = std::remove_cv_t<std::remove_reference_t<
@@ -1201,7 +1201,7 @@ decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor) {
                 auto __len = rusty::detail::variant_get<::RUSTY_SERDE_TOKEN_NS::Token_Seq>(__tok).len;
                 if constexpr (requires {
                     std::forward<Visitor>(visitor).visit_seq(
-                        ::de::detail::seq_access_bridge<
+                        ::rusty::serde_rt::de::detail::seq_access_bridge<
                             std::remove_cv_t<std::remove_reference_t<
                                 decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
                             ::RUSTY_SERDE_TOKEN_NS::Token_SeqEnd>{
@@ -1210,7 +1210,7 @@ decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor) {
                             .end = ::RUSTY_SERDE_TOKEN_NS::SeqEnd()});
                 }) {
                     auto __ret = std::forward<Visitor>(visitor).visit_seq(
-                        ::de::detail::seq_access_bridge<
+                        ::rusty::serde_rt::de::detail::seq_access_bridge<
                             std::remove_cv_t<std::remove_reference_t<
                                 decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
                             ::RUSTY_SERDE_TOKEN_NS::Token_SeqEnd>{
@@ -1250,7 +1250,7 @@ decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor) {
                     rusty::detail::variant_get<::RUSTY_SERDE_TOKEN_NS::Token_Tuple>(__tok).len);
                 if constexpr (requires {
                     std::forward<Visitor>(visitor).visit_seq(
-                        ::de::detail::seq_access_bridge<
+                        ::rusty::serde_rt::de::detail::seq_access_bridge<
                             std::remove_cv_t<std::remove_reference_t<
                                 decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
                             ::RUSTY_SERDE_TOKEN_NS::Token_TupleEnd>{
@@ -1259,7 +1259,7 @@ decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor) {
                             .end = ::RUSTY_SERDE_TOKEN_NS::TupleEnd()});
                 }) {
                     auto __ret = std::forward<Visitor>(visitor).visit_seq(
-                        ::de::detail::seq_access_bridge<
+                        ::rusty::serde_rt::de::detail::seq_access_bridge<
                             std::remove_cv_t<std::remove_reference_t<
                                 decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
                             ::RUSTY_SERDE_TOKEN_NS::Token_TupleEnd>{
@@ -1299,7 +1299,7 @@ decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor) {
                     rusty::detail::variant_get<::RUSTY_SERDE_TOKEN_NS::Token_TupleStruct>(__tok).len);
                 if constexpr (requires {
                     std::forward<Visitor>(visitor).visit_seq(
-                        ::de::detail::seq_access_bridge<
+                        ::rusty::serde_rt::de::detail::seq_access_bridge<
                             std::remove_cv_t<std::remove_reference_t<
                                 decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
                             ::RUSTY_SERDE_TOKEN_NS::Token_TupleStructEnd>{
@@ -1308,7 +1308,7 @@ decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor) {
                             .end = ::RUSTY_SERDE_TOKEN_NS::TupleStructEnd()});
                 }) {
                     auto __ret = std::forward<Visitor>(visitor).visit_seq(
-                        ::de::detail::seq_access_bridge<
+                        ::rusty::serde_rt::de::detail::seq_access_bridge<
                             std::remove_cv_t<std::remove_reference_t<
                                 decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
                             ::RUSTY_SERDE_TOKEN_NS::Token_TupleStructEnd>{
@@ -1448,12 +1448,12 @@ decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor) {
             rusty::to_string(__tok))));
     } else if constexpr (requires {
         typename std::remove_cv_t<std::remove_reference_t<Visitor>>::Value;
-        ::de::rusty_ext::deserialize(
+        ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<typename std::remove_cv_t<std::remove_reference_t<Visitor>>::Value>{},
             std::forward<Deserializer>(deserializer));
     }) {
         using Target = typename std::remove_cv_t<std::remove_reference_t<Visitor>>::Value;
-        return ::de::rusty_ext::deserialize(
+        return ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer));
     } else {
         return std::forward<Deserializer>(deserializer).deserialize_any(std::forward<Visitor>(visitor));
@@ -1471,14 +1471,14 @@ decltype(auto) deserialize_in_place(
         return Target::deserialize_in_place(
             std::forward<Deserializer>(deserializer), std::forward<Place>(place));
     } else if constexpr (requires {
-        { ::de::rusty_ext::deserialize(
+        { ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer)) };
-        ::de::rusty_ext::deserialize(
+        ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer)).is_ok();
-        ::de::rusty_ext::deserialize(
+        ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer)).unwrap_err();
     }) {
-        auto __res = ::de::rusty_ext::deserialize(
+        auto __res = ::rusty::serde_rt::de::deserialize(
             rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer));
         using Err = std::remove_cv_t<std::remove_reference_t<decltype(__res.unwrap_err())>>;
         if (__res.is_ok()) {
@@ -1496,7 +1496,7 @@ decltype(auto) deserialize_in_place(
 template<typename Deserializer, typename Place>
 decltype(auto) deserialize_in_place(Deserializer&& deserializer, Place&& place) {
     using Target = std::remove_cv_t<std::remove_reference_t<Place>>;
-    return ::de::rusty_ext::deserialize_in_place(
+    return ::rusty::serde_rt::de::deserialize_in_place(
         rusty::PhantomData<Target>{},
         std::forward<Deserializer>(deserializer),
         std::forward<Place>(place));
@@ -1526,10 +1526,10 @@ decltype(auto) deserialize_in_place(
 }
 }
 namespace impls {
-namespace rusty_ext {
+inline namespace v1 {
 template<typename Seed, typename Deserializer>
 decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
-    return ::de::rusty_ext::deserialize(
+    return ::rusty::serde_rt::de::deserialize(
         std::forward<Seed>(seed), std::forward<Deserializer>(deserializer));
 }
 template<typename Value, typename Deserializer, typename Place>
@@ -1537,7 +1537,7 @@ decltype(auto) deserialize_in_place(
     Value&& value,
     Deserializer&& deserializer,
     Place&& place) {
-    return ::de::rusty_ext::deserialize_in_place(
+    return ::rusty::serde_rt::de::deserialize_in_place(
         std::forward<Value>(value),
         std::forward<Deserializer>(deserializer),
         std::forward<Place>(place));
@@ -1547,12 +1547,12 @@ decltype(auto) deserialize_in_place(
 }
 #endif
 
-namespace ser {
+namespace rusty::serde_rt::ser {
 namespace impls {
-namespace rusty_ext {
+inline namespace v1 {
 }
 }
-namespace rusty_ext {
+inline namespace v1 {
 namespace detail {
 template<typename T>
 struct is_std_span : std::false_type {};
@@ -1889,7 +1889,7 @@ using __ser_result_t = rusty::Result<
         rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Error>;
 template<typename Serializer, typename BytesLike>
 auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
-    -> ::ser::rusty_ext::__ser_result_t<Serializer>;
+    -> ::rusty::serde_rt::ser::__ser_result_t<Serializer>;
 struct fallback_error {
     rusty::String message;
 
@@ -1899,7 +1899,7 @@ struct fallback_error {
 };
 template<typename Value, typename Serializer>
 auto serialize_value(Value&& value, Serializer&& serializer)
-    -> ::ser::rusty_ext::__ser_result_t<Serializer> {
+    -> ::rusty::serde_rt::ser::__ser_result_t<Serializer> {
     using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;
     if constexpr (requires {
         std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));
@@ -1925,7 +1925,7 @@ auto serialize_value(Value&& value, Serializer&& serializer)
         return ValueType::serialize(
             std::forward<Value>(value), std::forward<Serializer>(serializer));
     } else if constexpr (requires {
-        ::ser::rusty_ext::serialize_bytes(
+        ::rusty::serde_rt::ser::serialize_bytes(
             std::forward<Serializer>(serializer), std::forward<Value>(value));
     } && !(
         std::is_convertible_v<
@@ -1933,7 +1933,7 @@ auto serialize_value(Value&& value, Serializer&& serializer)
             std::string_view>
         || requires { std::forward<Value>(value).as_str(); }
     )) {
-        return ::ser::rusty_ext::serialize_bytes(
+        return ::rusty::serde_rt::ser::serialize_bytes(
             std::forward<Serializer>(serializer), std::forward<Value>(value));
     } else if constexpr (requires {
         std::forward<Serializer>(serializer)
@@ -2011,8 +2011,8 @@ auto serialize_value(Value&& value, Serializer&& serializer)
 }
 template<typename Value, typename Serializer>
 auto serialize(Value&& value, Serializer&& serializer)
-    -> ::ser::rusty_ext::__ser_result_t<Serializer> {
-    return ::ser::rusty_ext::serialize_value(
+    -> ::rusty::serde_rt::ser::__ser_result_t<Serializer> {
+    return ::rusty::serde_rt::ser::serialize_value(
         std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
 template<typename Serializer, typename BytesLike>
@@ -2033,7 +2033,7 @@ concept serialize_bytes_compatible =
 template<typename Serializer, typename BytesLike>
 requires serialize_bytes_compatible<Serializer, BytesLike>
 auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
-    -> ::ser::rusty_ext::__ser_result_t<Serializer> {
+    -> ::rusty::serde_rt::ser::__ser_result_t<Serializer> {
     if constexpr (requires {
         std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
     }) {
@@ -2125,11 +2125,11 @@ auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
 }
 }
 namespace impls {
-namespace rusty_ext {
+inline namespace v1 {
 template<typename Value, typename Serializer>
 auto serialize(Value&& value, Serializer&& serializer)
-    -> ::ser::rusty_ext::__ser_result_t<Serializer> {
-    return ::ser::rusty_ext::serialize_value(
+    -> ::rusty::serde_rt::ser::__ser_result_t<Serializer> {
+    return ::rusty::serde_rt::ser::serialize_value(
         std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
 }

@@ -4286,7 +4286,7 @@ impl CodeGen {
         // Gap (a): `rusty_ext` (the UFCS extension-dispatch namespace). Do NOT relocate it
         // out of the purview — it is defined entirely in the purview (forward-decls + defs,
         // all scopes), so leaving it wrapped means its references requalify like any other
-        // purview namespace (`::de::rusty_ext::X` → `::<crate>::de::rusty_ext::X` via Rule 1
+        // purview namespace (`::rusty::serde_rt::de::X` → `::<crate>::rusty::serde_rt::de::X` via Rule 1
         // below) and resolve in-place. The ONLY genuinely-global piece is the hardcoded
         // rusty_ext runtime prelude (in the fragment's `extern "C++"`), bridged in below.
         // (An earlier relocate-to-global approach had to re-declare every purview
@@ -4530,79 +4530,13 @@ impl CodeGen {
             wrapped = Self::requalify_crate_root_fn_symbol(&wrapped, &crate_name, f);
         }
         // Gap (a): `rusty_ext` stays IN the purview (not relocated), so its references
-        // must NOT be globalized — Rule 1 above already requalified `::de::rusty_ext::X`
-        // to `::serde_core::de::rusty_ext::X`, which is exactly where the wrapped
+        // must NOT be globalized — Rule 1 above already requalified `::rusty::serde_rt::de::X`
+        // to `::serde_core::rusty::serde_rt::de::X`, which is exactly where the wrapped
         // definitions live.
         self.output.replace_range(wrap_start..wrap_end, &wrapped);
-        // Co-locate the GLOBAL hardcoded rusty_ext runtime prelude with the WRAPPED
-        // per-type overloads. The prelude (`deserialize`/`deserialize_any`/
-        // `deserialize_in_place` dispatchers, `serialize_value`/`forward_serializer`) is
-        // emitted in the global module fragment's `extern "C++"` block — it can't move
-        // into the module (shared cross-module linkage). The per-type extension overloads
-        // live in the wrapped purview (`<crate>::de::rusty_ext::…`). A qualified
-        // `<crate>::…::rusty_ext::deserialize_any` reference must see BOTH for overload
-        // resolution, so import the global dispatchers into the wrapped namespace via
-        // using-declarations. (Templates → instantiation-time lookup, so a trailing
-        // bridge after the wrap is in scope.)
-        // `<ns>::rusty_ext::<member>` is referenced as a WHOLE word (so `serialize`
-        // doesn't match `serialize_value`).
-        let referenced = |ns: &str, member: &str| -> bool {
-            let needle = format!("{}::rusty_ext::{}", ns, member);
-            let bytes = self.output.as_bytes();
-            let mut from = 0;
-            while let Some(rel) = self.output[from..].find(&needle) {
-                let end = from + rel + needle.len();
-                let after_ok = end >= self.output.len()
-                    || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
-                if after_ok {
-                    return true;
-                }
-                from = from + rel + needle.len();
-            }
-            false
-        };
-        // Global hardcoded rusty_ext prelude members: free-fn dispatchers (using-decl) and
-        // the `detail` sub-namespace (namespace-alias).
-        let de_fns = ["deserialize", "deserialize_any", "deserialize_in_place"];
-        let ser_fns = ["serialize", "serialize_value", "forward_serializer"];
-        let mut de_usings = String::new();
-        for f in de_fns {
-            if referenced("de", f) {
-                de_usings.push_str(&format!("using ::de::rusty_ext::{};\n", f));
-            }
-        }
-        if referenced("de", "detail") {
-            de_usings.push_str("namespace detail = ::de::rusty_ext::detail;\n");
-        }
-        let mut ser_usings = String::new();
-        for f in ser_fns {
-            if referenced("ser", f) {
-                ser_usings.push_str(&format!("using ::ser::rusty_ext::{};\n", f));
-            }
-        }
-        if referenced("ser", "detail") {
-            ser_usings.push_str("namespace detail = ::ser::rusty_ext::detail;\n");
-        }
-        // Emit the bridge at the TOP of the purview (just inside `namespace <crate> {`).
-        // The references are NON-dependent qualified-ids (`::<crate>::de::rusty_ext::
-        // deserialize_in_place`) resolved at PARSE time, so the using-declaration must
-        // precede them. Per-type overloads added later in the purview merge into the set.
-        let mut bridge = String::new();
-        if !de_usings.is_empty() {
-            bridge.push_str(&format!(
-                "namespace de {{ namespace rusty_ext {{\n{}}} }}\n",
-                de_usings
-            ));
-        }
-        if !ser_usings.is_empty() {
-            bridge.push_str(&format!(
-                "namespace ser {{ namespace rusty_ext {{\n{}}} }}\n",
-                ser_usings
-            ));
-        }
-        if !bridge.is_empty() {
-            self.output.insert_str(wrap_start, &bridge);
-        }
+        // The serde runtime lives under `::rusty::serde_rt` (include/rusty/
+        // serde_runtime.hpp), a root the crate wrap never requalifies, so the
+        // purview's references reach it with no bridge.
     }
 
     /// Re-qualify bare crate-root references `::<sym>` -> `::<crate>::<sym>`.
@@ -6018,7 +5952,7 @@ impl CodeGen {
         }
         // Module-rule replacements apply to the PURVIEW only: the global
         // module fragment's prelude references the GLOBAL rusty_ext
-        // dispatchers through the same spellings (`::de::rusty_ext::…`), and
+        // dispatchers through the same spellings (`::rusty::serde_rt::de::…`), and
         // the dep's namespace is not even visible before `import <dep>;` —
         // rewriting there broke serde's visit_some prelude helpers.
         let mut purview_repls: Vec<(String, String)> = Vec::new();
@@ -6123,7 +6057,7 @@ impl CodeGen {
             let mut purview = output.split_off(purview_start);
             for (from, to) in &purview_repls {
                 if purview.contains(from.as_str()) {
-                    // `::de::rusty_ext::…` / `::ser::rusty_ext::…` reference the
+                    // `::rusty::serde_rt::de::…` / `::rusty::serde_rt::ser::…` reference the
                     // GLOBAL dispatcher prelude even in the purview — the dep's
                     // wrapped rusty_ext overloads are module-internal ("must be
                     // imported from module 'serde_core'"). Keep those bare.
@@ -6131,7 +6065,7 @@ impl CodeGen {
                         &purview,
                         from,
                         to,
-                        "::rusty_ext",
+                        "::serde_rt",
                     );
                 }
             }
@@ -9260,8 +9194,8 @@ impl CodeGen {
         log_emit("promote_token_variant_definition_export");
         self.qualify_unqualified_ser_de_constructor_paths();
         log_emit("qualify_unqualified_ser_de_constructor_paths");
-        self.normalize_private_rusty_ext_paths_in_output();
-        log_emit("normalize_private_rusty_ext_paths_in_output");
+        self.normalize_private_serde_rt_paths_in_output();
+        log_emit("normalize_private_serde_rt_paths_in_output");
         self.rewrite_self_sizeof_const_fn_calls_in_output();
         log_emit("rewrite_self_sizeof_const_fn_calls_in_output");
         self.rewrite_lazy_self_const_fn_calls_in_output();
@@ -23265,234 +23199,6 @@ impl CodeGen {
         self.newline();
     }
 
-    /// Emit a single Adapter specialization for the foreign-impl pipeline
-    /// (delegates to `rusty_ext::method(value_, args...)`).
-    ///
-    /// `trait_args` carries the C++ form of the trait's template
-    /// parameter bindings (operator-trait-style generic args **and**
-    /// associated-type bindings, in declaration order). Empty when the
-    /// trait is non-generic and has no assoc types. Required because
-    /// after Phase 3a step 1-2, assoc-types-only traits emit as
-    /// `template <class Owned> class Trait { ... }`, so the adapter spec
-    /// must inherit from `Trait<concrete_args...>` and lift those args
-    /// into its own `<args..., U>` template-arg list.
-    fn emit_one_foreign_adapter(
-        &mut self,
-        trait_name: &str,
-        trait_args: &[String],
-        impl_generic_names: &[String],
-        constraints: &[String],
-        suffix: &str,
-        self_cpp: &str,
-        kind: AdapterStorageKind,
-        methods: &[&syn::ImplItemFn],
-    ) {
-        // When the impl Self type itself is a reference (e.g.
-        // `impl Serializer for &mut fmt::Formatter`), `map_type`
-        // produces `rusty::fmt::Formatter&`. Subsequent formats
-        // like `{} value_` produce `Formatter& value_;` for Owning
-        // and `Formatter&& value_;` / `const Formatter&& value_;`
-        // for MutRef / ConstRef — neither is valid for storage. Strip
-        // the trailing `&` so the storage type is the pointee, then
-        // re-apply the kind-specific qualifier.
-        let self_storage_base = self_cpp.trim_end().trim_end_matches('&').trim_end();
-        let storage_decl = match kind {
-            AdapterStorageKind::Owning => format!("{} value_;", self_storage_base),
-            AdapterStorageKind::ConstRef => format!("const {}& value_;", self_storage_base),
-            AdapterStorageKind::MutRef => format!("{}& value_;", self_storage_base),
-        };
-        let ctor_decl = match kind {
-            // Non-explicit: Rust's unsizing coercion (`Box::new(Sq{..})` as
-            // Box<dyn Shape>) relies on the payload implicitly converting to
-            // the owning adapter at the rewritten construction site. Ref
-            // adapters stay explicit — implicit reference capture is unsafe.
-            AdapterStorageKind::Owning => format!(
-                "{}{}({} v) : value_(std::move(v)) {{}}",
-                trait_name, suffix, self_storage_base
-            ),
-            AdapterStorageKind::ConstRef => format!(
-                "explicit {}{}(const {}& u) : value_(u) {{}}",
-                trait_name, suffix, self_storage_base
-            ),
-            AdapterStorageKind::MutRef => format!(
-                "explicit {}{}({}& u) : value_(u) {{}}",
-                trait_name, suffix, self_storage_base
-            ),
-        };
-
-        let adapter_spec_args = if trait_args.is_empty() {
-            self_cpp.to_string()
-        } else {
-            format!("{}, {}", trait_args.join(", "), self_cpp)
-        };
-        let base_cpp = if trait_args.is_empty() {
-            trait_name.to_string()
-        } else {
-            format!("{}<{}>", trait_name, trait_args.join(", "))
-        };
-
-        let cpp_impl_generic_names: Vec<String> = impl_generic_names
-            .iter()
-            .map(|name| escape_cpp_keyword(name))
-            .collect();
-        if cpp_impl_generic_names.is_empty() {
-            self.writeln("template <>");
-        } else {
-            self.writeln(&format!(
-                "template <{}>",
-                cpp_impl_generic_names
-                    .iter()
-                    .map(|name| format!("typename {}", name))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        if !constraints.is_empty() {
-            self.writeln(&format!("    requires ({})", constraints.join(" && ")));
-        }
-        self.writeln(&format!(
-            "class {}{}<{}> final : public {} {{",
-            trait_name, suffix, adapter_spec_args, base_cpp
-        ));
-        self.writeln(&format!("    {}", storage_decl));
-        self.writeln("public:");
-        self.indent += 1;
-        self.writeln(&ctor_decl);
-        if matches!(kind, AdapterStorageKind::Owning) {
-            // The interface base deletes copy AND move, which suppresses the
-            // adapter's implicit move ctor — but Box/Rc::new_ take the value
-            // BY VALUE and must move it into place. Default-construct the
-            // (protected-default) base and move the payload.
-            self.writeln(&format!(
-                "{}{}({}{}&& other) : value_(std::move(other.value_)) {{}}",
-                trait_name, suffix, trait_name, suffix
-            ));
-        }
-
-        for method in methods {
-            // Mirror the trait class's skip for by-value `self` methods.
-            // The interface_traits pass writes only a TODO comment for
-            // such methods in the base class; the Adapter must not
-            // override them or clang errors "only virtual member
-            // functions can be marked 'override'". Surfaced by
-            // `impl<'a> Serializer for &mut fmt::Formatter<'a>` in
-            // serde_core (self is normalized to `&mut self` before the
-            // method reaches this loop).
-            let method_name = method.sig.ident.to_string();
-            if self
-                .trait_class_skipped_method_keys
-                .contains(&(trait_name.to_string(), method_name.clone()))
-            {
-                self.writeln(&format!(
-                    "// TODO(interface_traits): Adapter skipped method `{}` (base trait class also skipped)",
-                    method_name
-                ));
-                continue;
-            }
-            self.emit_one_foreign_adapter_method(method, kind, impl_generic_names);
-        }
-
-        self.indent -= 1;
-        self.writeln("};");
-        self.newline();
-    }
-
-    /// Emit one method override for a foreign-impl Adapter. The body
-    /// delegates to `rusty_ext::method(value_, args...)`. Unreachable
-    /// &mut self overrides on a const-ref adapter use std::abort().
-    fn emit_one_foreign_adapter_method(
-        &mut self,
-        method: &syn::ImplItemFn,
-        kind: AdapterStorageKind,
-        impl_generic_names: &[String],
-    ) {
-        let method_name = method.sig.ident.to_string();
-        let escaped = escape_cpp_keyword_in_member_position(&method_name);
-
-        let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
-            self.writeln(&format!(
-                "// TODO(interface_traits): skipped no-receiver method `{}`",
-                method_name
-            ));
-            return;
-        };
-        if receiver.reference.is_none() {
-            self.writeln(&format!(
-                "// TODO(interface_traits): skipped by-value `self` method `{}`",
-                method_name
-            ));
-            return;
-        }
-        let has_method_only_generics = method.sig.generics.params.iter().any(|param| match param {
-            syn::GenericParam::Type(type_param) => !impl_generic_names
-                .iter()
-                .any(|name| name == &type_param.ident.to_string()),
-            syn::GenericParam::Const(_) => true,
-            syn::GenericParam::Lifetime(_) => false,
-        });
-        if has_method_only_generics {
-            self.writeln(&format!(
-                "// TODO(interface_traits): skipped generic method `{}`",
-                method_name
-            ));
-            return;
-        }
-
-        if !impl_generic_names.is_empty() {
-            self.type_param_scopes
-                .push(impl_generic_names.iter().cloned().collect());
-        }
-
-        let is_const = receiver.mutability.is_none();
-        let return_type = self.map_return_type(&method.sig.output);
-
-        let mut sig_params: Vec<String> = Vec::new();
-        let mut call_args: Vec<String> = vec!["value_".to_string()];
-        for (idx, arg) in method.sig.inputs.iter().enumerate().skip(1) {
-            let syn::FnArg::Typed(pt) = arg else {
-                continue;
-            };
-            let ty = self.map_type(&pt.ty);
-            let name = match pt.pat.as_ref() {
-                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
-                _ => format!("_arg{}", idx),
-            };
-            sig_params.push(format!("{} {}", ty, name));
-            call_args.push(name);
-        }
-
-        let const_suffix = if is_const { " const" } else { "" };
-        self.writeln(&format!(
-            "{} {}({}){} override {{",
-            return_type,
-            escaped,
-            sig_params.join(", "),
-            const_suffix
-        ));
-        self.indent += 1;
-
-        let mut_unreachable_in_const_ref = !is_const && matches!(kind, AdapterStorageKind::ConstRef);
-        if mut_unreachable_in_const_ref {
-            self.writeln("std::abort();  // unreachable through &dyn T");
-        } else {
-            let needs_return = !matches!(method.sig.output, syn::ReturnType::Default);
-            let prefix = if needs_return { "return " } else { "" };
-            self.writeln(&format!(
-                "{}rusty_ext::{}({});",
-                prefix,
-                escaped,
-                call_args.join(", ")
-            ));
-        }
-
-        self.indent -= 1;
-        self.writeln("}");
-        if !impl_generic_names.is_empty() {
-            self.type_param_scopes.pop();
-        }
-    }
-
-
     /// Emit a single Adapter specialization for the local-impl pipeline
     /// (delegates each override to `value_.method(...)`).
     ///
@@ -25654,7 +25360,8 @@ impl CodeGen {
                 // the owning trait's, set for the lane's emission.
                 let callee = leaf.map(|leaf| match self.ufcs_tag_namespace.as_deref() {
                     Some(ns) => format!("{}::{}", ns, leaf),
-                    None => format!("::de::rusty_ext::{}", leaf),
+                    None if leaf == "next_element_seed" => format!("SeqAccess_::{}", leaf),
+                    None => format!("MapAccess_::{}", leaf),
                 });
                 if let Some(callee) = callee {
                     self.writeln(&format!(
@@ -25698,7 +25405,7 @@ impl CodeGen {
                 })
             {
                 self.writeln(&format!(
-                    "return ::ser::rusty_ext::serialize_value(rusty::detail::deref_if_pointer_like(self_), ::ser::rusty_ext::forward_serializer(std::move({})));",
+                    "return ::rusty::serde_rt::ser::serialize_value(rusty::detail::deref_if_pointer_like(self_), ::rusty::serde_rt::ser::forward_serializer(std::move({})));",
                     serializer_param_name
                 ));
                 emitted_default_body_override = true;
@@ -42666,7 +42373,7 @@ impl CodeGen {
             if args.is_empty() && method_name == "next_element" {
                 let template_args = method_template_args.unwrap_or("<uint8_t>");
                 let free_call = format!(
-                    "::de::rusty_ext::next_element{}(std::forward<decltype(__recv)>(__recv))",
+                    "SeqAccess_::next_element{}(std::forward<decltype(__recv)>(__recv))",
                     template_args
                 );
                 return format!(
@@ -42682,7 +42389,7 @@ impl CodeGen {
                 };
                 let template_args = method_template_args.unwrap_or(default_template_args);
                 let free_call = format!(
-                    "::de::rusty_ext::{}{}(std::forward<decltype(__recv)>(__recv))",
+                    "MapAccess_::{}{}(std::forward<decltype(__recv)>(__recv))",
                     method_name, template_args
                 );
                 return format!(
@@ -42692,7 +42399,7 @@ impl CodeGen {
             }
             if method_name == "next_key_seed" && args.len() == 1 {
                 let free_call = format!(
-                    "::de::rusty_ext::next_key_seed(std::forward<decltype(__recv)>(__recv), {})",
+                    "MapAccess_::next_key_seed(std::forward<decltype(__recv)>(__recv), {})",
                     args[0]
                 );
                 return format!(
@@ -43242,9 +42949,9 @@ impl CodeGen {
             || joined.ends_with("::de::Deserialize::deserialize")
             || joined == "deserialize"
             || joined.ends_with("::deserialize")
-            || joined == "de::rusty_ext::deserialize"
-            || joined == "rusty_ext::deserialize"
-            || joined.ends_with("::rusty_ext::deserialize")
+            || joined == "rusty::serde_rt::de::deserialize"
+            || joined == "serde_rt::deserialize"
+            || joined.ends_with("::serde_rt::deserialize")
     }
 
 
@@ -44181,7 +43888,7 @@ impl CodeGen {
 
     fn emit_serialize_dispatch_call(&self, value_expr: &str, serializer_expr: &str) -> String {
         format!(
-            "([&](auto&& __self, auto&& __serializer) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }}) {{ return std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }} else if constexpr (requires {{ rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).serialize(std::forward<decltype(__serializer)>(__serializer)); }}) {{ return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).serialize(std::forward<decltype(__serializer)>(__serializer)); }} else if constexpr (requires {{ rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))._0; }}) {{ return ::ser::rusty_ext::serialize_value(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))._0, std::forward<decltype(__serializer)>(__serializer)); }} else if constexpr (::ser::rusty_ext::detail::is_std_span_v<decltype(__self)>) {{ return ::ser::rusty_ext::serialize_value(std::forward<decltype(__self)>(__self), std::forward<decltype(__serializer)>(__serializer)); }} else {{ return ::ser::rusty_ext::serialize(std::forward<decltype(__self)>(__self), std::forward<decltype(__serializer)>(__serializer)); }} }})({}, ::ser::rusty_ext::forward_serializer({}))",
+            "([&](auto&& __self, auto&& __serializer) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }}) {{ return std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }} else if constexpr (requires {{ rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).serialize(std::forward<decltype(__serializer)>(__serializer)); }}) {{ return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).serialize(std::forward<decltype(__serializer)>(__serializer)); }} else if constexpr (requires {{ rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))._0; }}) {{ return ::rusty::serde_rt::ser::serialize_value(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))._0, std::forward<decltype(__serializer)>(__serializer)); }} else if constexpr (::rusty::serde_rt::ser::detail::is_std_span_v<decltype(__self)>) {{ return ::rusty::serde_rt::ser::serialize_value(std::forward<decltype(__self)>(__self), std::forward<decltype(__serializer)>(__serializer)); }} else {{ return ::rusty::serde_rt::ser::serialize(std::forward<decltype(__self)>(__self), std::forward<decltype(__serializer)>(__serializer)); }} }})({}, ::rusty::serde_rt::ser::forward_serializer({}))",
             value_expr, serializer_expr
         )
     }
@@ -51841,9 +51548,9 @@ impl CodeGen {
                 .is_some_and(|seg| seg == "deserialize")
             && resolved_segments
                 .get(resolved_segments.len().saturating_sub(2))
-                .is_some_and(|seg| seg == "rusty_ext")
+                .is_some_and(|seg| seg == "serde_rt")
         {
-            return Some("::de::rusty_ext::deserialize".to_string());
+            return Some("::rusty::serde_rt::de::deserialize".to_string());
         }
 
         let mut rewritten = resolved_segments.join("::");
@@ -59448,16 +59155,16 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "namespace cmp = core::cmp;",
         "rusty::cmp::",
         "core::cmp::",
-        "::de::rusty_ext::deserialize(",
-        "de::rusty_ext::deserialize(",
-        "::de::rusty_ext::deserialize_any(",
-        "de::rusty_ext::deserialize_any(",
-        "::de::rusty_ext::deserialize_in_place(",
-        "de::rusty_ext::deserialize_in_place(",
-        "::ser::rusty_ext::serialize_value(",
-        "ser::rusty_ext::serialize_value(",
-        "::ser::rusty_ext::forward_serializer(",
-        "ser::rusty_ext::forward_serializer(",
+        "::rusty::serde_rt::de::deserialize(",
+        "rusty::serde_rt::de::deserialize(",
+        "::rusty::serde_rt::de::deserialize_any(",
+        "rusty::serde_rt::de::deserialize_any(",
+        "::rusty::serde_rt::de::deserialize_in_place(",
+        "rusty::serde_rt::de::deserialize_in_place(",
+        "::rusty::serde_rt::ser::serialize_value(",
+        "rusty::serde_rt::ser::serialize_value(",
+        "::rusty::serde_rt::ser::forward_serializer(",
+        "rusty::serde_rt::ser::forward_serializer(",
     ];
     markers.iter().any(|m| output.contains(m))
 }
@@ -59485,11 +59192,11 @@ fn runtime_path_fallback_helpers_text_for_local_token_module() -> String {
     // module body inside `extern "C++"`, so they don't redefine the imported
     // `rusty::*` types — the canonical text below. Historically this carried a
     // hand-reduced, divergent copy of the
-    // `ser::rusty_ext::{serialize,serialize_value,serialize_bytes}` dispatchers:
+    // `rusty::serde_rt::ser::{serialize,serialize_value,serialize_bytes}` dispatchers:
     // notably a value-first `serialize_bytes(Value, Serializer)` (vs the
     // serializer-first `serialize_bytes(Serializer, BytesLike)` every other
     // module emits). Two structurally different overload families named
-    // `ser::rusty_ext::*` then collided in downstream TUs (test_derive imports
+    // `rusty::serde_rt::ser::*` then collided in downstream TUs (test_derive imports
     // serde_test): the value-first overload, bound with arguments swapped,
     // recursed into `serialize_value` and produced a deduced-return cycle on
     // `Box<[u8]>` (`serialize_value<...> with deduced return type cannot be used

@@ -1248,7 +1248,7 @@ namespace rusty {
     } // namespace boxed
 }
 
-namespace ser::impls::rusty_ext {
+namespace rusty::serde_rt::ser::impls {
     template<typename S, typename T, std::size_t Extent>
     requires requires(S serializer, std::span<T, Extent> self_) { serializer.collect_seq(self_); }
     auto serialize(std::span<T, Extent> self_, S serializer) {
@@ -1354,7 +1354,7 @@ namespace ser::impls::rusty_ext {
 
         return state.end();
     }
-} // namespace ser::impls::rusty_ext
+} // namespace rusty::serde_rt::ser::impls
 
 // std::formatter specialization for char32_t (Rust char → C++ char32_t)
 // Required for std::format with char32_t arguments.

@@ -13159,12 +13159,12 @@ fn test_deserialize_trait_call_preserves_explicit_mut_deserializer_borrow() {
     );
 
     assert!(
-        out.contains("::de::rusty_ext::deserialize(rusty::PhantomData<T>{}, &de)"),
+        out.contains("::rusty::serde_rt::de::deserialize(rusty::PhantomData<T>{}, &de)"),
         "T::deserialize(&mut de) must pass the mutable deserializer by address, got:\n{}",
         out
     );
     assert!(
-        !out.contains("::de::rusty_ext::deserialize(rusty::PhantomData<T>{}, de)"),
+        !out.contains("::rusty::serde_rt::de::deserialize(rusty::PhantomData<T>{}, de)"),
         "erasing &mut de copies the deserializer cursor, got:\n{}",
         out
     );
@@ -36905,7 +36905,7 @@ fn test_leaf5202_while_let_next_element_uses_push_payload_type() {
     );
     assert!(
         out.contains(".template next_element<Value>()")
-            || out.contains("::de::rusty_ext::next_element<Value>("),
+            || out.contains("::rusty::serde_rt::de::next_element<Value>("),
         "expected next_element template arg from Vec::push payload type, got:\n{}",
         out
     );
@@ -36937,7 +36937,7 @@ fn test_leaf5202_expanded_try_match_next_element_uses_push_payload_type() {
     );
     assert!(
         out.contains(".template next_element<Value>()")
-            || out.contains("::de::rusty_ext::next_element<Value>("),
+            || out.contains("::rusty::serde_rt::de::next_element<Value>("),
         "expected expanded try-style match to type next_element from Vec::push, got:\n{}",
         out
     );
@@ -38676,7 +38676,7 @@ fn test_emit_serialize_trait_assoc_call_uses_serialize_dispatch() {
     };
     let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
-    assert!(out.contains("::ser::rusty_ext::serialize_value("));
+    assert!(out.contains("::rusty::serde_rt::ser::serialize_value("));
     assert!(out.contains("bytes"));
     assert!(out.contains("serializer"));
 }
@@ -38691,7 +38691,7 @@ fn test_emit_namespaced_serialize_trait_assoc_call_uses_serialize_dispatch() {
     };
     let cg = test_codegen();
     let out = cg.emit_call_expr_to_string(&call, None);
-    assert!(out.contains("::ser::rusty_ext::serialize_value("));
+    assert!(out.contains("::rusty::serde_rt::ser::serialize_value("));
     assert!(out.contains("bytes"));
     assert!(out.contains("serializer"));
 }

@@ -83,137 +83,7 @@ impl CodeGen {
         result
     }
 
-    /// Book §3.2.16 phase 3 / (aa): the serde-family hardcoded routes spell a
-    /// trait method at its `rusty_ext` twin (`::de::rusty_ext::next_element_seed`,
-    /// `::de::rusty_ext::next_key<Seed>`); a lane-covered trait has no twin, so
-    /// such a spelling is retargeted to the lane's dispatcher
-    /// (`SeqAccess_::next_element_seed`, `MapAccess_::next_key<Seed>`) — only
-    /// for a method name a single lane-covered trait declares, only in call
-    /// position (followed by `(` or `<`), and never for the hand-written
-    /// runtime prelude's own members, which live in `de::rusty_ext` /
-    /// `ser::rusty_ext` for real. Runs before the crate wrap (the spellings are
-    /// still crate-relative).
-    fn retarget_rusty_ext_twin_spellings_to_lane(&mut self) {
-        if !self.output.contains("rusty_ext::") {
-            return;
-        }
-        const PRELUDE: [&str; 10] = [
-            "deserialize",
-            "deserialize_any",
-            "deserialize_in_place",
-            "serialize",
-            "serialize_value",
-            "serialize_bytes",
-            "forward_serializer",
-            "__ser_result_t",
-            "detail",
-            "into_deserializer",
-        ];
-        let mut owners: std::collections::BTreeMap<String, Vec<(String, String)>> =
-            std::collections::BTreeMap::new();
-        for (trait_name, methods) in &self.ufcs_declared_trait_methods {
-            if !self.trait_is_lane_carried(trait_name) {
-                continue;
-            }
-            // The module the twin spelling names: a local trait's declaring
-            // module, or (a dependency trait) the module its manifest records.
-            let module = match self.trait_declared_path_by_short_name.get(trait_name) {
-                Some(full) => full
-                    .rsplit_once("::")
-                    .map(|(m, _)| m.to_string())
-                    .unwrap_or_default(),
-                None => match self
-                    .dependency_ufcs_trait_manifests
-                    .iter()
-                    .find_map(|m| m.declared_trait_modules.get(trait_name).cloned())
-                {
-                    Some(module) => module,
-                    None => continue,
-                },
-            };
-            for m in methods {
-                owners
-                    .entry(m.clone())
-                    .or_default()
-                    .push((trait_name.clone(), module.clone()));
-            }
-        }
-        // (module_cpp, leaf) → lane spelling
-        let mut map: std::collections::HashMap<(String, String), String> =
-            std::collections::HashMap::new();
-        for (m, traits) in &owners {
-            if traits.len() != 1 || PRELUDE.contains(&m.as_str()) {
-                continue;
-            }
-            let (trait_name, module) = &traits[0];
-            let module_cpp = module
-                .split("::")
-                .filter(|s| !s.is_empty())
-                .map(escape_cpp_keyword)
-                .collect::<Vec<_>>()
-                .join("::");
-            let leaf = escape_cpp_keyword(m);
-            let lane = format!("{}::{}", self.ufcs_trait_namespace(trait_name), leaf);
-            map.insert((module_cpp, leaf), lane);
-        }
-        if map.is_empty() {
-            return;
-        }
-        let src = std::mem::take(&mut self.output);
-        let bytes = src.as_bytes();
-        let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        let mut out = String::with_capacity(src.len());
-        let mut i = 0;
-        while let Some(rel) = src[i..].find("rusty_ext::") {
-            let pos = i + rel;
-            let leaf_start = pos + "rusty_ext::".len();
-            let leaf_end = leaf_start
-                + src[leaf_start..]
-                    .bytes()
-                    .take_while(|b| is_ident(*b))
-                    .count();
-            // Walk back over `ident::` segments and an optional leading `::`.
-            let mut start = pos;
-            loop {
-                if start >= 2 && &src[start - 2..start] == "::" {
-                    let seg_end = start - 2;
-                    let seg_len = src[..seg_end]
-                        .bytes()
-                        .rev()
-                        .take_while(|b| is_ident(*b))
-                        .count();
-                    if seg_len > 0 {
-                        start = seg_end - seg_len;
-                        continue;
-                    }
-                    start = seg_end;
-                }
-                break;
-            }
-            let in_call_position =
-                leaf_end < src.len() && matches!(bytes[leaf_end], b'(' | b'<');
-            let before_ok = start == 0 || !is_ident(bytes[start - 1]);
-            let module_cpp = src[start..pos]
-                .trim_start_matches("::")
-                .trim_end_matches("::")
-                .to_string();
-            let key = (module_cpp, src[leaf_start..leaf_end].to_string());
-            if in_call_position
-                && before_ok
-                && let Some(lane) = map.get(&key)
-            {
-                out.push_str(&src[i..start]);
-                out.push_str(lane);
-            } else {
-                out.push_str(&src[i..leaf_end]);
-            }
-            i = leaf_end;
-        }
-        out.push_str(&src[i..]);
-        self.output = out;
-    }
-
-    pub(super) fn normalize_private_rusty_ext_paths_in_output(&mut self) {
+    pub(super) fn normalize_private_serde_rt_paths_in_output(&mut self) {
         if self.output.contains("\r\n") {
             self.output = self.output.replace("\r\n", "\n");
         }
@@ -228,40 +98,39 @@ impl CodeGen {
             "::private_::ser::content::",
         );
         let rewrites = [
-            ("::private_::de::content::rusty_ext::", "::de::rusty_ext::"),
-            ("::private_::de::rusty_ext::", "::de::rusty_ext::"),
+            ("::private_::de::content::serde_rt::", "::rusty::serde_rt::de::"),
+            ("::private_::rusty::serde_rt::de::", "::rusty::serde_rt::de::"),
             (
-                "::private_::ser::content::rusty_ext::serialize",
-                "::ser::impls::rusty_ext::serialize",
+                "::private_::ser::content::serde_rt::serialize",
+                "::rusty::serde_rt::ser::impls::serialize",
             ),
             (
-                "::private_::ser::rusty_ext::serialize",
-                "::ser::impls::rusty_ext::serialize",
+                "::private_::rusty::serde_rt::ser::serialize",
+                "::rusty::serde_rt::ser::impls::serialize",
             ),
             (
-                "::private_::ser::content::rusty_ext::",
-                "::ser::rusty_ext::",
+                "::private_::ser::content::serde_rt::",
+                "::rusty::serde_rt::ser::",
             ),
-            ("::private_::ser::rusty_ext::", "::ser::rusty_ext::"),
-            ("private_::de::content::rusty_ext::", "::de::rusty_ext::"),
-            ("private_::de::rusty_ext::", "::de::rusty_ext::"),
+            ("::private_::rusty::serde_rt::ser::", "::rusty::serde_rt::ser::"),
+            ("private_::de::content::serde_rt::", "::rusty::serde_rt::de::"),
+            ("private_::rusty::serde_rt::de::", "::rusty::serde_rt::de::"),
             (
-                "private_::ser::content::rusty_ext::serialize",
-                "::ser::impls::rusty_ext::serialize",
+                "private_::ser::content::serde_rt::serialize",
+                "::rusty::serde_rt::ser::impls::serialize",
             ),
             (
-                "private_::ser::rusty_ext::serialize",
-                "::ser::impls::rusty_ext::serialize",
+                "private_::rusty::serde_rt::ser::serialize",
+                "::rusty::serde_rt::ser::impls::serialize",
             ),
-            ("private_::ser::content::rusty_ext::", "::ser::rusty_ext::"),
-            ("private_::ser::rusty_ext::", "::ser::rusty_ext::"),
+            ("private_::ser::content::serde_rt::", "::rusty::serde_rt::ser::"),
+            ("private_::rusty::serde_rt::ser::", "::rusty::serde_rt::ser::"),
         ];
         for (from, to) in rewrites {
             if self.output.contains(from) {
                 self.output = self.output.replace(from, to);
             }
         }
-        self.retarget_rusty_ext_twin_spellings_to_lane();
         if self.output.contains("using namespace private_;") {
             self.output = self
                 .output
@@ -373,10 +242,6 @@ impl CodeGen {
             (
                 "TokenTree_Literal{tt.inner.unwrap_nightly()}",
                 "TokenTree_Literal{::Literal::_new_fallback(tt.inner.unwrap_nightly())}",
-            ),
-            (
-                "punct_shadow1.set_span(([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::span(std::forward<decltype(__self)>(__self)); }) { return rusty_ext::span(std::forward<decltype(__self)>(__self)); } else { return rusty_ext::span(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(tt).inner.unwrap_nightly());",
-                "punct_shadow1.set_span(tt.span());",
             ),
         ];
         for (from, to) in proc_macro_token_wrapper_rewrites {
@@ -902,29 +767,6 @@ inline rusty::Result<AnyParsed, rusty::String> from_str(std::string_view s) {\n\
         }
         if self.output.contains("== Reject)") {
             self.output = self.output.replace("== Reject)", "== Reject{})");
-        }
-        if self.output.contains("rusty_ext::peek(")
-            && !self
-                .output
-                .contains("template<typename Iter>\nauto peek(Iter& it)")
-        {
-            if let Some(ns_pos) = self.output.find("namespace rusty_ext {\n") {
-                let insert_pos = ns_pos + "namespace rusty_ext {\n".len();
-                self.output.insert_str(
-                    insert_pos,
-                    "template<typename Iter>\n\
-auto peek(Iter& it) {\n\
-    if constexpr (requires { it.peek(); }) {\n\
-        return it.peek();\n\
-    } else if constexpr (requires { it.next(); }) {\n\
-        auto copy = it;\n\
-        return copy.next();\n\
-    } else {\n\
-        return rusty::Option<std::tuple<>>(rusty::None);\n\
-    }\n\
-}\n",
-                );
-            }
         }
         if self.output.contains("rusty::proc_macro_runtime::IntoIter")
             && !self
@@ -2452,7 +2294,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         if segments.len() >= 3
             && segments
                 .get(segments.len().saturating_sub(2))
-                .is_some_and(|seg| seg == "rusty_ext")
+                .is_some_and(|seg| seg == "serde_rt")
         {
             let fn_name = segments.last().cloned().unwrap_or_default();
             let prefix = &segments[..segments.len() - 2];
@@ -2461,13 +2303,13 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 .any(|seg| seg == "private" || seg == "private_" || seg.starts_with("__private"));
             if has_private_prefix {
                 if prefix.iter().any(|seg| seg == "de") {
-                    return format!("::de::rusty_ext::{}", fn_name);
+                    return format!("::rusty::serde_rt::de::{}", fn_name);
                 }
                 if prefix.iter().any(|seg| seg == "ser") {
                     if fn_name == "serialize" {
-                        return "::ser::impls::rusty_ext::serialize".to_string();
+                        return "::rusty::serde_rt::ser::impls::serialize".to_string();
                     }
-                    return format!("::ser::rusty_ext::{}", fn_name);
+                    return format!("::rusty::serde_rt::ser::{}", fn_name);
                 }
             }
         }
@@ -3759,23 +3601,23 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         if path.segments.len() >= 3 {
             let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
             let fn_name = segments.last().cloned().unwrap_or_default();
-            let penultimate_is_rusty_ext = segments
+            let penultimate_is_serde_rt = segments
                 .get(segments.len().saturating_sub(2))
-                .is_some_and(|s| s == "rusty_ext");
-            if !fn_name.is_empty() && penultimate_is_rusty_ext {
+                .is_some_and(|s| s == "serde_rt");
+            if !fn_name.is_empty() && penultimate_is_serde_rt {
                 let prefix = &segments[..segments.len() - 2];
                 let has_private_prefix = prefix.iter().any(|seg| {
                     seg == "private" || seg == "private_" || seg.starts_with("__private")
                 });
                 if has_private_prefix {
                     if prefix.iter().any(|seg| seg == "de") {
-                        return format!("::de::rusty_ext::{}", fn_name);
+                        return format!("::rusty::serde_rt::de::{}", fn_name);
                     }
                     if prefix.iter().any(|seg| seg == "ser") {
                         if fn_name == "serialize" {
-                            return "::ser::impls::rusty_ext::serialize".to_string();
+                            return "::rusty::serde_rt::ser::impls::serialize".to_string();
                         }
-                        return format!("::ser::rusty_ext::{}", fn_name);
+                        return format!("::rusty::serde_rt::ser::{}", fn_name);
                     }
                 }
             }
@@ -3797,9 +3639,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             {
                 return format!("{}::{}", enum_owner, fn_name);
             }
-            if owner == "rusty_ext" || owner == "Itertools" {
-                if owner == "rusty_ext" && fn_name == "deserialize" {
-                    return "::de::rusty_ext::deserialize".to_string();
+            if owner == "serde_rt" || owner == "Itertools" {
+                if owner == "serde_rt" && fn_name == "deserialize" {
+                    return "::rusty::serde_rt::de::deserialize".to_string();
                 }
                 if let Some(scoped) =
                     self.resolve_scoped_namespace_function_expr_path(&owner, &fn_name)

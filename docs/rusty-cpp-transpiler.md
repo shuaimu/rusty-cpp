@@ -2903,6 +2903,21 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   and the header is self-contained (it forward-declares the two runtime functions it calls and
   parses standalone in all three configurations). The namespaces keep their names in this step.
   Measured: unit 2597 green (+ the baseline integration red); rows serde_core, serde, serde_repr, tap, smallvec pass; full matrix 28 rows: 20 PASS, 5 FAIL (the pre-existing alloc, bitflags, path, rusty, serde_bytes), 3 known-fail — the baseline. Four unit tests that inspected the runtime text now read the header, comparing with whitespace squashed (the header keeps the C++ indented; the literal never was).
+- *2026-10-12 — `rusty_ext` removal, stage 2b: the serde runtime is `rusty::serde_rt`; the name
+  `rusty_ext` is gone.* The runtime's namespaces (`de::rusty_ext`, `ser::rusty_ext`,
+  `ser::impls::rusty_ext`) collided with serde_core's own `de`/`ser` modules under the crate wrap —
+  the reason the wrap carried a bridge of using-declarations to co-locate them. They are
+  `rusty::serde_rt::{de, ser, ser::impls}` now, a root the wrap never requalifies, and the bridge is
+  deleted. Every route that still spelled a trait method at its retired twin spells the lane
+  (`Expected_::fmt`, `MapAccess_::next_*`, `SeqAccess_::next_element*`,
+  `IntoDeserializer_::into_deserializer` for the `de::value` fallback, ryu's private `Sealed` methods
+  by owner); the toml `key`/`value` helpers no lane emits take the generic lowering; the output
+  retarget pass, the `rusty_ext::peek` splice and the dead foreign-adapter emitters go. The
+  transpiler's synthetic path tag is `serde_rt`, the extension-namespace tag `ext`. What this does
+  NOT do: the vendored `transpiled/*.cppm` ports keep their inline `de::rusty_ext` copies until
+  re-transpiled (a vendored module and a fresh one coexist — different names, no ODR contact), and a
+  mako-side hand-written spelling of `de::rusty_ext::…` must become `rusty::serde_rt::de::…`.
+  Measured: unit 2597 green (+ the baseline integration red); rows serde_core, serde, serde_repr, tap, smallvec, either pass; full matrix 28 rows: 20 PASS, 5 FAIL (the pre-existing alloc, bitflags, path, rusty, serde_bytes), 3 known-fail — the baseline. The header parses standalone in all three token configurations.
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

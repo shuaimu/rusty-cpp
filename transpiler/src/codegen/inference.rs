@@ -1300,9 +1300,9 @@ impl CodeGen {
         if namespace_name.is_empty() || fn_name.is_empty() {
             return None;
         }
-        let namespace_is_rusty_ext =
-            namespace_name == "rusty_ext" || namespace_name.ends_with("::rusty_ext");
-        if namespace_name == "rusty_ext" {
+        let namespace_is_serde_rt =
+            namespace_name == "serde_rt" || namespace_name.ends_with("::serde_rt");
+        if namespace_name == "serde_rt" {
             let has_private_prefix = self
                 .module_stack
                 .iter()
@@ -1310,34 +1310,34 @@ impl CodeGen {
             if has_private_prefix {
                 if self.module_stack.iter().any(|seg| seg == "de") {
                     if fn_name == "deserialize" {
-                        return Some("::de::rusty_ext::deserialize".to_string());
+                        return Some("::rusty::serde_rt::de::deserialize".to_string());
                     }
                     if fn_name == "fmt" {
-                        return Some("::de::rusty_ext::fmt".to_string());
+                        return Some("Expected_::fmt".to_string());
                     }
                 }
                 if self.module_stack.iter().any(|seg| seg == "ser") {
                     if fn_name == "serialize" {
-                        return Some("::ser::impls::rusty_ext::serialize".to_string());
+                        return Some("::rusty::serde_rt::ser::impls::serialize".to_string());
                     }
                 }
             }
             if fn_name == "deserialize" {
-                return Some("::de::rusty_ext::deserialize".to_string());
+                return Some("::rusty::serde_rt::de::deserialize".to_string());
             }
         }
         let mut candidates = Vec::new();
         // Prefer module-scoped extension shims over root-level `rusty_ext`.
         // Root candidates from skipped no-receiver trait methods can otherwise
         // shadow real scoped extension free functions and produce bad calls.
-        if namespace_name != "rusty_ext" || self.module_stack.is_empty() {
+        if namespace_name != "serde_rt" || self.module_stack.is_empty() {
             candidates.push(format!("{}::{}", namespace_name, fn_name));
         }
         for depth in (1..=self.module_stack.len()).rev() {
             let prefix = self.module_stack[..depth].join("::");
             candidates.push(format!("{}::{}::{}", prefix, namespace_name, fn_name));
         }
-        if namespace_is_rusty_ext {
+        if namespace_is_serde_rt {
             // No `rusty_ext` free function is emitted any more (the twin is
             // retired); only the hardcoded prelude names above resolve.
             candidates.clear();
@@ -1347,16 +1347,16 @@ impl CodeGen {
         // `rusty_ext::foo` inside a Rust module is a relative path. Prefer an
         // existing known free-function path with best module-prefix match; only
         // fall back to lexical qualification when metadata is truly unavailable.
-        if candidates.is_empty() && namespace_name == "rusty_ext" {
+        if candidates.is_empty() && namespace_name == "serde_rt" {
             return self.resolve_unscoped_namespace_function_expr_path(namespace_name, fn_name);
         }
-        if namespace_name == "rusty_ext"
+        if namespace_name == "serde_rt"
             && self.module_stack.is_empty()
             && candidates
                 .iter()
-                .any(|candidate| candidate == &format!("rusty_ext::{}", fn_name))
+                .any(|candidate| candidate == &format!("serde_rt::{}", fn_name))
         {
-            let exact = format!("rusty_ext::{}", fn_name);
+            let exact = format!("serde_rt::{}", fn_name);
             let suffix = format!("::{}", exact);
             let mut scoped_candidates: Vec<String> = Vec::new();
             let _ = (&exact, &suffix);
@@ -1384,9 +1384,9 @@ impl CodeGen {
         if namespace_name.is_empty() || fn_name.is_empty() {
             return None;
         }
-        let namespace_is_rusty_ext =
-            namespace_name == "rusty_ext" || namespace_name.ends_with("::rusty_ext");
-        if namespace_name == "rusty_ext" {
+        let namespace_is_serde_rt =
+            namespace_name == "serde_rt" || namespace_name.ends_with("::serde_rt");
+        if namespace_name == "serde_rt" {
             let has_private_prefix = self
                 .module_stack
                 .iter()
@@ -1394,25 +1394,25 @@ impl CodeGen {
             if has_private_prefix {
                 if self.module_stack.iter().any(|seg| seg == "de") {
                     if fn_name == "deserialize" {
-                        return Some("::de::rusty_ext::deserialize".to_string());
+                        return Some("::rusty::serde_rt::de::deserialize".to_string());
                     }
                     if fn_name == "fmt" {
-                        return Some("::de::rusty_ext::fmt".to_string());
+                        return Some("Expected_::fmt".to_string());
                     }
                 }
                 if self.module_stack.iter().any(|seg| seg == "ser") {
                     if fn_name == "serialize" {
-                        return Some("::ser::impls::rusty_ext::serialize".to_string());
+                        return Some("::rusty::serde_rt::ser::impls::serialize".to_string());
                     }
                 }
             }
             if fn_name == "deserialize" {
-                return Some("::de::rusty_ext::deserialize".to_string());
+                return Some("::rusty::serde_rt::de::deserialize".to_string());
             }
         }
         let exact = format!("{}::{}", namespace_name, fn_name);
         let suffix = format!("::{}", exact);
-        let known_paths = if namespace_is_rusty_ext {
+        let known_paths = if namespace_is_serde_rt {
             HashSet::new()
         } else {
             self.collect_known_free_function_paths()
@@ -1426,8 +1426,8 @@ impl CodeGen {
         if candidates.is_empty() {
             return None;
         }
-        if namespace_name == "rusty_ext" {
-            let exact = format!("rusty_ext::{}", fn_name);
+        if namespace_name == "serde_rt" {
+            let exact = format!("serde_rt::{}", fn_name);
             if candidates.iter().any(|candidate| candidate == &exact) {
                 let mut scoped_candidates: Vec<String> = candidates
                     .iter()

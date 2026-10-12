@@ -6584,7 +6584,7 @@ impl CodeGen {
             .try_emit_map_callable_arg_with_expected(&mc.args[0], expected_ty)
             .unwrap_or_else(|| self.emit_expr_maybe_move(&mc.args[0]));
         Some(format!(
-            "(::de::rusty_ext::deserialize(rusty::PhantomData<{}>{{}}, {})).map({})",
+            "(::rusty::serde_rt::de::deserialize(rusty::PhantomData<{}>{{}}, {})).map({})",
             seed_cpp, deserializer, mapper
         ))
     }
@@ -7979,11 +7979,22 @@ impl CodeGen {
         ) && mc.args.is_empty()
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
-            return self.emit_extension_call_with_receiver_autoderef_fallback(
-                &format!("::private_::rusty_ext::{}", mc.method),
-                &receiver,
-                &[],
-            );
+            let method = mc.method.to_string();
+            // The lane of the trait that owns the method (ryu's private
+            // `Sealed`); a receiver with no known owner keeps the member call.
+            let owner = self
+                .ufcs_method_trait_owners
+                .get(&method)
+                .filter(|o| o.len() == 1)
+                .and_then(|o| o.iter().next().cloned());
+            return match owner {
+                Some(owner) => self.emit_extension_call_with_receiver_autoderef_fallback(
+                    &format!("{}::{}", self.ufcs_trait_namespace(&owner), method),
+                    &receiver,
+                    &[],
+                ),
+                None => format!("{}.{}()", receiver, method),
+            };
         }
         if mc.method == "expect"
             && mc.args.len() == 1
@@ -8028,7 +8039,7 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string_with_expected(&mc.receiver, expected_ty);
             let bytes = self.emit_expr_maybe_move(&mc.args[0]);
             return self.emit_extension_call_with_receiver_autoderef_fallback(
-                "::ser::rusty_ext::serialize_bytes",
+                "::rusty::serde_rt::ser::serialize_bytes",
                 &receiver,
                 &[bytes],
             );
@@ -8046,7 +8057,7 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string_with_expected(&mc.receiver, expected_ty);
             let visitor = self.emit_expr_maybe_move(&mc.args[0]);
             return self.emit_extension_call_with_receiver_autoderef_fallback(
-                "::de::rusty_ext::deserialize_any",
+                "::rusty::serde_rt::de::deserialize_any",
                 &receiver,
                 &[visitor],
             );
@@ -8059,7 +8070,7 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string_with_expected(&mc.receiver, expected_ty);
             let visitor = self.emit_expr_maybe_move(&mc.args[0]);
             return self.emit_extension_call_with_receiver_autoderef_fallback(
-                "::de::rusty_ext::deserialize_any",
+                "::rusty::serde_rt::de::deserialize_any",
                 &receiver,
                 &[visitor],
             );
@@ -8068,7 +8079,7 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string_with_expected(&mc.receiver, expected_ty);
             let place = self.emit_expr_maybe_move(&mc.args[0]);
             return self.emit_extension_call_with_receiver_autoderef_fallback(
-                "::de::rusty_ext::deserialize_in_place",
+                "::rusty::serde_rt::de::deserialize_in_place",
                 &receiver,
                 &[place],
             );
@@ -8138,7 +8149,7 @@ impl CodeGen {
                 && !type_string_has_auto_placeholder(&seed_cpp)
             {
                 return format!(
-                    "::de::rusty_ext::deserialize(rusty::PhantomData<{}>{{}}, {})",
+                    "::rusty::serde_rt::de::deserialize(rusty::PhantomData<{}>{{}}, {})",
                     seed_cpp, receiver
                 );
             }
@@ -10822,10 +10833,10 @@ impl CodeGen {
         if method_name == "into_deserializer" && args.is_empty() {
             let receiver = self.emit_expr_maybe_move(&mc.receiver);
             let scoped_into_deserializer_fn = self
-                .resolve_scoped_namespace_function_expr_path("rusty_ext", "into_deserializer")
+                .resolve_scoped_namespace_function_expr_path("serde_rt", "into_deserializer")
                 .or_else(|| {
                     self.resolve_unscoped_namespace_function_expr_path(
-                        "rusty_ext",
+                        "serde_rt",
                         "into_deserializer",
                     )
                 })
@@ -10852,12 +10863,13 @@ impl CodeGen {
                 {
                     return ctor_expr;
                 }
-                // Keep builtin/value trait lowering resilient when scoped `rusty_ext`
-                // exists in-module (for example serde_core). Prefer value helpers
-                // when their `<E>` overload is valid for the receiver, then scoped
-                // helper overloads, then receiver member fallback.
+                // The lane dispatcher carries the crate's `IntoDeserializer`
+                // impls (`IntoDeserializer_::into_deserializer<E>(recv)`); the
+                // resolved helper is tried first with the `<E>` argument the
+                // by-value primitive overloads need, then plain, then the
+                // receiver's member.
                 let value_into_fn =
-                    format!("::de::value::rusty_ext::into_deserializer<{}>", err_cpp);
+                    format!("IntoDeserializer_::into_deserializer<{}>", err_cpp);
                 let forwarded_receiver =
                     "std::forward<decltype(_into_deser_recv)>(_into_deser_recv)";
                 if let Some(scoped_fn) = scoped_into_deserializer_fn.as_ref() {
@@ -10871,7 +10883,7 @@ impl CodeGen {
                     // and the resolved helper is tried first, with the `<E>`
                     // argument the by-value primitive overloads need.
                     let scoped_with_e = format!("{}<{}>", scoped_fn, err_cpp);
-                    let value_branch = if scoped_fn.contains("de::value::rusty_ext") {
+                    let value_branch = if scoped_fn.contains("IntoDeserializer_") {
                         format!(
                             "else if constexpr (requires {{ {}({}); }}) {{ return {}({}); }} ",
                             value_into_fn, forwarded_receiver, value_into_fn, forwarded_receiver
@@ -10907,8 +10919,8 @@ impl CodeGen {
             if let Some(qualified_fn) = scoped_into_deserializer_fn {
                 return format!("{}({})", qualified_fn, receiver);
             }
-            // Serde value helpers are emitted under `de::value::rusty_ext`.
-            return format!("::de::value::rusty_ext::into_deserializer({})", receiver);
+            // No resolved helper: the lane dispatcher, bare.
+            return format!("IntoDeserializer_::into_deserializer({})", receiver);
         }
         if method_name == "parse" && args.is_empty() {
             if std::env::var("RUSTY_DEBUG_PARSE_EXPECTED").is_ok() {
@@ -12901,9 +12913,9 @@ impl CodeGen {
                 format!("{}.{}({})", self_expr, escaped_method, args.join(", "))
             };
             let mut free_fn = self
-                .resolve_scoped_namespace_function_expr_path("rusty_ext", &method_name)
+                .resolve_scoped_namespace_function_expr_path("serde_rt", &method_name)
                 .or_else(|| {
-                    self.resolve_unscoped_namespace_function_expr_path("rusty_ext", &method_name)
+                    self.resolve_unscoped_namespace_function_expr_path("serde_rt", &method_name)
                 })
                 .or_else(|| {
                     if self.module_stack.is_empty()
@@ -13578,21 +13590,10 @@ impl CodeGen {
                     || receiver_cpp == "Buffer"
                     || receiver_cpp.ends_with("::Buffer")
             });
-        let known_free_functions = self.collect_known_free_function_paths();
-        let has_toml_key_helper = known_free_functions.iter().any(|name| {
-            name == "key::rusty_ext::write_toml_key"
-                || name.ends_with("::key::rusty_ext::write_toml_key")
-        });
-        let has_toml_value_helper = known_free_functions.iter().any(|name| {
-            name == "value::rusty_ext::write_toml_value"
-                || name.ends_with("::value::rusty_ext::write_toml_value")
-        });
         if !has_toml_write_import
             && !has_toml_write_trait
             && !receiver_name_looks_like_toml_writer
             && !receiver_is_toml_write_like
-            && !has_toml_key_helper
-            && !has_toml_value_helper
         {
             return None;
         }
@@ -13603,18 +13604,11 @@ impl CodeGen {
         let raw_receiver = self.emit_expr_to_string_with_expected(&mc.receiver, expected_ty);
         let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
 
-        if method_name == "key" && args.len() == 1 {
-            let key_arg = format!("rusty::to_string_view({})", args[0]);
-            return Some(format!(
-                "::key::rusty_ext::write_toml_key({}, {})",
-                key_arg, receiver
-            ));
-        }
-        if method_name == "value" && args.len() == 1 {
-            return Some(format!(
-                "::value::rusty_ext::write_toml_value({}, {})",
-                args[0], receiver
-            ));
+        // `key(..)` / `value(..)` once named hand-written `rusty_ext` helpers
+        // (`::key::rusty_ext::write_toml_key`) that no lane emits; they take
+        // the generic method lowering.
+        if matches!(method_name, "key" | "value") && args.len() == 1 {
+            return None;
         }
         if !args.is_empty() {
             return None;
@@ -13872,18 +13866,18 @@ impl CodeGen {
                         {
                             let visitor_cpp = format!("{}Visitor", escape_cpp_keyword(&seed_ident));
                             let seed_adapter = format!(
-                                "::de::detail::identifier_seed<{}, {}>{{}}",
+                                "::rusty::serde_rt::rusty::serde_rt::de::detail::identifier_seed<{}, {}>{{}}",
                                 seed_cpp, visitor_cpp
                             );
                             let seed_call = self
                                 .emit_extension_call_with_receiver_autoderef_fallback(
-                                    "::de::rusty_ext::next_key_seed",
+                                    "MapAccess_::next_key_seed",
                                     &receiver,
                                     &[seed_adapter],
                                 );
                             let fallback_call = self
                                 .emit_extension_call_with_receiver_autoderef_fallback(
-                                    &format!("::de::rusty_ext::next_key<{}>", seed_cpp),
+                                    &format!("MapAccess_::next_key<{}>", seed_cpp),
                                     &receiver,
                                     &[],
                                 );
@@ -13931,15 +13925,15 @@ impl CodeGen {
         if matches!(method_name.as_str(), "write" | "write_")
             && let Some(callee) = {
                 let private_scoped = self
-                    .resolve_scoped_namespace_function_expr_path("private::rusty_ext", &method_name)
+                    .resolve_scoped_namespace_function_expr_path("private::serde_rt", &method_name)
                     .or_else(|| {
                         self.resolve_unscoped_namespace_function_expr_path(
-                            "private::rusty_ext",
+                            "private::serde_rt",
                             &method_name,
                         )
                     })
                     .or_else(|| {
-                        let private_path = format!("private::rusty_ext::{}", method_name);
+                        let private_path = format!("private::serde_rt::{}", method_name);
                         syn::parse_str::<syn::Path>(&private_path)
                             .ok()
                             .and_then(|path| self.resolve_known_free_function_expr_path(&path))
@@ -13951,8 +13945,8 @@ impl CodeGen {
                         self.resolve_known_unqualified_free_function_expr_path(&method_name);
                     if !direct
                         .as_deref()
-                        .is_some_and(|path| path.contains("::rusty_ext::"))
-                        || direct.as_deref() == Some("::rusty_ext::write_")
+                        .is_some_and(|path| path.contains("::serde_rt::"))
+                        || direct.as_deref() == Some("::serde_rt::write_")
                     {
                         direct = None;
                     }
@@ -13991,11 +13985,11 @@ impl CodeGen {
         } else if self.local_extension_method_names.contains(&method_name)
             || is_cross_source_extension_hint
         {
-            "rusty_ext"
+            "ext"
         } else {
             "rusty"
         };
-        if extension_ns == "rusty_ext" {
+        if extension_ns == "ext" {
             // Step 5b: a method whose single crate-trait owner the `impl_` lane
             // covers reaches `Tr_::m` — the twin it used to name is no longer
             // emitted. Member-first (an inherent method of the same name may
@@ -14091,9 +14085,9 @@ impl CodeGen {
                 ));
             }
             if let Some(qualified_fn) = self
-                .resolve_scoped_namespace_function_expr_path("rusty_ext", &method_name)
+                .resolve_scoped_namespace_function_expr_path("serde_rt", &method_name)
                 .or_else(|| {
-                    self.resolve_unscoped_namespace_function_expr_path("rusty_ext", &method_name)
+                    self.resolve_unscoped_namespace_function_expr_path("serde_rt", &method_name)
                 })
             {
                 let mut callee = qualified_fn;
@@ -14110,19 +14104,19 @@ impl CodeGen {
             }
             if method_name == "deserialize" {
                 return Some(format!(
-                    "::de::rusty_ext::deserialize({})",
+                    "::rusty::serde_rt::de::deserialize({})",
                     all_args.join(", ")
                 ));
             }
             if method_name == "deserialize_in_place" && all_args.len() == 3 {
                 return Some(format!(
-                    "::de::rusty_ext::deserialize_in_place({})",
+                    "::rusty::serde_rt::de::deserialize_in_place({})",
                     all_args.join(", ")
                 ));
             }
             if method_name == "fmt" && all_args.len() == 2 {
                 return Some(format!(
-                    "::de::rusty_ext::fmt({}, {})",
+                    "Expected_::fmt({}, {})",
                     all_args[0], all_args[1]
                 ));
             }
@@ -20973,13 +20967,13 @@ impl CodeGen {
                 }
                 if ufcs.method_name == "deserialize_any" && args.len() == 1 {
                     return format!(
-                        "::de::rusty_ext::deserialize_any({}, {})",
+                        "::rusty::serde_rt::de::deserialize_any({}, {})",
                         receiver, args[0]
                     );
                 }
                 if ufcs.method_name == "deserialize_in_place" && args.len() == 1 {
                     return format!(
-                        "::de::rusty_ext::deserialize_in_place({}, {})",
+                        "::rusty::serde_rt::de::deserialize_in_place({}, {})",
                         receiver, args[0]
                     );
                 }
@@ -21905,15 +21899,15 @@ impl CodeGen {
                 return format!("{}(rusty::to_string_view({}))", func, arg);
             }
         }
-        if func == "rusty_ext::deserialize"
-            || func == "::rusty_ext::deserialize"
-            || func.ends_with("::rusty_ext::deserialize")
+        if func == "serde_rt::deserialize"
+            || func == "::serde_rt::deserialize"
+            || func.ends_with("::serde_rt::deserialize")
         {
-            func = "::de::rusty_ext::deserialize".to_string();
+            func = "::rusty::serde_rt::de::deserialize".to_string();
         }
-        if (func == "rusty_ext::serialize"
-            || func == "::rusty_ext::serialize"
-            || func.ends_with("::rusty_ext::serialize")
+        if (func == "serde_rt::serialize"
+            || func == "::serde_rt::serialize"
+            || func.ends_with("::serde_rt::serialize")
             || func == "Serialize::serialize"
             || func.ends_with("::Serialize::serialize"))
             && call.args.len() == 2
@@ -21922,11 +21916,11 @@ impl CodeGen {
             let serializer = self.emit_expr_maybe_move(&call.args[1]);
             return self.emit_serialize_dispatch_call(&value, &serializer);
         }
-        if func == "::de::rusty_ext::deserialize" && call.args.len() == 2 {
+        if func == "::rusty::serde_rt::de::deserialize" && call.args.len() == 2 {
             let seed = self.emit_expr_maybe_move(&call.args[0]);
             let deserializer = self.emit_expr_maybe_move(&call.args[1]);
             return format!(
-                "([&](auto&& __seed, auto&& __deserializer) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__seed)>(__seed).deserialize(std::forward<decltype(__deserializer)>(__deserializer)); }}) {{ return std::forward<decltype(__seed)>(__seed).deserialize(std::forward<decltype(__deserializer)>(__deserializer)); }} else {{ return ::de::rusty_ext::deserialize(std::forward<decltype(__seed)>(__seed), std::forward<decltype(__deserializer)>(__deserializer)); }} }}({}, {}))",
+                "([&](auto&& __seed, auto&& __deserializer) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__seed)>(__seed).deserialize(std::forward<decltype(__deserializer)>(__deserializer)); }}) {{ return std::forward<decltype(__seed)>(__seed).deserialize(std::forward<decltype(__deserializer)>(__deserializer)); }} else {{ return ::rusty::serde_rt::de::deserialize(std::forward<decltype(__seed)>(__seed), std::forward<decltype(__deserializer)>(__deserializer)); }} }}({}, {}))",
                 seed, deserializer
             );
         }
@@ -21973,7 +21967,7 @@ impl CodeGen {
             {
                 let deserializer = self.emit_deserializer_call_arg(&call.args[0]);
                 return format!(
-                    "::de::rusty_ext::deserialize(rusty::PhantomData<{}>{{}}, {})",
+                    "::rusty::serde_rt::de::deserialize(rusty::PhantomData<{}>{{}}, {})",
                     ok_cpp, deserializer
                 );
             }
@@ -22024,7 +22018,7 @@ impl CodeGen {
                 {
                     let deserializer = self.emit_deserializer_call_arg(&call.args[0]);
                     return format!(
-                        "::de::rusty_ext::deserialize(rusty::PhantomData<{}>{{}}, {})",
+                        "::rusty::serde_rt::de::deserialize(rusty::PhantomData<{}>{{}}, {})",
                         owner_cpp, deserializer
                     );
                 }
@@ -22096,7 +22090,7 @@ impl CodeGen {
             let deserializer = self.emit_deserializer_call_arg(&call.args[0]);
             let place = self.emit_expr_maybe_move(&call.args[1]);
             return format!(
-                "::de::rusty_ext::deserialize_in_place(rusty::PhantomData<{}>{{}}, {}, {})",
+                "::rusty::serde_rt::de::deserialize_in_place(rusty::PhantomData<{}>{{}}, {}, {})",
                 owner_cpp, deserializer, place
             );
         }
@@ -23651,7 +23645,7 @@ impl CodeGen {
                     .last()
                     .is_some_and(|seg| seg.ident == "invalid_length")
         );
-        let call_targets_rusty_ext_mut_string = matches!(
+        let call_targets_serde_rt_mut_string = matches!(
             self.peel_paren_group_expr(call.func.as_ref()),
             syn::Expr::Path(path_expr)
                 if path_expr
@@ -23855,7 +23849,7 @@ impl CodeGen {
                     );
                 }
                 if idx == 0
-                    && call_targets_rusty_ext_mut_string
+                    && call_targets_serde_rt_mut_string
                     && let Some(cow_self_cpp) = self.active_mut_cow_self_cpp_binding()
                 {
                     return format!("rusty::to_mut({})", cow_self_cpp);
@@ -25103,7 +25097,7 @@ impl CodeGen {
             let receiver = self.emit_deserializer_call_arg(call.args.first()?);
             let seed_cpp = escape_cpp_keyword(&owner_leaf);
             return Some(format!(
-                "::de::rusty_ext::deserialize(rusty::PhantomData<{}>{{}}, {})",
+                "::rusty::serde_rt::de::deserialize(rusty::PhantomData<{}>{{}}, {})",
                 seed_cpp, receiver
             ));
         }
@@ -25115,7 +25109,7 @@ impl CodeGen {
             let receiver = self.emit_deserializer_call_arg(call.args.first()?);
             let seed_cpp = escape_cpp_keyword(&seed);
             return Some(format!(
-                "::de::rusty_ext::deserialize(rusty::PhantomData<{}>{{}}, {})",
+                "::rusty::serde_rt::de::deserialize(rusty::PhantomData<{}>{{}}, {})",
                 seed_cpp, receiver
             ));
         }
@@ -25234,18 +25228,18 @@ impl CodeGen {
                                 let visitor_cpp =
                                     format!("{}Visitor", escape_cpp_keyword(&seed_ident));
                                 let seed_adapter = format!(
-                                    "::de::detail::identifier_seed<{}, {}>{{}}",
+                                    "::rusty::serde_rt::rusty::serde_rt::de::detail::identifier_seed<{}, {}>{{}}",
                                     seed_cpp, visitor_cpp
                                 );
                                 let seed_call = self
                                     .emit_extension_call_with_receiver_autoderef_fallback(
-                                        "::de::rusty_ext::next_key_seed",
+                                        "MapAccess_::next_key_seed",
                                         &receiver,
                                         &[seed_adapter],
                                     );
                                 let fallback_call = self
                                     .emit_extension_call_with_receiver_autoderef_fallback(
-                                        &format!("::de::rusty_ext::next_key<{}>", seed_cpp),
+                                        &format!("MapAccess_::next_key<{}>", seed_cpp),
                                         &receiver,
                                         &[],
                                     );
@@ -25283,7 +25277,14 @@ impl CodeGen {
                     _ => {}
                 }
             }
-            let callee = format!("::de::rusty_ext::{}{}", method_name, template_args);
+            // The owning trait's lane, bare (a dependency's through the crate
+            // wrap's Rule-2 bridge).
+            let owner_ns = if method_name.starts_with("next_element") {
+                "SeqAccess_"
+            } else {
+                "MapAccess_"
+            };
+            let callee = format!("{}::{}{}", owner_ns, method_name, template_args);
             return Some(self.emit_extension_call_with_receiver_autoderef_fallback(
                 &callee,
                 &receiver,
@@ -25295,7 +25296,7 @@ impl CodeGen {
             let receiver = emit_receiver_arg(call.args.first()?);
             let visitor = self.emit_expr_maybe_move(call.args.iter().nth(1)?);
             return Some(format!(
-                "::de::rusty_ext::deserialize_any({}, {})",
+                "::rusty::serde_rt::de::deserialize_any({}, {})",
                 receiver, visitor
             ));
         }
@@ -25307,7 +25308,7 @@ impl CodeGen {
             let receiver = emit_receiver_arg(call.args.first()?);
             let visitor = self.emit_expr_maybe_move(call.args.iter().nth(1)?);
             return Some(format!(
-                "::de::rusty_ext::deserialize_any({}, {})",
+                "::rusty::serde_rt::de::deserialize_any({}, {})",
                 receiver, visitor
             ));
         }
@@ -25315,7 +25316,7 @@ impl CodeGen {
             let receiver = emit_receiver_arg(call.args.first()?);
             let place = self.emit_expr_maybe_move(call.args.iter().nth(1)?);
             return Some(format!(
-                "::de::rusty_ext::deserialize_in_place({}, {})",
+                "::rusty::serde_rt::de::deserialize_in_place({}, {})",
                 receiver, place
             ));
         }
@@ -25668,7 +25669,7 @@ impl CodeGen {
         // keeps its type-level helper (`rusty::detail::type_level_size<A>()`,
         // smallvec's `Array::size`, generic over every arity), and serde's
         // `T::deserialize(de)` / `T::deserialize_in_place(de, place)` keep the
-        // `::de::rusty_ext::deserialize(PhantomData<T>{}, &de)` route that
+        // `::rusty::serde_rt::de::deserialize(PhantomData<T>{}, &de)` route that
         // preserves the deserializer's `&mut` (measured by the unit suite).
         if matches!(method.as_str(), "deserialize" | "deserialize_in_place")
             || (method == "size"
