@@ -2955,8 +2955,9 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   `using` injection and the per-impl adapters by phase 2, the Fix A markers' last traces by phase 3 step
   3) and the trait manifest is version 2; the `rusty_ext` twin is retired on main for every
   lane-carried trait, local or dependency-declared (phase 3 / (aa) steps 1–3, the owner's decision
-  of 2026-10-08: no compatibility obligation); the namespace itself stays for the serde runtime
-  prelude and the foreign-trait fallback — see the §3.2.12 entries.
+  of 2026-10-08: no compatibility obligation); the namespace itself is gone since 2026-10-12 —
+  a foreign trait synthesizes a lane of its own, and the serde runtime is
+  `include/rusty/serde_runtime.hpp` under `rusty::serde_rt` — see the §3.2.12 entries.
 
 #### 3.2.13 Default methods
 
