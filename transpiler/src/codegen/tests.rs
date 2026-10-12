@@ -12954,7 +12954,7 @@ fn test_runtime_fallback_helpers_emitted_for_addr_of_temp_marker() {
 
 #[test]
 fn test_runtime_deserialize_any_probe_is_pointer_safe() {
-    let helpers = runtime_path_fallback_helpers_text();
+    let helpers = serde_runtime_header_text();
     assert!(helpers.contains(
         "rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer))\n\
         .deserialize_any(std::forward<Visitor>(visitor));"
@@ -12965,7 +12965,7 @@ fn test_runtime_deserialize_any_probe_is_pointer_safe() {
         )
     );
 
-    let local_helpers = runtime_path_fallback_helpers_text_for_local_token_module();
+    let local_helpers = serde_runtime_header_text();
     assert!(local_helpers.contains(
         "requires (!std::is_void_v<decltype(std::forward<Deserializer>(deserializer)"
     ));
@@ -12978,7 +12978,7 @@ fn test_runtime_deserialize_any_probe_is_pointer_safe() {
 
 #[test]
 fn test_runtime_serialize_bytes_normalizes_before_token_fallback() {
-    let helpers = runtime_path_fallback_helpers_text();
+    let helpers = serde_runtime_header_text();
     let normalized = "std::forward<Serializer>(serializer).serialize_bytes(\n\
         rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(\n\
             std::forward<BytesLike>(bytes))));";
@@ -12995,7 +12995,7 @@ fn test_runtime_serialize_bytes_normalizes_before_token_fallback() {
 
 #[test]
 fn test_runtime_serialize_value_dispatches_scalars_by_exact_category() {
-    let helpers = runtime_path_fallback_helpers_text();
+    let helpers = serde_runtime_header_text();
 
     assert!(
         helpers.contains("using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;")
@@ -13020,9 +13020,60 @@ fn test_runtime_serialize_value_dispatches_scalars_by_exact_category() {
     );
 }
 
+/// rusty_ext stage 2a: the serde runtime (the member-tier dispatchers and
+/// the serde_test Token emulation) is `include/rusty/serde_runtime.hpp`,
+/// no longer text inside `runtime_path_fallback_helpers_text()`; the tests
+/// that inspect its shape read the header. Both configurations (the Token
+/// owner's small `de` block and everyone else's) are in the one file.
+fn serde_runtime_header_text() -> SquashedText {
+    SquashedText::new(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../include/rusty/serde_runtime.hpp"
+        ))
+        .expect("include/rusty/serde_runtime.hpp"),
+    )
+}
+
+/// The header keeps the C++ indented; the string literal it came from did
+/// not (a `\<newline>` continuation strips the next line's leading blanks),
+/// and the needles below were written against that. Compare with every
+/// run of whitespace squashed to one space, on both sides.
+struct SquashedText(String);
+impl SquashedText {
+    fn new(raw: &str) -> Self {
+        Self(Self::squash(raw))
+    }
+    fn squash(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        let mut in_ws = false;
+        for ch in raw.chars() {
+            if ch.is_whitespace() {
+                if !in_ws {
+                    out.push(' ');
+                }
+                in_ws = true;
+            } else {
+                out.push(ch);
+                in_ws = false;
+            }
+        }
+        out
+    }
+    fn contains(&self, needle: &str) -> bool {
+        self.0.contains(&Self::squash(needle))
+    }
+    fn find(&self, needle: &str) -> Option<usize> {
+        self.0.find(&Self::squash(needle))
+    }
+    fn rfind(&self, needle: &str) -> Option<usize> {
+        self.0.rfind(&Self::squash(needle))
+    }
+}
+
 #[test]
 fn test_runtime_deserialize_prefers_deserializer_any_before_token_fallbacks() {
-    let helpers = runtime_path_fallback_helpers_text();
+    let helpers = serde_runtime_header_text();
     assert!(helpers.contains("struct scalar_visitor {"));
     assert!(helpers.contains("std::is_constructible_v<Value, V&&>"));
     assert!(helpers.contains("std::is_enum_v<RawValue> && std::is_integral_v<RawInput>"));

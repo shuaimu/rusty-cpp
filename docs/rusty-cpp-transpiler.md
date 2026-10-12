@@ -2888,6 +2888,21 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   A cross-source hint whose owner is unknown lowers to the member call (`result.tap_err(...)`)
   instead of a `rusty_ext::<m>` nobody emitted. What `rusty_ext` still holds after this stage is
   exactly the serde runtime prelude and its bridges — stage 2's subject. Measured: unit 2597 green (+ the baseline integration red); full matrix 28 rows: 20 PASS, 5 FAIL (the pre-existing alloc, bitflags, path, rusty, serde_bytes), 3 known-fail — the baseline; rows tap, serde_core, serde, smallvec, vec, btree pass; the foreign-trait probe shows the synthesized lane (impls_Foreign, an unexported `namespace Foreign_`, Foreign_::impl_::foreign_m for the Vec<T> impl, calls through Foreign_::foreign_m, no twin).
+- *2026-10-12 — `rusty_ext` removal, stage 2a: the serde runtime is a header, not a string
+  literal.* The member-tier serde dispatchers (`de::rusty_ext::deserialize_any` and family — they
+  probe a member, then a deref'd member, then the serializer/deserializer side, which is the right
+  lowering because a consumer's serde impls ARE members), the serde_test Token emulation they fall
+  back to, and the Token forward declarations lived inside the transpiler as a string literal
+  pasted into every crate's global module fragment: 2,100 lines of C++ in Rust string syntax, in
+  two diverged copies (the module that owns `::token` took a 133-line `de` block; everyone else
+  the 1,330-line one, rewritten per module to a placeholder namespace), with a splice keeping the
+  `ser` block single-shaped after two shapes once ODR-collided across modules. They are now one
+  header, `include/rusty/serde_runtime.hpp`, included where the text was: every one of the 172
+  `::token::` references is `RUSTY_SERDE_TOKEN_NS` (a non-owner module defines it to the placeholder
+  before the include), the owner defines `RUSTY_SERDE_TOKEN_OWNER` to take its small `de` block,
+  and the header is self-contained (it forward-declares the two runtime functions it calls and
+  parses standalone in all three configurations). The namespaces keep their names in this step.
+  Measured: unit 2597 green (+ the baseline integration red); rows serde_core, serde, serde_repr, tap, smallvec pass; full matrix 28 rows: 20 PASS, 5 FAIL (the pre-existing alloc, bitflags, path, rusty, serde_bytes), 3 known-fail — the baseline. Four unit tests that inspected the runtime text now read the header, comparing with whitespace squashed (the header keeps the C++ indented; the literal never was).
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines
