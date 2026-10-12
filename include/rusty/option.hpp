@@ -303,14 +303,29 @@ public:
     const Option* operator->() const { return this; }
     
     // Unwrap the value (panics if None) - Rust style
+    //
+    // A trivially copyable payload models a Rust `Copy` Option, as in the
+    // move constructor above: Rust's `self.rid.unwrap()` on an `Option<u64>`
+    // place copies it and leaves the place `Some`, so unwrapping must not
+    // empty it. Emptying it made the second `IoKernel::poll_step` of every
+    // lion-net stream panic ("Called unwrap on None" on its own `rid`), and
+    // `TimerWheel::invalidate_min` dropped a still-valid `cached_min`. For a
+    // trivially copyable payload that is not `Copy` in Rust, the place is
+    // moved-from there and cannot be read again, so leaving it is unobservable.
+    // expect, unwrap_or and unwrap_or_else route through here.
     // @lifetime: owned
     T unwrap() {
         if (!has_value) {
             rusty::panic::do_panic("Called unwrap on None");
         }
+        // Moved, not copied: a trivially copyable type may still delete its
+        // copy constructor (a Rust move-only type lowered with a defaulted
+        // move), and its trivial move is the same bitwise copy.
         T result = std::move(value);
-        value.~T();
-        has_value = false;
+        if constexpr (!std::is_trivially_copyable_v<T>) {
+            value.~T();
+            has_value = false;
+        }
         return result;
     }
 

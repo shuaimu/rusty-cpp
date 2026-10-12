@@ -189,6 +189,53 @@ void test_option_move() {
     printf("PASS\n");
 }
 
+// A trivially copyable payload models a Rust `Copy` Option: unwrap on a
+// place copies and leaves the place Some, so it can be unwrapped again
+// (lion-net's IoKernel::poll_step unwraps `self.rid` on every poll). A
+// payload with a non-trivial copy or destructor still moves out and empties
+// the place, as Rust's move would.
+struct CopyPair {
+    unsigned long a;
+    int b;
+};
+
+struct MoveOnlyTrivial {
+    int v;
+    explicit MoveOnlyTrivial(int x) : v(x) {}
+    MoveOnlyTrivial(const MoveOnlyTrivial&) = delete;
+    MoveOnlyTrivial& operator=(const MoveOnlyTrivial&) = delete;
+    MoveOnlyTrivial(MoveOnlyTrivial&&) = default;
+    MoveOnlyTrivial& operator=(MoveOnlyTrivial&&) = default;
+};
+static_assert(std::is_trivially_copyable_v<MoveOnlyTrivial>);
+
+void test_option_copy_unwrap_keeps_value() {
+    printf("test_option_copy_unwrap_keeps_value: ");
+    {
+        Option<unsigned long> rid = Some(7ul);
+        assert(rid.unwrap() == 7ul);
+        assert(rid.is_some());
+        assert(rid.unwrap() == 7ul);
+        assert(rid.expect("still set") == 7ul);
+        assert(rid.unwrap_or(0ul) == 7ul);
+        assert(rid.is_some());
+
+        Option<CopyPair> pair = Some(CopyPair{3ul, 4});
+        assert(pair.unwrap().a == 3ul);
+        assert(pair.is_some() && pair.unwrap().b == 4);
+
+        Option<std::string> owned = Some(std::string("moved"));
+        assert(owned.unwrap() == "moved");
+        assert(owned.is_none());
+
+        // Trivially copyable but move-only (a Rust non-Copy type lowered with
+        // a deleted copy): unwrap still compiles, through the trivial move.
+        Option<MoveOnlyTrivial> move_only(MoveOnlyTrivial{5});
+        assert(move_only.unwrap().v == 5);
+    }
+    printf("PASS\n");
+}
+
 // Test with custom struct
 struct TestStruct {
     int value;
@@ -303,6 +350,7 @@ int main() {
     test_option_equality();
     test_option_std_optional_cross_type_equality();
     test_option_move();
+    test_option_copy_unwrap_keeps_value();
     test_option_custom_type();
     test_option_nested();
     test_option_bool();
