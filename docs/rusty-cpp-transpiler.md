@@ -2872,6 +2872,22 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   remains is a RENAME (`rusty_ext` → a name that says "serde runtime"), cosmetic, and it touches
   the ~40 vendored `transpiled/*.cppm` ports, their `docs/*/post_transpile_patch.py` patchers and
   CMakeLists.txt — the owner's call. Measured: unit 2595 green (+ the baseline integration red); full matrix 28 rows: 20 PASS, 5 FAIL (the pre-existing alloc, bitflags, path, rusty, serde_bytes), 3 known-fail — the baseline; rows tap, serde_core, serde, smallvec pass.
+- *2026-10-12 — `rusty_ext` removal, stage 1: the twin machinery goes; a foreign trait gets a lane
+  of its own.* After the (aa) steps the twin remained only as the fallback for a trait neither the
+  crate nor a consumed manifest declares, implemented for a non-local self type (`impl<T> Foreign
+  for Vec<T>` — measured: a local-self impl of such a trait is the member tier and never was a
+  twin). That case now synthesizes a lane (`synthesize_foreign_trait_lanes`): the marker, concept,
+  dispatcher namespace and `Tr_::impl_` functions of a crate-declared trait, keyed by the impl's
+  resolved trait path, under INTERNAL linkage so two crates may each synthesize `ToOwned_` without
+  a consumer seeing an ambiguity — the §3.2.17 (z) interop protocol in emitter form. With no twin
+  left to emit, declare, bridge or resolve, the machinery is deleted (net −530 lines): the twin
+  emitter and its itoa `write_` helper, the forward-declaration pass, the cross-crate `rusty_ext`
+  bridge, the resolver's known-path collector, the symbol registration, the receiver ladder's twin
+  arm, and the manifest's `rusty_ext_methods_by_module` — the trait manifest is now **version 3**
+  (a cached version-2 manifest stops the build with the error naming the dependency to rebuild).
+  A cross-source hint whose owner is unknown lowers to the member call (`result.tap_err(...)`)
+  instead of a `rusty_ext::<m>` nobody emitted. What `rusty_ext` still holds after this stage is
+  exactly the serde runtime prelude and its bridges — stage 2's subject. Measured: unit 2597 green (+ the baseline integration red); full matrix 28 rows: 20 PASS, 5 FAIL (the pre-existing alloc, bitflags, path, rusty, serde_bytes), 3 known-fail — the baseline; rows tap, serde_core, serde, smallvec, vec, btree pass; the foreign-trait probe shows the synthesized lane (impls_Foreign, an unexported `namespace Foreign_`, Foreign_::impl_::foreign_m for the Vec<T> impl, calls through Foreign_::foreign_m, no twin).
 - *Cross-crate shadow, found by the step-4 gate and NOT fixed here (serde_bytes):* a consumer
   re-emits a dependency trait's dispatcher namespace and bridges its impls into it with a *nested*
   definition (`namespace serde_core::Serialize_ {` inside `namespace serde_bytes` defines

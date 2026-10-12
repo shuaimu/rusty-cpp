@@ -8689,9 +8689,6 @@ impl CodeGen {
                     self.newline();
                 }
                 let scope_path = self.module_stack.clone();
-                if self.emit_extension_trait_forward_decls_for_scope(&scope_path) {
-                    self.newline();
-                }
                 let ordered_items = Self::prioritize_use_items_for_emission(
                     self.order_items_for_emission(items, true, false),
                 );
@@ -8785,9 +8782,6 @@ impl CodeGen {
                     self.emit_item_forward_decls(items, self.module_stack.len());
                 self.module_body_forward_decl_pass = prev_module_body_forward_decl_pass;
                 if emitted_forward_decls {
-                    self.newline();
-                }
-                if self.emit_extension_trait_forward_decls_for_scope(&scope_path) {
                     self.newline();
                 }
                 let ordered_items = Self::prioritize_use_items_for_emission(

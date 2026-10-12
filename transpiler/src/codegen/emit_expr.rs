@@ -14022,7 +14022,7 @@ impl CodeGen {
                         })
                     })
                     .map(|(key, _)| key.rsplit("::").next().unwrap_or(key).to_string())
-                    .filter(|leaf| self.rusty_ext_twin_retired_for(leaf))
+                    .filter(|leaf| self.trait_is_lane_carried(leaf))
                     .collect();
                 owners.sort();
                 owners.dedup();
@@ -14152,25 +14152,13 @@ impl CodeGen {
                 "get" | "newline" | "whitespace" | "write" | "write_"
                     | "into_iter" | "iter" | "iter_mut"
             );
-            if is_cross_source_extension_hint && !skip_unqualified_cross_source_fallback {
-                // Cross-target parity transpilation can call extension shims from
-                // imported modules where local symbol metadata is unavailable.
-                // Use an unqualified `rusty_ext::...` call and preserve Rust
-                // method-call autoderef on pointer-like iter items.
-                let unresolved_cross_source_fn =
-                    format!("rusty_ext::{}", escape_cpp_keyword(&method_name));
-                let unresolved_cross_source_fn =
-                    if let Some(default_args) = default_de_template_args {
-                        format!("{}{}", unresolved_cross_source_fn, default_args)
-                    } else {
-                        unresolved_cross_source_fn
-                    };
-                return Some(self.emit_extension_call_with_receiver_autoderef_fallback(
-                    &unresolved_cross_source_fn,
-                    &all_args[0],
-                    &all_args[1..],
-                ));
-            }
+            // A cross-source hint names a method, not its trait: with no owner
+            // known (the lane routes above found none) there is nothing to
+            // spell but the member call — the retired `rusty_ext::<m>` twin
+            // convention named a function nobody emitted. (The
+            // `skip_unqualified_cross_source_fallback` list above is kept for
+            // its documentation value; every name now takes this path.)
+            let _ = (is_cross_source_extension_hint, skip_unqualified_cross_source_fallback);
             // No visible extension free function in scope: keep method syntax so
             // common inherent methods do not get rewritten to non-existent
             // extension shims.

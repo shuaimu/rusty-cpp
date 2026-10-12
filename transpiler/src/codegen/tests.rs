@@ -49840,3 +49840,40 @@ fn test_aa_consumer_reference_self_impl_of_dependency_trait_keeps_its_member_car
     assert!(out.contains("Mine Mine::tap() const"), "member carrier: {out}");
     assert!(!out.contains("rusty_ext::tap"), "no twin spelling: {out}");
 }
+
+#[test]
+fn test_rusty_ext_stage1_foreign_trait_impl_gets_an_internal_lane() {
+    // rusty_ext stage 1: a trait neither the crate nor a consumed manifest
+    // declares (`Foreign`), implemented for a non-local self type
+    // (`impl<T> Foreign for Vec<T>`), used to be the twin's last user. It now
+    // synthesizes a lane of its own: the marker, concept and dispatcher
+    // namespace (NOT exported — two crates may each synthesize `Foreign_`),
+    // `Foreign_::impl_` functions, and calls through `Foreign_::foreign_m`.
+    // The local-self impls take the member tier as before (and the lane,
+    // like any declared trait's impls).
+    let out = transpile_str_module(
+        r#"
+        pub struct Mine { pub v: i32 }
+        impl Foreign for Mine { fn foreign_m(&self) -> i32 { self.v } }
+        impl Foreign for &Mine { fn foreign_m(&self) -> i32 { self.v } }
+        impl<T> Foreign for Vec<T> { fn foreign_m(&self) -> i32 { 0 } }
+        pub fn f(m: &Mine, v: Vec<i32>) -> i32 { m.foreign_m() + v.foreign_m() + 10.foreign_m() }
+        "#,
+        "consumer",
+    );
+    assert!(out.contains("template<class U> struct impls_Foreign : std::false_type {};"), "{out}");
+    assert!(
+        out.contains("\nnamespace Foreign_ {") && !out.contains("export namespace Foreign_ {"),
+        "the synthesized lane is internal: {out}"
+    );
+    assert!(
+        out.contains("foreign_m(Foreign_::impl_::tag, const rusty::Vec<T>& self_"),
+        "the non-local-self impl is a lane function: {out}"
+    );
+    assert!(out.contains("Foreign_::foreign_m("), "calls reach the dispatcher: {out}");
+    assert!(out.contains("int32_t Mine::foreign_m() const"), "member tier kept: {out}");
+    assert!(
+        !out.contains("rusty_ext::foreign_m") && !out.contains("Extension trait Foreign lowered"),
+        "no twin: {out}"
+    );
+}

@@ -2412,16 +2412,6 @@ pub struct CodeGen {
     /// also route through `rusty_ext::...` unless a method is a known runtime
     /// helper (`size_hint`, `left`, `right`, `write_hex`).
     pub(crate) local_extension_method_names: HashSet<String>,
-    /// C++ MODULE path (`de`, `ser`, `de::value`, `""` for root) → the method names this crate
-    /// ACTUALLY emits as `<module>::rusty_ext::` free functions there (recorded at the point of
-    /// emission in `emit_extension_trait_free_functions`). Surfaced in the UFCS manifest as
-    /// `rusty_ext_methods_by_module` so a consumer's cross-crate rusty_ext bridge imports a method
-    /// ONLY from the exact module the dep emits it in — NOT every declared trait method, and not
-    /// at a guessed module. (A REQUIRED method may stay a member with no rusty_ext free function,
-    /// or live in a different module than the consumer references it through — bridging either
-    /// would name a non-existent `::<dep>::<module>::rusty_ext::<method>`.)
-    pub(crate) emitted_rusty_ext_methods_by_module:
-        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     /// Module scopes (`""` for root, otherwise `a::b`) where extension
     /// free-function forward declarations were already emitted.
     pub(crate) emitted_extension_forward_decl_scopes: HashSet<String>,
@@ -3806,7 +3796,6 @@ impl CodeGen {
             extension_trait_impl_methods: HashMap::new(),
             extension_method_names: HashSet::new(),
             local_extension_method_names: HashSet::new(),
-            emitted_rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             emitted_extension_forward_decl_scopes: HashSet::new(),
             emitted_extension_impl_scopes: HashSet::new(),
             forward_declared_function_paths: HashSet::new(),
@@ -4113,147 +4102,6 @@ impl CodeGen {
             external_extension_method_hints: extension_method_hints,
             ..Self::new()
         }
-    }
-
-    /// Phase 1 of the crate-namespacing migration. Find the
-    /// `export module X;` line, scan past the immediately-following
-    /// `import …;` lines to land just after the last import, and
-    /// insert `namespace <crate_name> {`. Append the closing `}` at
-    /// the very end of `self.output`.
-    ///
-    /// Defensive: if the output has no `export module …;` line, this
-    /// is a non-module build and we leave it alone (the user's
-    /// build is via `#include` rather than `import`, and the global
-    /// namespace shape is what they want).
-    /// Cross-crate UFCS extension-method bridge. A wrapped DEPENDENCY's trait methods
-    /// (e.g. serde_core's `MapAccess::next_key_seed`) are emitted as
-    /// `::<dep>::<module>::rusty_ext::<method>` free functions in the DEP's purview. A consumer
-    /// that CALLS such a method lowers it to the local-assuming `<module>::rusty_ext::<method>`,
-    /// which does not exist locally — and since `<module>::rusty_ext` is a CONCRETE (non-dependent)
-    /// namespace, the missing member is a HARD error, not a SFINAE soft-fail. Emit a
-    /// using-declaration pulling the dependency's definition into the consumer's
-    /// `<module>::rusty_ext` so the reference resolves.
-    ///
-    /// Runs for EVERY crate, BEFORE the crate-namespace wrap: a wrapped consumer's wrap then
-    /// engulfs this block (→ `<crate>::<module>::rusty_ext`); an unwrapped consumer keeps it at
-    /// global scope, where its own `<module>::rusty_ext` lives. Methods are sourced from the UFCS
-    /// manifest — `method_owners` ∪ `declared_trait_methods`, because REQUIRED methods (like
-    /// `next_key_seed`) are emitted as dispatchers that never land in `method_owners` and appear
-    /// only in `declared_trait_methods`. The `referenced` guard limits the bridge to methods the
-    /// consumer actually calls (all of which a dep that DECLARES the owning trait emits at
-    /// de/ser::rusty_ext); the hardcoded de/ser runtime-prelude names are already global, so they
-    /// are skipped. Mirrors the serde_bytes `Tr_` trait bridge one level down (method free fns).
-    fn emit_cross_crate_rusty_ext_bridge(&mut self) {
-        if self.dependency_ufcs_trait_manifests.is_empty() {
-            return;
-        }
-        const PRELUDE_DE: [&str; 3] = ["deserialize", "deserialize_any", "deserialize_in_place"];
-        const PRELUDE_SER: [&str; 3] = ["serialize", "serialize_value", "forward_serializer"];
-        // C++ module path → the using-declarations to splice into its `rusty_ext` namespace.
-        let usings_by_module: std::collections::BTreeMap<String, String> = {
-            // `<module>::rusty_ext::<member>` referenced as a WHOLE word in the emitted output.
-            let referenced = |module: &str, member: &str| -> bool {
-                let needle = format!("{}::rusty_ext::{}", module, member);
-                let bytes = self.output.as_bytes();
-                let mut from = 0;
-                while let Some(rel) = self.output[from..].find(&needle) {
-                    let end = from + rel + needle.len();
-                    if end >= self.output.len()
-                        || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-                    {
-                        return true;
-                    }
-                    from = from + rel + needle.len();
-                }
-                false
-            };
-            let mut by_module: std::collections::BTreeMap<String, String> =
-                std::collections::BTreeMap::new();
-            for dep in &self.dependency_ufcs_trait_manifests {
-                if !crate::transpile::crate_is_namespace_wrapped(&dep.module) {
-                    continue;
-                }
-                for (module, methods) in &dep.rusty_ext_methods_by_module {
-                    for meth in methods.iter().map(String::as_str) {
-                        if PRELUDE_DE.contains(&meth) || PRELUDE_SER.contains(&meth) {
-                            continue; // global runtime prelude, already in scope
-                        }
-                        // Bridge a method ONLY where the consumer actually references it AT THIS
-                        // dep module. A method the consumer DEFINES resolves locally (the dep's
-                        // overload merges into the set harmlessly), and a method the dep emits in
-                        // a DIFFERENT module than the consumer references it through is naturally
-                        // skipped — `referenced(module, …)` only matches the dep's true module, so
-                        // we never name a non-existent `::<dep>::<module>::rusty_ext::<method>`.
-                        if !referenced(module, meth) {
-                            continue;
-                        }
-                        // ROOT-level dep rusty_ext (`module == ""`, e.g. the `equivalent` crate's
-                        // `Equivalent::equivalent`, which hashbrown CALLS but does not implement)
-                        // bridges into the consumer's OWN root rusty_ext with no module segment:
-                        // `using ::equivalent::rusty_ext::equivalent;`.
-                        let dep_path = if module.is_empty() {
-                            format!("::{}::rusty_ext::{}", dep.module, meth)
-                        } else {
-                            format!("::{}::{}::rusty_ext::{}", dep.module, module, meth)
-                        };
-                        by_module
-                            .entry(module.clone())
-                            .or_default()
-                            .push_str(&format!("using {};\n", dep_path));
-                    }
-                }
-            }
-            by_module
-        };
-        if usings_by_module.is_empty() {
-            return;
-        }
-        // Wrap each module's using-declarations in its (possibly nested) namespace path +
-        // `rusty_ext`, e.g. `de::value` → `namespace de { namespace value { namespace rusty_ext {…}}}`.
-        let mut bridge = String::new();
-        for (module, usings) in &usings_by_module {
-            if module.is_empty() {
-                // ROOT-level: no module namespace to wrap in, just the consumer's root rusty_ext.
-                bridge.push_str(&format!("namespace rusty_ext {{\n{}}}\n", usings));
-                continue;
-            }
-            let opens: String = module
-                .split("::")
-                .map(|seg| format!("namespace {} {{ ", seg))
-                .collect();
-            let closes: String = module.split("::").map(|_| " }").collect();
-            bridge.push_str(&format!(
-                "{}namespace rusty_ext {{\n{}}}{}\n",
-                opens, usings, closes
-            ));
-        }
-        // Insert at the module purview start (after `export module …;` and the import block),
-        // mirroring wrap_module_purview_in_crate_namespace's insertion point so a later wrap
-        // engulfs it.
-        let Some(export_idx) = self.output.find("\nexport module ") else {
-            return;
-        };
-        let after_export = export_idx + 1;
-        let Some(line_end_rel) = self.output[after_export..].find('\n') else {
-            return;
-        };
-        let mut insert_pos = after_export + line_end_rel + 1;
-        loop {
-            let remaining = &self.output[insert_pos..];
-            let Some(line_end) = remaining.find('\n') else {
-                break;
-            };
-            let trimmed = remaining[..line_end].trim_start();
-            if trimmed.is_empty()
-                || trimmed.starts_with("import ")
-                || trimmed.starts_with("export import ")
-            {
-                insert_pos += line_end + 1;
-                continue;
-            }
-            break;
-        }
-        self.output.insert_str(insert_pos, &bridge);
     }
 
     /// Module imports are only legal in the preamble; clang rejects a later one
@@ -5008,7 +4856,6 @@ impl CodeGen {
         // this crate CALLS but does not define). Runs BEFORE the wrap so a wrapped consumer's
         // wrap engulfs the bridge block (→ `<crate>::<module>::rusty_ext`) while an unwrapped
         // consumer keeps it at global scope (where its own `<module>::rusty_ext` lives).
-        self.emit_cross_crate_rusty_ext_bridge();
 
         // Splice the Ref-receiver assoc-projection dispatchers into each
         // trait's bridge tail. Before the crate wrap and before any textual
@@ -5658,11 +5505,6 @@ impl CodeGen {
             })
             .collect();
         declared_modules.sort();
-        let rusty_ext_methods_by_module: std::collections::BTreeMap<String, Vec<String>> = self
-            .emitted_rusty_ext_methods_by_module
-            .iter()
-            .map(|(module, methods)| (module.clone(), methods.iter().cloned().collect()))
-            .collect();
         // Unambiguous C-like enum variants (Rust glob re-exports make bare
         // variants crate-visible; a consumer must qualify them to the C++
         // enum-scoped path).
@@ -5829,7 +5671,6 @@ impl CodeGen {
             },
             declared_macros,
             declared_modules,
-            rusty_ext_methods_by_module,
             c_like_enum_variants,
             cross_crate_reexports,
             type_aliases,
@@ -8747,6 +8588,8 @@ impl CodeGen {
         // Pass 1e: collect extension-style trait impl methods.
         self.collect_extension_trait_impl_methods(&file.items, &[]);
         log_emit("collect_extension_trait_impl_methods");
+        self.synthesize_foreign_trait_lanes(&file.items);
+        log_emit("synthesize_foreign_trait_lanes");
         self.extension_method_names
             .extend(self.external_extension_method_hints.iter().cloned());
         log_emit("collect_external_extension_hints");
@@ -23219,124 +23062,6 @@ impl CodeGen {
         }
     }
 
-    fn emit_extension_trait_free_functions(
-        &mut self,
-        trait_name: &str,
-        methods: &[ExtensionImplMethod],
-    ) {
-        // Contract 10 (NARROWED, C21c): the `rusty_ext` extension layer has
-        // no owning non-`pub` trait — it is ordinary ported surface (25 such
-        // symbols are in rrr.serializable's incumbent object, MEASURED).
-        self.ufcs_emitting_internal_linkage_trait = false;
-        self.writeln(&format!(
-            "// Extension trait {} lowered to rusty_ext:: free functions",
-            trait_name
-        ));
-        self.writeln("namespace rusty_ext {");
-        self.indent += 1;
-
-        // The C++ module path this `rusty_ext` block lives in (`""` for root, else `de`, `ser`,
-        // `de::value`, …), C++-escaped per segment to match `declared_modules`. Methods emitted
-        // below are recorded under it for the cross-crate bridge.
-        let rusty_ext_cpp_module = self
-            .module_stack
-            .iter()
-            .map(|s| escape_cpp_keyword(s))
-            .collect::<Vec<_>>()
-            .join("::");
-
-        let mut seen = HashSet::new();
-        let mut seen_cpp_signatures = HashSet::new();
-        for method in methods {
-            // Suppress methods an imported dependency already provides: the shared
-            // `rusty_ext` namespace would otherwise declare the same C++ entity in
-            // two modules (hashbrown's own `Equivalent::equivalent` vs the
-            // `equivalent` crate's). Call sites bind the imported definition.
-            if self.extension_trait_method_provided_by_dependency(
-                trait_name,
-                &method.method.sig.ident.to_string(),
-            ) {
-                continue;
-            }
-            let key = format!(
-                "{}|{}|{}",
-                method.method.sig.ident,
-                method.self_ty.to_token_stream(),
-                method.method.sig.to_token_stream()
-            );
-            if !seen.insert(key) {
-                continue;
-            }
-            if let Some(signature_key) = self.extension_free_function_dedupe_key(method)
-                && !seen_cpp_signatures.insert(signature_key)
-            {
-                continue;
-            }
-            self.emitted_rusty_ext_methods_by_module
-                .entry(rusty_ext_cpp_module.clone())
-                .or_default()
-                .insert(escape_cpp_keyword(&method.method.sig.ident.to_string()));
-            self.emit_extension_trait_free_function(method);
-            self.newline();
-        }
-        let has_integer_write_fallback = trait_name == "Sealed"
-            && methods
-                .iter()
-                .any(|method| escape_cpp_keyword(&method.method.sig.ident.to_string()) == "write_");
-        if has_integer_write_fallback {
-            self.writeln("export template<typename I, size_t N>");
-            self.writeln(
-                "std::string_view write_(I self_, std::array<rusty::MaybeUninit<uint8_t>, N>& buf)",
-            );
-            self.writeln("requires (std::is_integral_v<I> || std::is_same_v<std::remove_cv_t<I>, __int128> || std::is_same_v<std::remove_cv_t<I>, unsigned __int128>) {");
-            self.indent += 1;
-            self.writeln("unsigned __int128 value;");
-            self.writeln("bool negative = false;");
-            self.writeln("if constexpr (std::is_signed_v<I> || std::is_same_v<std::remove_cv_t<I>, __int128>) {");
-            self.indent += 1;
-            self.writeln("if (self_ < 0) {");
-            self.indent += 1;
-            self.writeln("negative = true;");
-            self.writeln("value = static_cast<unsigned __int128>(0) - static_cast<unsigned __int128>(self_);");
-            self.indent -= 1;
-            self.writeln("} else {");
-            self.indent += 1;
-            self.writeln("value = static_cast<unsigned __int128>(self_);");
-            self.indent -= 1;
-            self.writeln("}");
-            self.indent -= 1;
-            self.writeln("} else {");
-            self.indent += 1;
-            self.writeln("value = static_cast<unsigned __int128>(self_);");
-            self.indent -= 1;
-            self.writeln("}");
-            self.writeln("std::array<uint8_t, 64> digits{};");
-            self.writeln("size_t pos = digits.size();");
-            self.writeln("do {");
-            self.indent += 1;
-            self.writeln("digits[--pos] = static_cast<uint8_t>(48 + (value % 10));");
-            self.writeln("value /= 10;");
-            self.indent -= 1;
-            self.writeln("} while (value != 0);");
-            self.writeln("if (negative) { digits[--pos] = static_cast<uint8_t>('-'); }");
-            self.writeln("const size_t len = digits.size() - pos;");
-            self.writeln("const size_t offset = N - len;");
-            self.writeln("for (size_t i = 0; i < len; ++i) {");
-            self.indent += 1;
-            self.writeln("buf[offset + i].write(digits[pos + i]);");
-            self.indent -= 1;
-            self.writeln("}");
-            self.writeln("return ::slice_buffer_to_str(buf, offset);");
-            self.indent -= 1;
-            self.writeln("}");
-            self.newline();
-        }
-
-        self.indent -= 1;
-        self.writeln("}");
-    }
-
-
     fn emit_extension_trait_free_functions_for_scope(&mut self, module_path: &[String]) -> bool {
         let scope_key = Self::module_scope_key(module_path);
         // A split module reopens: skip the dump in the FIRST block (its
@@ -23389,12 +23114,6 @@ impl CodeGen {
                 .next()
                 .map(str::to_string)
                 .unwrap_or(trait_key.clone());
-            // (aa): the twin of a lane-covered trait is not emitted — its
-            // functions live in `Tr_::impl_` and call sites reach `Tr_::m`.
-            if !self.rusty_ext_twin_retired_for(&trait_name) {
-                self.emit_extension_trait_free_functions(&trait_name, &methods);
-                self.newline();
-            }
             // --interface-traits (§ 3.2.9): for each `impl Trait for U`,
             // also emit `TraitAdapter<U>` specialization that delegates to
             // the rusty_ext:: free function bodies emitted above.
@@ -24024,90 +23743,6 @@ impl CodeGen {
             .all(|(lhs, rhs)| *lhs == rhs)
     }
 
-    fn emit_extension_trait_forward_decls_for_scope(&mut self, module_path: &[String]) -> bool {
-        let scope_key = Self::module_scope_key(module_path);
-        if !self
-            .emitted_extension_forward_decl_scopes
-            .insert(scope_key.clone())
-        {
-            return false;
-        }
-
-        let mut trait_keys: Vec<String> = self
-            .extension_trait_impl_methods
-            .keys()
-            .filter(|key| Self::trait_key_matches_module_scope(key, module_path))
-            .cloned()
-            .collect();
-        trait_keys.sort();
-        trait_keys.dedup();
-        if trait_keys.is_empty() {
-            return false;
-        }
-
-        let mut methods_to_emit: Vec<(String, ExtensionImplMethod)> = Vec::new();
-        for key in trait_keys {
-            let trait_name = key
-                .rsplit("::")
-                .next()
-                .map(str::to_string)
-                .unwrap_or_else(|| key.clone());
-            // (aa): no twin, no forward declarations of it.
-            if self.rusty_ext_twin_retired_for(&trait_name) {
-                continue;
-            }
-            if let Some(methods) = self.extension_trait_impl_methods.get(&key) {
-                for method in methods {
-                    methods_to_emit.push((trait_name.clone(), method.clone()));
-                }
-            }
-        }
-        if methods_to_emit.is_empty() {
-            return false;
-        }
-
-        let prev_module_stack = self.module_stack.clone();
-        self.module_stack = module_path.to_vec();
-        self.writeln("// Extension trait free-function forward declarations");
-        self.writeln("namespace rusty_ext {");
-        self.indent += 1;
-        let mut seen = HashSet::new();
-        let mut seen_cpp_signatures = HashSet::new();
-        let mut emitted_any = false;
-        for (trait_name, method) in &methods_to_emit {
-            // Suppress methods an imported dependency already provides (cross-crate
-            // rusty_ext ODR clash — see extension_trait_method_provided_by_dependency).
-            if self.extension_trait_method_provided_by_dependency(
-                trait_name,
-                &method.method.sig.ident.to_string(),
-            ) {
-                continue;
-            }
-            let key = format!(
-                "{}|{}|{}",
-                method.method.sig.ident,
-                method.self_ty.to_token_stream(),
-                method.method.sig.to_token_stream()
-            );
-            if !seen.insert(key) {
-                continue;
-            }
-            if let Some(signature_key) = self.extension_free_function_dedupe_key(method)
-                && !seen_cpp_signatures.insert(signature_key)
-            {
-                continue;
-            }
-            if self.emit_extension_trait_free_function_declaration(method) {
-                self.newline();
-                emitted_any = true;
-            }
-        }
-        self.indent -= 1;
-        self.writeln("}");
-        self.module_stack = prev_module_stack;
-        emitted_any
-    }
-
     fn emit_extension_trait_forward_decls_for_all_scopes(&mut self) -> bool {
         let mut unresolved: Vec<String> = self
             .extension_trait_impl_methods
@@ -24117,57 +23752,13 @@ impl CodeGen {
             .collect();
         unresolved.sort();
         for key in &unresolved {
-            // Loud, not silent: the impl's rusty_ext methods are not emitted.
+            // Loud, not silent: the impl's lane functions are not emitted.
             self.writeln(&format!(
-                "// UNRESOLVED TRAIT PATH: `{}` — its rusty_ext bridge is skipped (see inference.rs @unresolved-trait)",
+                "// UNRESOLVED TRAIT PATH: `{}` — its lane is skipped (see inference.rs @unresolved-trait)",
                 key.trim_start_matches("@unresolved-trait::")
             ));
         }
-        let mut scope_paths: Vec<Vec<String>> = self
-            .extension_trait_impl_methods
-            .keys()
-            // A trait path the resolver could not place gets the placeholder
-            // key `@unresolved-trait::X` (inference.rs); it is not a module and
-            // must not open `namespace @unresolved-trait {` (arrayvec baseline
-            // 2026-10-07: the first error in the file was that line).
-            .filter(|trait_key| !trait_key.starts_with('@'))
-            .map(|trait_key| {
-                let mut parts: Vec<String> = trait_key.split("::").map(str::to_string).collect();
-                let _ = parts.pop();
-                parts
-            })
-            .collect();
-        scope_paths.sort();
-        scope_paths.dedup();
-        if scope_paths.is_empty() {
-            return false;
-        }
-
-        let mut emitted_any = false;
-        for scope in scope_paths {
-            if scope.is_empty() {
-                if self.emit_extension_trait_forward_decls_for_scope(&scope) {
-                    emitted_any = true;
-                    self.newline();
-                }
-                continue;
-            }
-            let emitted_scope = self.renamed_module_scope_segments(&scope);
-            for segment in &emitted_scope {
-                self.writeln(&format!("namespace {} {{", segment));
-                self.indent += 1;
-            }
-            if self.emit_extension_trait_forward_decls_for_scope(&scope) {
-                emitted_any = true;
-                self.newline();
-            }
-            for _ in (0..emitted_scope.len()).rev() {
-                self.indent -= 1;
-                self.writeln("}");
-            }
-            self.newline();
-        }
-        emitted_any
+        !unresolved.is_empty()
     }
 
     fn extension_receiver_param_cpp_type(
@@ -24679,7 +24270,6 @@ impl CodeGen {
         };
         // serde_core Fix B: qualify nested-module types in the return position.
         return_type = self.qualify_nested_local_types_in_type_string(&return_type);
-        self.record_extension_free_function_symbol(&method_name);
         // Fix A part 2: inject the multi-owner default's `requires` constraint
         // after the template parameter list; book §3.2.2 rule 3: a blanket's
         // bound-derived constraints.
@@ -24928,13 +24518,118 @@ impl CodeGen {
     /// of its methods reaches `Tr_::m`? (The `rusty_ext` twin stays emitted
     /// until phase 3: serde's hardcoded `rusty_ext` routes still name it —
     /// measured, serde_core `into_deserializer`.)
+    /// Book §3.2.16 phase 3 / (aa): a trait neither this crate nor a consumed
+    /// manifest declares, implemented here for a non-local self type (the
+    /// shape the extension collector keeps: `impl<T> Foreign for Vec<T>`),
+    /// gets a lane of its own — the marker, concept, dispatcher namespace and
+    /// `Tr_::impl_` functions of a crate-declared trait — in place of the
+    /// retired `rusty_ext` twin. The lane takes INTERNAL linkage: two crates
+    /// may each synthesize `ToOwned_`, and a consumer importing both must see
+    /// no ambiguity. This is the §3.2.17 interop protocol in emitter form.
+    fn synthesize_foreign_trait_lanes(&mut self, items: &[syn::Item]) {
+        // Only traits the extension collector kept an impl for.
+        let extension_leaves: HashSet<String> = self
+            .extension_trait_impl_methods
+            .keys()
+            .map(|k| k.rsplit("::").next().unwrap_or(k).to_string())
+            .collect();
+        if extension_leaves.is_empty() {
+            return;
+        }
+        struct Found {
+            key: String,
+            leaf: String,
+            methods: Vec<String>,
+            concrete: bool,
+        }
+        fn walk(
+            cg: &CodeGen,
+            items: &[syn::Item],
+            module_path: &mut Vec<String>,
+            leaves: &HashSet<String>,
+            out: &mut Vec<Found>,
+        ) {
+            for item in items {
+                match item {
+                    syn::Item::Mod(m) => {
+                        if let Some((_, inner)) = &m.content {
+                            module_path.push(m.ident.to_string());
+                            walk(cg, inner, module_path, leaves, out);
+                            module_path.pop();
+                        }
+                    }
+                    syn::Item::Impl(imp) => {
+                        let Some((_, trait_path, _)) = &imp.trait_ else { continue };
+                        let Some(leaf) = trait_path.segments.last().map(|s| s.ident.to_string())
+                        else {
+                            continue;
+                        };
+                        if !leaves.contains(&leaf)
+                            || cg.ufcs_declared_trait_names.contains(&leaf)
+                            || cg.dependency_declares_trait(&leaf)
+                        {
+                            continue;
+                        }
+                        let key = cg.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+                        let methods: Vec<String> = imp
+                            .items
+                            .iter()
+                            .filter_map(|it| match it {
+                                syn::ImplItem::Fn(f)
+                                    if matches!(f.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) =>
+                                {
+                                    Some(f.sig.ident.to_string())
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        let concrete = !imp
+                            .generics
+                            .params
+                            .iter()
+                            .any(|p| matches!(p, syn::GenericParam::Type(_)));
+                        out.push(Found { key, leaf, methods, concrete });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(self, items, &mut Vec::new(), &extension_leaves, &mut found);
+        for f in found {
+            self.ufcs_declared_trait_names.insert(f.leaf.clone());
+            self.ufcs_declared_trait_modules
+                .entry(f.leaf.clone())
+                .or_insert_with(String::new);
+            let declared = self.ufcs_declared_trait_methods.entry(f.leaf.clone()).or_default();
+            for m in &f.methods {
+                if !declared.contains(m) {
+                    declared.push(m.clone());
+                }
+            }
+            self.trait_declared_paths.insert(f.key.clone());
+            self.trait_declared_path_by_short_name
+                .entry(f.leaf.clone())
+                .or_insert_with(|| f.key.clone());
+            self.ufcs_internal_linkage_traits.insert(f.leaf.clone());
+            self.ufcs_internal_linkage_traits.insert(f.key.clone());
+            if f.concrete {
+                for m in &f.methods {
+                    self.ufcs_method_trait_owners
+                        .entry(m.clone())
+                        .or_default()
+                        .insert(f.leaf.clone());
+                }
+            }
+        }
+    }
+
     /// Book §3.2.16 phase 3 / (aa): is this trait (by short name) lane-carried
-    /// — a crate-declared trait whose impls emit `Tr_::impl_` functions, or a
-    /// dependency-declared one reached bare — so that it has no `rusty_ext`
-    /// twin? Every site that once emitted, declared, resolved or spelled the
-    /// twin asks this; the twin remains only as the fallback for a trait
-    /// neither this crate nor a consumed manifest declares.
-    pub(super) fn rusty_ext_twin_retired_for(&self, trait_short: &str) -> bool {
+    /// — crate-declared (or synthesized, see `synthesize_foreign_trait_lanes`)
+    /// with impls that emit `Tr_::impl_` functions, or dependency-declared and
+    /// reached bare? Since the twin's retirement every extension trait is;
+    /// the output retarget pass and the blanket-owner route still ask.
+    pub(super) fn trait_is_lane_carried(&self, trait_short: &str) -> bool {
         self.trait_declared_path_by_short_name
             .get(trait_short)
             .is_some_and(|full| self.ufcs_impl_lane_covers_trait_key(full))
@@ -25678,7 +25373,6 @@ impl CodeGen {
         };
         // serde_core Fix B: qualify nested-module types in the return position.
         return_type = self.qualify_nested_local_types_in_type_string(&return_type);
-        self.record_extension_free_function_symbol(&method_name);
         if self.ufcs_abi_companion_wanted
             && receiver_opt.is_some()
             && free_generics.params.is_empty()
@@ -26374,26 +26068,6 @@ impl CodeGen {
         builtin_self
             && (return_type.contains(&format!("{trimmed_self}::"))
                 || return_type.contains("auto::"))
-    }
-
-    fn record_extension_free_function_symbol(&mut self, method_name: &str) {
-        // (aa): a function emitted into `Tr_::impl_` (the tag namespace is
-        // set for the lane's emission) is not a `rusty_ext` symbol — the twin
-        // recorded its own when it was emitted; without the twin, recording
-        // it here made the resolver spell a path that no longer exists.
-        if self.ufcs_tag_namespace.is_some() {
-            return;
-        }
-        let scoped_name = if self.module_stack.is_empty() {
-            format!("rusty_ext::{}", method_name)
-        } else {
-            format!(
-                "{}::rusty_ext::{}",
-                self.module_stack.join("::"),
-                method_name
-            )
-        };
-        self.record_function_return_type(&scoped_name, None);
     }
 
     /// How many leading type params of an extension free fn are
@@ -44099,56 +43773,6 @@ impl CodeGen {
                     .collect::<Vec<_>>()
             );
         }
-        let rusty_ext_fallback: Option<String> = callee_base
-            .rsplit_once("::")
-            .and_then(|(owner_path, _)| {
-                if !owner_path.rsplit("::").next().unwrap_or("").ends_with('_') {
-                    return None;
-                }
-                // Gate on the PRE-PASS collection (extension_trait_impl_
-                // methods), not the emitted registry: dispatchers can emit
-                // BEFORE the crate's rusty_ext block fills the registry
-                // (order-dependent misses on itoa's Buffer::format). The
-                // helper's namespace comes from the TRAIT KEY's Rust module
-                // (itoa's Sealed lives in `mod private` → the helper is
-                // `private_::rusty_ext::write_`), not from the callee's
-                // root-relative `Sealed_::` spelling.
-                let trait_ns = owner_path.rsplit("::").next().unwrap_or("");
-                let trait_rust_name = trait_ns.strip_suffix('_').unwrap_or(trait_ns);
-                self.extension_trait_impl_methods
-                    .iter()
-                    .find_map(|(trait_key, methods)| {
-                        let (key_module, key_trait) = trait_key
-                            .rsplit_once("::")
-                            .unwrap_or(("", trait_key.as_str()));
-                        if key_trait != trait_rust_name
-                            || !methods.iter().any(|m| {
-                                escape_cpp_keyword(&m.method.sig.ident.to_string())
-                                    == callee_leaf
-                            })
-                        {
-                            return None;
-                        }
-                        // (aa): the twin of a lane-covered trait is not emitted —
-                        // naming it here would be a hard error, not a soft arm.
-                        if self.rusty_ext_twin_retired_for(key_trait) {
-                            return None;
-                        }
-
-                        let module_cpp = key_module
-                            .split("::")
-                            .filter(|s| !s.is_empty())
-                            .map(escape_cpp_keyword)
-                            .collect::<Vec<_>>()
-                            .join("::");
-                        let sibling = if module_cpp.is_empty() {
-                            format!("rusty_ext::{}", callee_leaf)
-                        } else {
-                            format!("{}::rusty_ext::{}", module_cpp, callee_leaf)
-                        };
-                        Some(format!("{}({})", sibling, deref_args.join(", ")))
-                    })
-            });
         // Book §3.2.2 rule 7: a trailing key means Rust's resolution was
         // lexically the TRAIT (a bound on a type parameter, a `let`
         // annotation, a reference-depth probe) — the keyed free function
@@ -44176,22 +43800,6 @@ impl CodeGen {
         // hijacked receivers with a same-named inherent method and
         // hard-errored in the body — indexmap's `m.sorted_by(4-arg move
         // closure)` (inherent) fell into Itertools_::sorted_by (2-arg cmp).
-        if let Some(rx_call) = rusty_ext_fallback {
-            return format!(
-                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-                arg_param_list,
-                member_call_direct,
-                member_call_direct,
-                member_call,
-                member_call,
-                direct_call,
-                direct_call,
-                deref_call,
-                deref_call,
-                rx_call,
-                arg_call_list
-            );
-        }
         format!(
             "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
             arg_param_list,

@@ -112,7 +112,7 @@ impl CodeGen {
         let mut owners: std::collections::BTreeMap<String, Vec<(String, String)>> =
             std::collections::BTreeMap::new();
         for (trait_name, methods) in &self.ufcs_declared_trait_methods {
-            if !self.rusty_ext_twin_retired_for(trait_name) {
+            if !self.trait_is_lane_carried(trait_name) {
                 continue;
             }
             // The module the twin spelling names: a local trait's declaring

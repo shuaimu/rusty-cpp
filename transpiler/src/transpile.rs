@@ -174,8 +174,6 @@ pub struct UfcsTraitManifest {
     /// calls one classifies that call as non-slot.
     #[serde(default)]
     pub trait_nonvtable_defaults: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    pub rusty_ext_methods_by_module: std::collections::BTreeMap<String, Vec<String>>,
     /// C-like enum VARIANT name → the enum's crate-relative C++ path
     /// (`YAML_STREAM_START_EVENT` → `yaml::yaml_event_type_t`). Rust re-exports
     /// variants into scope (`pub use yaml_event_type_t::*;` chained through
@@ -234,7 +232,7 @@ fn default_args_inline() -> bool {
 /// — fields a version-1 reader silently defaulted). A consumer reading a
 /// manifest of another version stops with an error naming the dependency to
 /// rebuild; the old loader read no version and skipped unparseable files.
-pub const UFCS_TRAIT_MANIFEST_VERSION: u32 = 2;
+pub const UFCS_TRAIT_MANIFEST_VERSION: u32 = 3;
 
 fn default_ufcs_trait_manifest_version() -> u32 {
     1
@@ -5896,7 +5894,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
     }
 
     #[test]
-    fn test_transpile_with_extension_hints_rewrites_method_calls() {
+    fn test_transpile_with_extension_hints_keeps_the_member_call() {
         let mut hints = HashSet::new();
         hints.insert("tap".to_string());
         let result = transpile_with_type_map_and_extension_hints(
@@ -5907,17 +5905,12 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
         );
         assert!(result.is_ok());
         let output = result.unwrap();
-        // The call may be a direct `rusty_ext::tap(10)` or wrapped in an
-        // autoderef-fallback IIFE that calls `rusty_ext::tap(...)` on the
-        // forwarded receiver (legitimate codegen evolution to handle
-        // pointer-like receivers uniformly).
-        assert!(
-            output.contains("static_cast<void>(rusty_ext::tap(10));")
-                || (output.contains("static_cast<void>")
-                    && output.contains("rusty_ext::tap(")
-                    && output.contains("})(10)")),
-            "{output}"
-        );
+        // rusty_ext stage 1: a hint names a method, not its trait; with no
+        // owner known (no local impl, no manifest) the call stays a member
+        // call, which fails loudly in C++ where the retired `rusty_ext::tap(10)`
+        // convention linked against a function nobody emitted.
+        assert!(output.contains("(10).tap()"), "{output}");
+        assert!(!output.contains("rusty_ext::tap("), "{output}");
     }
 
     #[test]
@@ -5936,7 +5929,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
     }
 
     #[test]
-    fn test_transpile_with_external_tap_err_hint_routes_to_rusty_ext() {
+    fn test_transpile_with_external_tap_err_hint_lowers_to_a_member_call() {
         let mut hints = HashSet::new();
         hints.insert("tap_err".to_string());
         let result = transpile_with_type_map_and_extension_hints(
@@ -5953,14 +5946,12 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
         );
         assert!(result.is_ok());
         let output = result.unwrap();
-        // The call may be a direct `rusty_ext::tap_err(result, ...)` or
-        // wrapped in an autoderef-fallback IIFE that forwards `result` as
-        // the first argument inside the lambda.
-        assert!(
-            output.contains("rusty_ext::tap_err(result,")
-                || (output.contains("rusty_ext::tap_err(") && output.contains("})(result")),
-            "{output}"
-        );
+        // rusty_ext stage 1: a cross-source hint names a method, not its
+        // trait. With no owner known there is nothing to spell but the member
+        // call — the retired `rusty_ext::tap_err(...)` convention named a
+        // function nobody emitted.
+        assert!(output.contains("result.tap_err("), "{output}");
+        assert!(!output.contains("rusty_ext::tap_err("), "{output}");
         assert!(!output.contains("rusty::tap_err("));
     }
 
@@ -6459,7 +6450,6 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             root_exported_names: Vec::new(),
             declared_modules: Vec::new(),
             function_arg_pass_styles: std::collections::BTreeMap::new(),
-            rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             c_like_enum_variants: std::collections::BTreeMap::new(),
             trait_assoc_type_bounds: std::collections::BTreeMap::new(),
             trait_assoc_type_names: std::collections::BTreeMap::new(),
@@ -6554,7 +6544,6 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             root_exported_names: Vec::new(),
             declared_modules: Vec::new(),
             function_arg_pass_styles: std::collections::BTreeMap::new(),
-            rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             c_like_enum_variants: std::collections::BTreeMap::new(),
             trait_assoc_type_bounds: std::collections::BTreeMap::new(),
             trait_assoc_type_names: std::collections::BTreeMap::new(),

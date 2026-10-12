@@ -1338,8 +1338,9 @@ impl CodeGen {
             candidates.push(format!("{}::{}::{}", prefix, namespace_name, fn_name));
         }
         if namespace_is_rusty_ext {
-            let known = self.collect_known_rusty_ext_free_function_paths();
-            candidates.retain(|candidate| known.contains(candidate));
+            // No `rusty_ext` free function is emitted any more (the twin is
+            // retired); only the hardcoded prelude names above resolve.
+            candidates.clear();
         } else {
             candidates.retain(|candidate| self.is_known_free_function_path(candidate));
         }
@@ -1357,11 +1358,8 @@ impl CodeGen {
         {
             let exact = format!("rusty_ext::{}", fn_name);
             let suffix = format!("::{}", exact);
-            let mut scoped_candidates: Vec<String> = self
-                .collect_known_rusty_ext_free_function_paths()
-                .into_iter()
-                .filter(|key| key != &exact && key.ends_with(&suffix))
-                .collect();
+            let mut scoped_candidates: Vec<String> = Vec::new();
+            let _ = (&exact, &suffix);
             scoped_candidates.sort();
             scoped_candidates.dedup();
             if scoped_candidates.len() == 1 {
@@ -1415,7 +1413,7 @@ impl CodeGen {
         let exact = format!("{}::{}", namespace_name, fn_name);
         let suffix = format!("::{}", exact);
         let known_paths = if namespace_is_rusty_ext {
-            self.collect_known_rusty_ext_free_function_paths()
+            HashSet::new()
         } else {
             self.collect_known_free_function_paths()
         };
