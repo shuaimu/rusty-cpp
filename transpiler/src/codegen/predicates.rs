@@ -4199,7 +4199,13 @@ impl CodeGen {
             syn::Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments[0].ident.to_string();
                 if let Some(ty) = self.lookup_local_binding_type(&name) {
-                    !matches!(ty, syn::Type::Ptr(_))
+                    // `&*this` over `let this = ManuallyDrop::new(this)` is a
+                    // USER deref (`operator*` yields the payload); collapsing
+                    // it would pass the ManuallyDrop where the payload's
+                    // reference is expected (rc's `Rc::into_raw`).
+                    let is_manually_drop = matches!(&ty, syn::Type::Path(tp)
+                        if tp.path.segments.last().is_some_and(|seg| seg.ident == "ManuallyDrop"));
+                    !matches!(ty, syn::Type::Ptr(_)) && !is_manually_drop
                 } else {
                     false
                 }

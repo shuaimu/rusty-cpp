@@ -17,7 +17,9 @@ module;
 #include <string_view>
 #include <charconv>
 #include <cstdlib>
+#include <cstdio>
 #include <bit>
+#include <cwctype>
 #include <stdexcept>
 #include <print>
 #include <immintrin.h>
@@ -31,6 +33,9 @@ module;
 export module vec_port;
 
 export import vec_port.vec;
-
 export import vec_port.raw_vec;
+namespace rusty::port::vec {
 
+
+
+} // namespace rusty::port::vec

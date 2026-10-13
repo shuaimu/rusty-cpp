@@ -16971,6 +16971,17 @@ impl CodeGen {
     ) -> Option<HashMap<String, syn::Type>> {
         let expected_ty = expected_ty?;
         let expected_ty = self.peel_reference_paren_group_type(expected_ty);
+        // `-> Self` in `impl Default for Rc<str>`: the hint is the bare path
+        // `Self`, which carries no type args; the impl's self type does, and
+        // it is what `Rc::from_raw(…)` in tail position must instantiate
+        // (`Rc<auto, auto>::from_raw` otherwise).
+        let resolved_self_ty;
+        let expected_ty = if let Some(resolved) = self.resolve_bare_self_hint(expected_ty) {
+            resolved_self_ty = resolved;
+            self.peel_reference_paren_group_type(&resolved_self_ty)
+        } else {
+            expected_ty
+        };
         let syn::Type::Path(expected_tp) = expected_ty else {
             return None;
         };
@@ -22209,6 +22220,91 @@ impl CodeGen {
     /// local class template has no default arguments yet (alloc:
     /// `impls_SpecFromIter<::collections::vec_deque::VecDeque<T>>` →
     /// `too few template arguments`). Lexical, top-level-comma counting.
+    /// Fill a local generic named with fewer arguments than declared with its
+    /// declared DEFAULTS: `Rc<T>` → `Rc<T, rusty::alloc::Global>`. Before the
+    /// struct's definition only its forward declaration is visible, and a
+    /// forward declaration carries no defaults ("too few template arguments
+    /// for class template 'Rc'"); the UFCS lane's forward-declared free
+    /// functions name the self type there. Spellings with no default for a
+    /// missing position are returned unchanged.
+    fn fill_underfilled_local_generics(&self, spelling: &str) -> String {
+        let bytes = spelling.as_bytes();
+        let mut out = String::with_capacity(spelling.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let tok = &spelling[start..i];
+                out.push_str(tok);
+                if i < bytes.len()
+                    && bytes[i] == b'<'
+                    && let Some(params) = self.declared_type_params.get(tok)
+                {
+                    // Find the matching `>` and count the top-level args.
+                    let mut depth = 0usize;
+                    let mut args = 1usize;
+                    let mut empty = true;
+                    let mut j = i + 1;
+                    let mut close = None;
+                    while j < bytes.len() {
+                        match bytes[j] {
+                            b'<' | b'(' => depth += 1,
+                            b'>' | b')' if depth > 0 => depth -= 1,
+                            b'>' => {
+                                close = Some(j);
+                                break;
+                            }
+                            b',' if depth == 0 => args += 1,
+                            b' ' => {}
+                            _ => empty = false,
+                        }
+                        j += 1;
+                    }
+                    if empty {
+                        args = 0;
+                    }
+                    if let Some(close) = close
+                        && args < params.len()
+                        && let Some(defaults) = self.declared_type_param_defaults.get(tok)
+                    {
+                        let missing: Option<Vec<String>> = (args..params.len())
+                            .map(|idx| match defaults.get(idx) {
+                                Some(Some(GenericParamDefault::Type(ty))) => {
+                                    let mapped = self.map_type(ty);
+                                    (!mapped.is_empty()
+                                        && !type_string_has_auto_placeholder(&mapped))
+                                    .then_some(mapped)
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        if let Some(missing) = missing {
+                            // Recurse into the written args (nested spellings).
+                            let inner =
+                                self.fill_underfilled_local_generics(&spelling[i + 1..close]);
+                            out.push('<');
+                            out.push_str(&inner);
+                            if args > 0 {
+                                out.push_str(", ");
+                            }
+                            out.push_str(&missing.join(", "));
+                            out.push('>');
+                            i = close + 1;
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        out
+    }
+
     fn spelling_underfills_local_generic(&self, spelling: &str) -> bool {
         let bytes = spelling.as_bytes();
         let mut i = 0;
@@ -22358,6 +22454,9 @@ impl CodeGen {
                 ));
                 return;
             }
+            // Spell the declared defaults first (`Rc<T>` → `Rc<T, Global>`);
+            // only a spelling with no default for a missing position is skipped.
+            let self_cpp = self.fill_underfilled_local_generics(&self_cpp);
             if self.spelling_underfills_local_generic(&self_cpp) {
                 self.writeln(&format!(
                     "// implementor marker skipped: `impl {} for {}` — a local generic named with fewer arguments than declared (defaults are not visible here)",
@@ -22484,6 +22583,9 @@ impl CodeGen {
         {
             return;
         }
+        // Spell the declared defaults first (`Rc<T>` → `Rc<T, Global>`); only a
+        // spelling with no default for a missing position is skipped.
+        let self_cpp = self.fill_underfilled_local_generics(&self_cpp);
         if self.spelling_underfills_local_generic(&self_cpp) {
             self.writeln(&format!(
                 "// implementor marker skipped: `impl {} for {}` — a local generic named with fewer arguments than declared (defaults are not visible here)",
@@ -23958,6 +24060,14 @@ impl CodeGen {
             return_type = "auto".to_string();
         }
         self.in_forward_decl_signature = prev_forward_decl_signature;
+        // A local generic named with fewer arguments than declared (`Rc<T>`
+        // for `Rc<T, A = Global>`) is spelled with its defaults: ahead of the
+        // struct's definition only the default-less forward declaration is
+        // visible ("too few template arguments for class template 'Rc'").
+        return_type = self.fill_underfilled_local_generics(&return_type);
+        for param in params.iter_mut() {
+            *param = self.fill_underfilled_local_generics(param);
+        }
         let signature_has_unresolved_placeholder = params.iter().any(|param| {
             param.contains("/* TODO")
                 || type_string_has_auto_placeholder(param)
@@ -24690,8 +24800,14 @@ impl CodeGen {
     ) -> Option<String> {
         let method = &method_spec.method;
         let method_name = method.sig.ident.to_string();
-        let syn::FnArg::Receiver(receiver) = method.sig.inputs.first()? else {
-            return None;
+        // A no-receiver item (`fn from_slice(v: &[T]) -> Self`) is emitted in
+        // the `impl_` lane with `rusty::self_tag<Self>` in the receiver's
+        // place; it needs a key too, or two impls that lower to one C++
+        // signature (rc's `impl<T: Clone>` + specializing `impl<T: Copy>`
+        // RcFromSlice) both emit — a C++ redefinition.
+        let receiver = match method.sig.inputs.first() {
+            Some(syn::FnArg::Receiver(r)) => Some(r),
+            _ => None,
         };
 
         let free_generics = self.extension_free_function_generics(
@@ -24713,10 +24829,13 @@ impl CodeGen {
         let associated_type_cpp_bindings =
             self.extension_assoc_cpp_bindings(&method_spec.associated_type_bindings);
 
-        let receiver_ty = self.extension_receiver_param_cpp_type(&self_cpp_ty, receiver);
+        let receiver_ty = match receiver {
+            Some(receiver) => self.extension_receiver_param_cpp_type(&self_cpp_ty, receiver),
+            None => format!("rusty::self_tag<{}>", self_cpp_ty),
+        };
 
         let mut param_types = vec![receiver_ty];
-        for arg in method.sig.inputs.iter().skip(1) {
+        for arg in method.sig.inputs.iter().skip(usize::from(receiver.is_some())) {
             let syn::FnArg::Typed(pat_type) = arg else {
                 continue;
             };
@@ -46513,6 +46632,16 @@ impl CodeGen {
                 | "try_unwrap"
                 | "into_inner"
                 | "ptr_eq"
+                // `this: Self` by value / `&mut Self` — the pointer itself.
+                | "into_raw"
+                | "into_raw_with_allocator"
+                | "unwrap_or_clone"
+                | "make_mut"
+                | "allocator"
+                | "into_unique"
+                | "leak"
+                | "into_pin"
+                | "into_inner"
         ) {
             return None;
         }
@@ -46544,6 +46673,12 @@ impl CodeGen {
             "Arc" => Some("Arc"),
             "Rc" => Some("Rc"),
             "Weak" | "RcWeak" | "ArcWeak" => Some("Weak"),
+            // `Box::into_unique(b)` / `into_raw_with_allocator(b)`: the owner
+            // IS the argument's type. The generic recovery otherwise reads
+            // the argument as the pointee — `rusty::Box<decltype((b))>` —
+            // and a `decltype` over a `?` statement-expression inside a
+            // module BMI crashes clang 22 (rc's `try_new_in`).
+            "Box" => Some("Box"),
             _ => None,
         }
     }
@@ -47270,7 +47405,18 @@ impl CodeGen {
             return base_func;
         }
         let expected_owner_args = expected_ty
-            .and_then(|ty| self.expected_type_generic_args_for_owner(ty, &owner_name))
+            .and_then(|ty| {
+                // `-> Self` in `impl Default for Rc<str>`: the tail
+                // `Rc::from_raw(…)` takes the impl self type's args
+                // (`Rc<auto, auto>` otherwise). Explicit position only — the
+                // return-hint fallback below reaches every call in the body.
+                match self.resolve_bare_self_hint(ty) {
+                    Some(resolved) => {
+                        self.expected_type_generic_args_for_owner(&resolved, &owner_name)
+                    }
+                    None => self.expected_type_generic_args_for_owner(ty, &owner_name),
+                }
+            })
             .or_else(|| {
                 self.current_return_type_hint()
                     .and_then(|ty| self.expected_type_generic_args_for_owner(ty, &owner_name))
@@ -47301,6 +47447,9 @@ impl CodeGen {
                 method_name.as_str(),
                 "ptr_eq" | "strong_count" | "weak_count" | "as_ptr" | "get_mut" | "downgrade"
                     | "upgrade" | "try_unwrap" | "into_inner"
+                    // `this: Self` by value / `&mut Self` — the pointer itself.
+                    | "into_raw" | "into_raw_with_allocator" | "unwrap_or_clone"
+                    | "make_mut" | "allocator" | "into_unique" | "leak" | "into_pin"
             )
             && let Some(first) = call.args.first()
         {
@@ -47308,7 +47457,15 @@ impl CodeGen {
             while let syn::Expr::Reference(reference) = arg {
                 arg = self.peel_paren_group_expr(&reference.expr);
             }
-            if self.infer_simple_expr_type(arg).is_none()
+            // For the `this: Self` family the argument IS the owner whatever
+            // inference says about it (`let rc = Rc::<[u8]>::default()` types
+            // as a bare `Rc`, which recovers no args): `decltype` is exact.
+            let takes_self_by_value = matches!(
+                method_name.as_str(),
+                "into_raw" | "into_raw_with_allocator" | "unwrap_or_clone" | "make_mut"
+                    | "allocator" | "into_unique" | "leak" | "into_pin"
+            );
+            if (takes_self_by_value || self.infer_simple_expr_type(arg).is_none())
                 && matches!(arg, syn::Expr::Path(p) if p.path.segments.len() == 1)
             {
                 let arg_cpp = self.emit_expr_to_string(arg);
@@ -53837,6 +53994,24 @@ impl CodeGen {
         self.return_type_hints.last().and_then(|hint| hint.as_ref())
     }
 
+    /// A bare `Self` hint (`-> Self` in `impl Default for Rc<str>`) carries
+    /// no type args; the impl's self type does. Resolves it when the
+    /// enclosing impl's self type is known and concrete-shaped (not a
+    /// default method's template `Self`).
+    fn resolve_bare_self_hint(&self, hint: &syn::Type) -> Option<syn::Type> {
+        let is_bare_self = |ty: &syn::Type| {
+            matches!(ty, syn::Type::Path(tp) if tp.qself.is_none() && tp.path.is_ident("Self"))
+        };
+        if !is_bare_self(hint) {
+            return None;
+        }
+        let self_ty = self.current_impl_method_self_tys.last()?.as_ref()?;
+        if is_bare_self(self_ty) {
+            return None;
+        }
+        Some(self_ty.clone())
+    }
+
 
     fn current_try_macro(&self) -> &'static str {
         let returns_option = self
@@ -57198,8 +57373,31 @@ pub(crate) fn resolve_impl_method_conflict(
             _ => None,
         }
     })();
+    // A std comparison trait (`PartialEq`/`PartialOrd`) colliding with a LOCAL
+    // trait's same-named method (rc's `impl RcEqIdent for Rc { fn eq }` beside
+    // `impl PartialEq for Rc { fn eq }`): the comparison impl is what drives
+    // the struct's `operator==` bridge, so it keeps the plain member whatever
+    // the source order — dropped, `Rc == Rc` has no operator at all.
+    let comparison_trait_preference = (|| {
+        let exist_origin = prior_origin.as_deref()?;
+        let (cand_trait, _) = split_impl_origin(origin)?;
+        let (exist_trait, _) = split_impl_origin(exist_origin)?;
+        let is_comparison = |t: &str| {
+            let head = t.split('<').next().unwrap_or(t).trim();
+            matches!(
+                head.rsplit("::").next().unwrap_or(head),
+                "PartialEq" | "PartialOrd" | "Eq" | "Ord"
+            )
+        };
+        match (is_comparison(exist_trait), is_comparison(cand_trait)) {
+            (false, true) => Some(true),
+            (true, false) => Some(false),
+            _ => None,
+        }
+    })();
     let should_replace = ref_value_twin_preference
         .or(inherent_preference)
+        .or(comparison_trait_preference)
         .unwrap_or(should_replace);
     let (kept, dropped) = if should_replace {
         (&merged, &existing)
@@ -57755,7 +57953,32 @@ fn impl_method_static_instance_collision_key(method: &syn::ImplItemFn) -> String
 
 /// Build a deterministic conflict key for merged impl methods.
 /// Return type is intentionally excluded because C++ cannot overload by return type.
+/// `impl PartialEq for P { fn eq }` beside a LOCAL trait's `fn eq(&self, &P)`
+/// (rc's `RcEqIdent`): the comparison impl is emitted as `operator==`, so the
+/// two never collide in C++. Keying them apart keeps both — collapsed, the
+/// `operator==` bridge was the one dropped and `Rc == Rc` had no operator.
+pub(crate) const RUSTY_CPP_COMPARISON_TRAIT_ATTR: &str = "rusty_cpp_comparison_trait";
+
+pub(crate) fn impl_trait_is_comparison_trait(path: &syn::Path) -> bool {
+    path.segments.last().is_some_and(|seg| {
+        matches!(seg.ident.to_string().as_str(), "PartialEq" | "PartialOrd" | "Eq" | "Ord")
+    })
+}
+
 fn impl_method_conflict_key(method: &syn::ImplItemFn) -> String {
+    let key = impl_method_conflict_key_inner(method);
+    if method
+        .attrs
+        .iter()
+        .any(|attr| attr.path().is_ident(RUSTY_CPP_COMPARISON_TRAIT_ATTR))
+    {
+        format!("{}|cmp-trait", key)
+    } else {
+        key
+    }
+}
+
+fn impl_method_conflict_key_inner(method: &syn::ImplItemFn) -> String {
     let receiver_key = match method.sig.inputs.first() {
         Some(syn::FnArg::Receiver(recv)) => {
             if recv.reference.is_some() {

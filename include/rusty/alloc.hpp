@@ -101,6 +101,14 @@ struct Layout {
         return Layout{::rusty::mem::size_of<T>(), alignof(T)};
     }
 
+    // Rust `Layout::for_value(&v)` — the transpiler spells the reference
+    // argument as the value (`Layout::for_value(*ptr)`); no DSTs in the
+    // port, so this is the pointee type's layout.
+    template<typename V>
+    static constexpr Layout for_value(const V&) noexcept {
+        return Layout{::rusty::mem::size_of<std::remove_cv_t<V>>(), alignof(std::remove_cv_t<V>)};
+    }
+
     // Rust's Layout::array::<T>(n) — does not check for overflow here; callers
     // mirror Rust's behaviour by handling allocation failure downstream.
     template<typename T>

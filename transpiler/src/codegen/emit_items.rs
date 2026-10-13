@@ -9875,12 +9875,21 @@ impl CodeGen {
                             && item != first_segment
                         {
                             let ns_path = self.consumer_cpp_namespace_for_module(&sibling_module);
-                            self.writeln(&format!(
-                                "{}using ::{}::{};",
-                                export_prefix,
-                                ns_path,
-                                escape_cpp_keyword(item)
-                            ));
+                            // Same namespace as this module (an explicit
+                            // `--cxx-namespace` shared by the whole crate):
+                            // the import already makes the name visible
+                            // bare; only a `pub use` re-export still needs
+                            // its `export using`.
+                            let same_namespace =
+                                self.cxx_namespace.as_deref() == Some(ns_path.as_str());
+                            if !same_namespace || !export_prefix.is_empty() {
+                                self.writeln(&format!(
+                                    "{}using ::{}::{};",
+                                    export_prefix,
+                                    ns_path,
+                                    escape_cpp_keyword(item)
+                                ));
+                            }
                         }
                         if !emitted_as_module_import {
                             // A plain import of a wrapped DEPENDENCY's MODULE

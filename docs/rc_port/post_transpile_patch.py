@@ -136,6 +136,11 @@ def patch_namespace_using_prefix(cpp_out: Path) -> int:
         text = text.replace(
             f"rusty::Box<auto>::{factory}(RcInner",
             f"rusty::Box<RcInner<T>>::{factory}(RcInner")
+    # 2026-10 transpiler: `rusty::Box<RcInner>::write_(rusty::Box<RcInner>::new_uninit(), RcInner<T>{…})`
+    # (the struct literal's bare path); the MaybeUninit box is the owner.
+    text = text.replace(
+        "rusty::Box<RcInner>::write_(rusty::Box<RcInner>::new_uninit()",
+        "rusty::Box<rusty::MaybeUninit<RcInner<T>>>::write_(rusty::Box<rusty::MaybeUninit<RcInner<T>>>::new_uninit()")
     # `Box<auto>::new_uninit()` returns Box<MaybeUninit<T>>.
     text = text.replace(
         "rusty::Box<auto>::new_uninit()",
@@ -166,9 +171,9 @@ def patch_namespace_using_prefix(cpp_out: Path) -> int:
     # `::data_offset<X>(...)` — qualified to global namespace, but the
     # actual decl is in rc_port. Drop the `::` so unqualified lookup
     # finds the in-namespace definition.
-    text = text.replace(
-        "::data_offset<",
-        "data_offset<")
+    text = re.sub(
+        r"(?<![A-Za-z0-9_:])::data_offset<",
+        "data_offset<", text)
 
     # `NonNull<auto>::as_ptr(this_.ptr)` — Cluster A. `this_.ptr` is
     # NonNull<RcInner<T>>, so NonNull<auto> should be NonNull<RcInner<T>>.
@@ -207,9 +212,9 @@ def patch_namespace_using_prefix(cpp_out: Path) -> int:
 
     # `::rc_inner_layout_for_value_layout(...)` — bare qualifier, the
     # decl is inside Rc<T,A> as static member. Use Rc<T,A>::.
-    text = text.replace(
-        "::rc_inner_layout_for_value_layout(",
-        "Rc<T, A>::rc_inner_layout_for_value_layout(")
+    text = re.sub(
+        r"(?<![A-Za-z0-9_:])::rc_inner_layout_for_value_layout\(",
+        "rc_inner_layout_for_value_layout(", text)
 
     # `Layout::for_value_raw(ptr)` — our `rusty::alloc::Layout` only
     # surfaces `for_value`. Rename: for_value_raw is the unsafe variant
@@ -234,10 +239,10 @@ def patch_namespace_using_prefix(cpp_out: Path) -> int:
                  "}\n")
     if "cast_identity_stub" in text and cast_stub not in text:
         # Add right after `namespace rc_port {`.
-        text = text.replace(
-            "namespace rc_port {\n",
-            "namespace rc_port {\n" + cast_stub + "\n",
-            1)
+        for wrap in ("namespace rusty::port::rc {\n", "namespace rc_port {\n"):
+            if wrap in text:
+                text = text.replace(wrap, wrap + cast_stub + "\n", 1)
+                break
 
     if text != original:
         path.write_text(text)
@@ -441,7 +446,7 @@ def patch_is_dangling_addr(cpp_out: Path) -> int:
     text = path.read_text()
     original = text
     text = re.sub(
-        r"\(reinterpret_cast<const std::tuple<>\*>\((\w+)\)\)->addr\(\)",
+        r"\(reinterpret_cast<const (?:std::tuple<>|rusty::Unit)\*>\((\w+)\)\)->addr\(\)",
         r"reinterpret_cast<size_t>(\1)",
         text,
     )
@@ -691,8 +696,8 @@ def patch_rcinner_methods(cpp_out: Path) -> int:
     # matching `inc_strong()` / `dec_strong()` / `strong_ref()` /
     # similar — those have an underscore (or `_ref`) between `.` and
     # `strong`/`weak`, not a literal `.strong(` / `.weak(`.
-    text = re.sub(r"\.strong\(\)", ".strong.get()", text)
-    text = re.sub(r"\.weak\(\)",   ".weak.get()",   text)
+    text = re.sub(r"(?<!__self)\.strong\(\)", ".strong.get()", text)
+    text = re.sub(r"(?<!__self)\.weak\(\)",   ".weak.get()",   text)
 
     if text != original:
         path.write_text(text)
@@ -715,6 +720,14 @@ def patch_nonnull_auto_static_calls(cpp_out: Path) -> int:
     # Match `NonNull<auto>::method(arg)` → `arg.method()`.
     text = re.sub(
         r"NonNull<auto>::as_ptr\(([^)]+)\)",
+        r"\1.as_ptr()",
+        text,
+    )
+    # 2026-10 transpiler: the owner is recovered from the argument as
+    # `std::remove_cvref_t<decltype((this_.ptr))>::as_ptr(this_.ptr)` — still
+    # a static-style call of a member; same member-call rewrite.
+    text = re.sub(
+        r"std::remove_cvref_t<decltype\(\(([A-Za-z_][\w.>-]*)\)\)>::as_ptr\(\1\)",
         r"\1.as_ptr()",
         text,
     )
@@ -860,6 +873,256 @@ def patch_dedupe_from_string_view(cpp_out: Path) -> int:
     return 0
 
 
+# The user-facing alias block after the namespace wrap: `rusty::rc::Rc`,
+# `Weak`, `UniqueRc` mirror Rust's `std::rc::*`. Hand-written at the first
+# vendoring; lost by every regen until this rule.
+USER_FACING_ALIASES = """
+// User-facing aliases: `rusty::rc::*` mirrors Rust's `std::rc::*`.
+// End users don't observe the underlying `rusty::port::*` scaffolding.
+export namespace rusty::rc {
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using Rc = ::rusty::port::rc::Rc<T, A>;
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using Weak = ::rusty::port::rc::Weak<T, A>;
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using UniqueRc = ::rusty::port::rc::UniqueRc<T, A>;
+}
+"""
+
+
+def patch_append_user_facing_aliases(cpp_out: Path) -> int:
+    path = cpp_out / "rc_port.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if "export namespace rusty::rc {" in text:
+        return 0
+    anchor = "} // namespace rusty::port::rc\n"
+    if anchor not in text:
+        return 0
+    idx = text.rindex(anchor) + len(anchor)
+    path.write_text(text[:idx] + USER_FACING_ALIASES + text[idx:])
+    return 1
+
+
+def patch_string_module_qualified_string(cpp_out: Path) -> int:
+    """`use crate::string::String` in the single-file port: the transpiler
+    spells the type `string::String` (the module does not exist here) while
+    the file already carries `using rusty::String;`."""
+    path = cpp_out / RC_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    new = re.sub(r"(?<![A-Za-z0-9_:])string::String\b", "rusty::String", text)
+    if new == text:
+        return 0
+    path.write_text(new)
+    return 1
+
+
+def patch_from_raw_byte_sub(cpp_out: Path) -> int:
+    """`ptr.byte_sub(offset)` on a raw `*const T` lowers to a member call a
+    C++ pointer does not have; the RcInner<T>* is plain address arithmetic
+    (the vendored hand-port)."""
+    path = cpp_out / RC_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    new = re.sub(
+        r"rusty::detail::ptr_cast<std::add_pointer_t<RcInner<T>>>\(ptr->byte_sub\(std::move\(offset\)\)\)",
+        "reinterpret_cast<std::add_pointer_t<RcInner<T>>>(reinterpret_cast<std::uintptr_t>(ptr) - offset)",
+        text)
+    if new == text:
+        return 0
+    path.write_text(new)
+    return 1
+
+
+def patch_cow_stub(cpp_out: Path) -> int:
+    """`impl From<Cow<'_, T>> for Rc<T>` names `borrow::Cow<T>`; the borrow
+    module is not vendored. A forward declaration inside the wrap lets the
+    (never instantiated) member template parse."""
+    path = cpp_out / RC_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    marker = "// patcher: Cow stub (borrow module not vendored)"
+    if marker in text or "borrow::Cow<" not in text:
+        return 0
+    wrap = "namespace rusty::port::rc {\n"
+    if wrap not in text:
+        return 0
+    text = text.replace(wrap, wrap + "namespace borrow { template<class T> struct Cow; }  " + marker + "\n", 1)
+    path.write_text(text)
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# 2026-10 re-baseline: the vendored rc_port carried HAND-WRITTEN bodies that
+# no rule reproduced (lost on every regen). Each is codified here against
+# the current transpiler's signature spelling. The ports stay compile+test
+# targets, not byte-faithful std; see the comments inside each body.
+# ---------------------------------------------------------------------------
+VENDORED_FROM_BOX_IN_BODY = """        // Port: move the boxed value into a fresh Rc allocation (the
+        // Rust byte-relocation dance needs Box raw-parts APIs the port
+        // Box does not expose). Global-allocator paths only.
+        T value = std::move(rusty::detail::deref_if_pointer_like(src));
+        return Rc<T, A>::new_in(std::move(value), A{});
+"""
+VENDORED_UNIQUE_RC_NEW_IN_BODY = """        // Port: route through the healthy Rc allocation path, then
+        // rewire the counters to UniqueRc's invariant (strong=0,
+        // weak=1 — the implicit weak Rc already holds).
+        auto rc_md = rusty::mem::manually_drop_new(Rc<T, A>::new_in(std::move(value), std::move(alloc)));
+        Rc<T, A>& rc_ = *rc_md;
+        rc_.inner().strong.set(static_cast<size_t>(0));
+        A alloc_out = rusty::ptr::read(&rc_.alloc);
+        return UniqueRc<T, A>(std::move(rc_.ptr), rusty::PhantomData<RcInner<T>>{}, rusty::PhantomData<std::add_pointer_t<T>>{}, std::move(alloc_out));
+"""
+VENDORED_MAKE_MUT_BODY = """        auto size_of_val = sizeof(decltype(rusty::detail::deref_if_pointer_like(this_)));
+        if (Rc<T, rusty::alloc::Global>::strong_count(this_) != static_cast<size_t>(1)) {
+            this_ = Rc<std::remove_cvref_t<decltype((rusty::detail::deref_if_pointer_like(this_)))>, std::remove_cvref_t<decltype((A{}))>>::clone_from_ref_in(rusty::detail::deref_if_pointer_like(this_), A{});
+        } else if (Rc<T, rusty::alloc::Global>::weak_count(this_) != static_cast<size_t>(0)) {
+            // Port NOTE: Rust MOVES the value into a fresh allocation
+            // byte-wise; the port copy-constructs instead (the old
+            // value's destructor consequently never runs — same
+            // observable counts, extra copy). Raw-layout APIs the
+            // byte dance needs are not in the port.
+            Rc<T, A> fresh = Rc<T, A>::new_in(T(rusty::detail::deref_if_pointer_like(this_)), A{});
+            // @unsafe
+            {
+                this_.inner().dec_strong();
+                this_.inner().dec_weak();
+                rusty::ptr::write(&this_, std::move(fresh));
+            }
+        }
+        // @unsafe
+        {
+            return this_.ptr.as_mut().value;
+        }
+"""
+VENDORED_CLONE_FROM_REF_IN_BODY = """        // Port: Clone::clone == copy-construct; the UniqueRcUninit
+        // byte-clone dance needs raw-layout APIs the port lacks.
+        return Rc<T, A>::new_in(T(value), std::move(alloc));
+"""
+VENDORED_TRY_NEW_IN_BODY = """        // Port: allocate via the healthy Box path (Global-only; the
+        // Box raw-parts machinery the original used is not in the
+        // port Box).
+        (void)alloc;
+        return rusty::Result<Rc<T, A>, rusty::alloc::AllocError>::Ok(
+            Rc<T, A>::from_inner_in(
+                rusty::from_into<rusty::ptr::NonNull<RcInner<T>>>((rusty::Box<RcInner<T>>::new_(RcInner<T>{.strong = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .weak = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .value = std::move(value)})).leak()),
+                A{}));
+"""
+VENDORED_TRY_UNWRAP_BODY = """        if (Rc<T, rusty::alloc::Global>::strong_count(this_) == static_cast<size_t>(1)) {
+            auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+            Rc<T, A>& rc_ = *this_shadow1;
+            T val = rusty::ptr::read(const_cast<std::add_pointer_t<T>>(Rc<T, A>::as_ptr(rc_)));
+            A alloc = rusty::ptr::read(&rc_.alloc);
+            rc_.inner().dec_strong();
+            const auto _weak = Weak<T, A>(std::move(rc_.ptr), std::move(alloc));
+            return rusty::Result<T, Rc<T, A>>::Ok(std::move(val));
+        } else {
+            return rusty::Result<T, Rc<T, A>>::Err(std::move(this_));
+        }
+"""
+VENDORED_RC_DEREF_SHIMS = """    // Hand-written-Arc-compatibility extensions. Rust's std::rc::Rc<T>
+    // only allows immutable access through operator*; consumers needing
+    // mutation go through Cell<T> / RefCell<T>. The hand-written legacy
+    // `rusty::Rc<T>` exposed mutable access freely via `rc->`, so the
+    // mako rrr codebase (and ported transaction protocols) call `rc->m`
+    // and `rc.get()` directly. Surface these here to keep that code
+    // building after the rusty::Rc alias was retargeted at this
+    // transpiled port. @unsafe: this breaks Rust's aliasing invariants
+    // if multiple Rc holders coexist with mutators.
+    T& operator*() {
+        return const_cast<T&>(this->inner().value);
+    }
+    const T* operator->() const {
+        return &this->inner().value;
+    }
+    T* operator->() {
+        return const_cast<T*>(&this->inner().value);
+    }
+    T* get() {
+        return const_cast<T*>(&this->inner().value);
+    }
+    const T* get() const {
+        return &this->inner().value;
+    }
+"""
+
+
+def _replace_fn_body(text: str, sig_re: str, new_body: str, close: str) -> tuple[str, bool]:
+    """Replace the body of the function whose signature LINE matches sig_re
+    (multiline regex, the line ends with `{`). `close` is the line that ends
+    the function (`    }` for an in-class member, `}` for an out-of-line
+    definition). Idempotent when new_body is already there."""
+    m = re.search(sig_re, text, flags=re.M)
+    if not m:
+        return text, False
+    start = m.end()  # just after the `{` line's newline
+    end = text.find("\n" + close + "\n", start)
+    if end == -1:
+        return text, False
+    current = text[start + 1:end + 1]
+    if current == new_body:
+        return text, False
+    return text[:start + 1] + new_body + text[end + 1:], True
+
+
+def patch_vendored_hand_ports(cpp_out: Path) -> int:
+    path = cpp_out / RC_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text, _ = _replace_fn_body(text, r"^    static Rc<T, A> from_box_in\(rusty::Box<T, A> src\) \{$",
+                               VENDORED_FROM_BOX_IN_BODY, "    }")
+    text, _ = _replace_fn_body(text, r"^    static UniqueRc<T, A> new_in\(T value, A alloc\) \{$",
+                               VENDORED_UNIQUE_RC_NEW_IN_BODY, "    }")
+    # try_new_in: the Box raw-parts dance (`Box::into_unique(Box::try_new_in(..)?)`)
+    # — the port Box has no such API; the vendored body allocates via
+    # Box::new_().leak(). (Its `decltype((RUSTY_TRY_INTO(..)))` owner spelling
+    # also crashed clang 22's BMI reader.)
+    text, _ = _replace_fn_body(text, r"^    static rusty::Result<Rc<T, A>, rusty::alloc::AllocError> try_new_in\(T value, A alloc\) \{$",
+                               VENDORED_TRY_NEW_IN_BODY, "    }")
+    # try_unwrap: `ptr::read(&**this)` / `this.inner()` over the ManuallyDrop
+    # shadow — the emitter drops the ManuallyDrop deref on method receivers
+    # and on `&**x` (transpiler follow-up); the vendored body binds the Rc&.
+    text, _ = _replace_fn_body(text, r"^    static rusty::Result<T, Rc<T, A>> try_unwrap\(Rc<T, A> this_\) \{$",
+                               VENDORED_TRY_UNWRAP_BODY, "    }")
+    # make_mut / clone_from_ref_in are defined OUT OF LINE by the 2026
+    # transpiler; the body text is indentation-agnostic.
+    text, _ = _replace_fn_body(text, r"^T& Rc<T, A>::make_mut\(Rc<T, A>& this_\) \{$",
+                               VENDORED_MAKE_MUT_BODY, "}")
+    text, _ = _replace_fn_body(text, r"^Rc<T, A> Rc<T, A>::clone_from_ref_in\(const T& value, A alloc\) \{$",
+                               VENDORED_CLONE_FROM_REF_IN_BODY, "}")
+    # `rc->field` / `rc.get()` ergonomic shims (mako consumers), inside Rc.
+    if "T* operator->() {" not in text:
+        anchor = "    ~Rc() noexcept(false) {\n"
+        if anchor in text:
+            text = text.replace(anchor, VENDORED_RC_DEREF_SHIMS + anchor, 1)
+    # try_allocate_for_layout: the counters are Cell<usize>; the emitter
+    # typed `Cell::new(1)` from the literal.
+    text = text.replace("std::conditional_t<true, Cell<int32_t>, T>::new_(1)",
+                        "rusty::Cell<size_t>::new_(static_cast<size_t>(1))")
+    # data_offset<T>: the value's offset inside RcInner<T> is `offsetof`; the
+    # transpiled `data_offset_alignment(Alignment::of_val_raw(ptr))` route
+    # computed a wrong offset (into_raw/from_raw round trip segfaulted).
+    text, _ = _replace_fn_body(text, r"^size_t data_offset\(std::add_pointer_t<std::add_const_t<T>> ptr\) \{$",
+                               "    // Port: T is always sized here — the value's offset inside RcInner<T>.\n"
+                               "    (void)ptr;\n"
+                               "    return offsetof(RcInner<T>, value);\n", "}")
+    # UniqueRcUninit::data_ptr: `ptr.byte_add(offset)` on a raw pointer.
+    text = text.replace(
+        "rusty::detail::ptr_cast<std::add_pointer_t<T>>(rusty::as_ptr(this->ptr)->byte_add(std::move(offset)))",
+        "reinterpret_cast<std::add_pointer_t<T>>(reinterpret_cast<std::uintptr_t>(rusty::as_ptr(this->ptr)) + offset)")
+    if text == original:
+        return 0
+    path.write_text(text)
+    return 1
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -887,6 +1150,12 @@ def main() -> int:
         ("RcInner inc_/dec_/strong/weak methods", patch_rcinner_methods),
         ("drop_slow + clone alloc-ctor", patch_drop_slow_weak_ctor),
         ("NonNull<auto>::as_ptr", patch_nonnull_auto_static_calls),
+        ("append user-facing rusty::rc aliases", patch_append_user_facing_aliases),
+        ("string::String → rusty::String", patch_string_module_qualified_string),
+        ("from_raw: ptr.byte_sub → address arithmetic", patch_from_raw_byte_sub),
+        ("Cow forward-declaration stub", patch_cow_stub),
+        ("vendored hand-ports: from_box_in / UniqueRc::new_in / make_mut / clone_from_ref_in / deref shims / counters / data_ptr",
+            patch_vendored_hand_ports),
     ]
 
     total = 0

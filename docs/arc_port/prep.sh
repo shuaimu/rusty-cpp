@@ -32,3 +32,9 @@ sed -i \
   -e 's|use crate::slice::|use std::slice::|g' \
   "$SRC"
 echo "[arc_port prep] normalized $SRC"
+
+# 2026-10 (pinned 1.95.0 sync.rs): `#[cfg(not(no_global_oom_handling))]` on a
+# const (MAX_STATIC_INNER_SLICE_ALIGNMENT) is a predicate the transpiler
+# cannot preserve on a const item. The cfg is always true for us (we have
+# global OOM handling), so dropping the attribute keeps the item.
+sed -i '/^\s*#\[cfg(not(no_global_oom_handling))\]\s*$/d' "$SRC"

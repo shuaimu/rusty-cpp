@@ -8,6 +8,7 @@
 #include <charconv>
 #include <concepts>
 #include <cstddef>
+#include <cstdlib>
 #include <stddef.h>   // guarantee global ::size_t/::ptrdiff_t under header-unit include-translation
 #include <stdint.h>   // guarantee global ::u?int*_t under header-unit include-translation
 #include <cmath>
@@ -158,6 +159,14 @@ namespace rusty {
     /// always correct — a spin hint has no semantics — so unknown
     /// targets simply no-op.
     namespace hint {
+        /// `core::hint::assert_unchecked(cond)`: a debug assertion that the
+        /// optimizer may assume in release (UB when false, as in Rust).
+        inline void assert_unchecked(bool cond) noexcept {
+#ifndef NDEBUG
+            if (!cond) { std::abort(); }
+#endif
+            if (!cond) { __builtin_unreachable(); }
+        }
         inline void spin_loop() noexcept {
 #if (defined(__GNUC__) || defined(__clang__)) \
     && (defined(__x86_64__) || defined(__i386__))

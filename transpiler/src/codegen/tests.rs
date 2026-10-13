@@ -49928,3 +49928,80 @@ fn test_rusty_ext_stage1_foreign_trait_impl_gets_an_internal_lane() {
         "no twin: {out}"
     );
 }
+
+#[test]
+fn test_manually_drop_take_is_the_slot_member_call() {
+    // `ManuallyDrop::take(&mut slot)` moves the value out; rusty::mem spells
+    // it as the member `slot.take()` (mem.hpp), so the `&mut` is the receiver.
+    let out = transpile_str(
+        r#"
+        use std::mem::ManuallyDrop;
+        pub struct Inner<A> { pub alloc: ManuallyDrop<A>, pub n: usize }
+        pub struct Guard<'a, A>(pub &'a mut Inner<A>);
+        impl<A> Drop for Guard<'_, A> {
+            fn drop(&mut self) { let alloc = ManuallyDrop::take(&mut self.0.alloc); let _ = alloc; }
+        }
+        pub fn direct<A>(this: &mut Inner<A>) -> A { let a = ManuallyDrop::take(&mut this.alloc); a }
+        "#,
+    );
+    assert!(out.contains("(this->_0.alloc).take()"), "{out}");
+    assert!(out.contains("(this_.alloc).take()"), "{out}");
+    assert!(!out.contains("ManuallyDrop::take("), "{out}");
+}
+
+#[test]
+fn test_explicit_cxx_namespace_sibling_import_aliases_the_shared_wrap() {
+    // `--cxx-namespace rusty::port::vec` wraps EVERY module of the crate in
+    // the same namespace, so a sibling module's names live there — not under
+    // `::vec_port::raw_vec`, which no emitted file declares (the vec_port
+    // regen's "no member named 'vec_port' in the global namespace").
+    let file: syn::File = syn::parse_str(
+        r#"
+        use crate::raw_vec::RawVec;
+        pub struct IntoIter<T> { pub buf: RawVec<T>, pub n: usize }
+        "#,
+    )
+    .unwrap();
+    let mut cg = test_codegen();
+    cg.set_cxx_namespace(Some("rusty::port::vec".to_string()));
+    cg.crate_module_names.insert("vec_port.raw_vec".to_string());
+    cg.crate_module_names.insert("vec_port.vec.into_iter".to_string());
+    cg.emit_file(&file, Some("vec_port.vec.into_iter"));
+    let out = cg.into_output();
+    assert!(out.contains("import vec_port.raw_vec;"), "{out}");
+    assert!(!out.contains("::vec_port::"), "{out}");
+    assert!(
+        out.contains("namespace raw_vec = ::rusty::port::vec;"),
+        "the sibling alias must name the shared wrap:\n{out}"
+    );
+    assert!(!out.contains("using ::rusty::port::vec::RawVec;"), "{out}");
+}
+
+#[test]
+fn test_self_return_hint_instantiates_a_static_call_owner() {
+    // `-> Self` in `impl Default for Rc<str>`: the tail `Rc::from_raw(…)` must
+    // take its type args from the impl's self type, not leak `Rc<auto, auto>`
+    // (the UFCS lane) or an out-of-scope `Rc<T, Global>` (the member form).
+    let out = transpile_str(
+        r#"
+        pub struct Global;
+        pub struct Rc<T: ?Sized, A = Global> { ptr: *const T, alloc: A }
+        impl<T: ?Sized> Rc<T> {
+            pub fn from_raw(ptr: *const T) -> Self { Rc { ptr, alloc: Global } }
+            pub fn into_raw(this: Self) -> *const T { this.ptr }
+        }
+        impl Rc<[u8]> {
+            pub fn from_bytes(v: &[u8]) -> Rc<[u8]> { Rc { ptr: v as *const [u8], alloc: Global } }
+        }
+        impl Default for Rc<str> {
+            fn default() -> Self {
+                let rc = Rc::<[u8]>::from_bytes(b"");
+                unsafe { Rc::from_raw(Rc::into_raw(rc) as *const str) }
+            }
+        }
+        "#,
+    );
+    assert!(out.contains("Rc<std::string_view>::from_raw("), "{out}");
+    assert!(!out.contains("Rc<T, Global>::from_raw("), "{out}");
+    assert!(!out.contains("Rc<auto"), "{out}");
+}

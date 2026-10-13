@@ -3654,6 +3654,13 @@ impl CodeGen {
                                     #[rusty_cpp_conflict_params = #params]
                                 ));
                             }
+                            if impl_block
+                                .trait_
+                                .as_ref()
+                                .is_some_and(|(_, path, _)| impl_trait_is_comparison_trait(path))
+                            {
+                                merged.attrs.push(syn::parse_quote!(#[rusty_cpp_comparison_trait]));
+                            }
                             let key = impl_method_conflict_key(&merged);
                             if seen_method_keys.contains(&key) {
                                 resolve_impl_method_conflict(
@@ -5275,6 +5282,13 @@ impl CodeGen {
                     );
                     if impl_is_automatically_derived {
                         mark_method_automatically_derived(&mut merged);
+                    }
+                    if impl_block
+                        .trait_
+                        .as_ref()
+                        .is_some_and(|(_, path, _)| impl_trait_is_comparison_trait(path))
+                    {
+                        merged.attrs.push(syn::parse_quote!(#[rusty_cpp_comparison_trait]));
                     }
                     let key = impl_method_conflict_key(&merged);
                     if seen_method_keys.contains(&key) {

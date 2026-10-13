@@ -14644,6 +14644,11 @@ impl CodeGen {
                 if matches!(un.op, syn::UnOp::Deref(_)) && !self.is_expr_raw_pointer_like(&un.expr)
                 {
                     let operand = self.peel_paren_group_expr(&un.expr);
+                    // `*md` over a ManuallyDrop is operator* (the payload);
+                    // see the no-expected arm.
+                    if self.method_receiver_is_manually_drop_expr(&un.expr) {
+                        return format!("*{}", self.emit_expr_to_string(operand));
+                    }
                     // issue #34: `*x.borrow_mut() = v` where the receiver is
                     // GENERIC. `borrow_mut` counts as reference-returning
                     // unless the receiver is a KNOWN RefCell, so an
@@ -14700,8 +14705,13 @@ impl CodeGen {
                                                     | "Ref"
                                                     | "RefMut"
                                                     | "MutexGuard"
-                                                    | "SpinMutexGuard"                                                    | "RwLockReadGuard"
+                                                    | "SpinMutexGuard"
+                                                    | "RwLockReadGuard"
                                                     | "RwLockWriteGuard"
+                                                    // `*md` is operator* (the payload): a
+                                                    // `ManuallyDrop<Rc<T>>` local is a deref
+                                                    // owner even though its type names `T`.
+                                                    | "ManuallyDrop"
                                             )
                                         }));
                                     !local_is_known_deref_owner
@@ -14901,8 +14911,12 @@ impl CodeGen {
                         // Keep pointer shape for reborrows in pointer-typed contexts.
                         return self.emit_expr_to_string_with_expected(&un.expr, expected_ty);
                     }
+                    // A ManuallyDrop local's `*` is operator* (the payload):
+                    // `Self::as_ptr(&*this)` over `let this = ManuallyDrop::new(this)`
+                    // must keep the deref (same guard as the no-expected path).
                     if matches!(un.op, syn::UnOp::Deref(_))
                         && self.should_collapse_reborrow_of_deref_operand(&un.expr)
+                        && !self.method_receiver_is_manually_drop_expr(&un.expr)
                     {
                         return self.emit_expr_to_string_with_expected(ref_inner, expected_ty);
                     }
@@ -20545,6 +20559,20 @@ impl CodeGen {
                 let inner = self.emit_expr_to_string(&call.args[0]);
                 return format!("({})", inner);
             }
+            if call.args.len() == 1
+                && matches!(
+                    joined.as_str(),
+                    "hint::assert_unchecked"
+                        | "std::hint::assert_unchecked"
+                        | "core::hint::assert_unchecked"
+                )
+            {
+                // `unsafe { hint::assert_unchecked(cond) }`: a debug assertion
+                // the optimizer may assume (rusty.hpp `rusty::hint`); the
+                // Rust path otherwise leaks as `std::hint::assert_unchecked`.
+                let cond = self.emit_expr_to_string(&call.args[0]);
+                return format!("rusty::hint::assert_unchecked({})", cond);
+            }
             if call.args.is_empty()
                 && matches!(
                     joined.as_str(),
@@ -22495,6 +22523,25 @@ impl CodeGen {
                 "rusty::RefCell<std::remove_cvref_t<decltype(({}))>>::new_({})",
                 arg, arg
             );
+        }
+        if matches!(
+            func.as_str(),
+            "ManuallyDrop::take"
+                | "rusty::mem::ManuallyDrop::take"
+                | "std::mem::ManuallyDrop::take"
+                | "core::mem::ManuallyDrop::take"
+        ) && call.args.len() == 1
+        {
+            // Rust's `ManuallyDrop::take(&mut slot) -> T` is a static fn that
+            // moves the value out; rusty::mem::ManuallyDrop spells it as the
+            // member `slot.take()` (include/rusty/mem.hpp) — the `&mut` is the
+            // receiver, not an argument. (The vendored vec port carried this
+            // as a hand-fix; `IntoIter`'s DropGuard is the shape.)
+            let slot = match self.peel_paren_group_expr(&call.args[0]) {
+                syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
+                other => self.emit_expr_to_string(other),
+            };
+            return format!("({}).take()", slot);
         }
         if matches!(
             func.as_str(),
@@ -26048,6 +26095,13 @@ impl CodeGen {
                     };
                     if collapse_local_nonpointer_path {
                         return self.emit_expr_to_string(&un.expr);
+                    }
+                    // `*md` over a ManuallyDrop is operator* (the payload) —
+                    // never a Rust-reference deref to collapse, whatever the
+                    // binding's reference bookkeeping says (`let this =
+                    // ManuallyDrop::new(this)` shadows a by-value param).
+                    if self.method_receiver_is_manually_drop_expr(&un.expr) {
+                        return format!("*{}", self.emit_expr_to_string(&un.expr));
                     }
                     if matches!(self.peel_paren_group_expr(&un.expr), syn::Expr::Field(_))
                         && !self.is_expr_raw_pointer_like(&un.expr)

@@ -465,10 +465,20 @@ impl CodeGen {
     /// Namespace owning the exports of a generated C++ module. Consumer maps
     /// may deliberately project several named modules into one flat namespace.
     pub(super) fn consumer_cpp_namespace_for_module(&self, cpp_module: &str) -> String {
-        self.consumer_module_map
-            .entry_for_cpp_module(cpp_module)
-            .map(|entry| entry.cpp_namespace.clone())
-            .unwrap_or_else(|| cpp_module.replace('.', "::"))
+        if let Some(entry) = self.consumer_module_map.entry_for_cpp_module(cpp_module) {
+            return entry.cpp_namespace.clone();
+        }
+        // An EXPLICIT `--cxx-namespace NS` wraps every module of the crate in
+        // the same `namespace NS { … }` (a vec_port regen: `vec_port.raw_vec`
+        // and `vec_port.vec.into_iter` both open `rusty::port::vec`), so a
+        // sibling's names live under NS, not under its module path. Only
+        // `--auto-namespace` gives each module a namespace of its own.
+        if !self.auto_namespace
+            && let Some(ns) = self.cxx_namespace.as_deref()
+        {
+            return ns.to_string();
+        }
+        cpp_module.replace('.', "::")
     }
 
     /// Given a single Rust use-path segment (e.g. `node`, taken from

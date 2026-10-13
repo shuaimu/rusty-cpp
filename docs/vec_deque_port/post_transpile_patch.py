@@ -1173,6 +1173,35 @@ def _vecdeque_real_clone_and_clone_backed_copy(text: str) -> str:
     return text
 
 
+# The user-facing `rusty::collections::VecDeque` alias after the namespace
+# wrap, hand-written at the first vendoring; lost by every regen until now.
+USER_FACING_ALIAS = """
+// User-facing alias mirroring Rust's `std::collections::VecDeque`.
+// End users write `rusty::collections::VecDeque<T>` and don't observe
+// the underlying `rusty::port::*` transpilation scaffolding.
+export namespace rusty::collections {
+    template<typename T, typename A = ::rusty::alloc::Global>
+        requires (rusty::alloc::Allocator<A>)
+    using VecDeque = ::rusty::port::collections::vec_deque::VecDeque<T, A>;
+}
+"""
+
+
+def patch_append_user_facing_alias(cpp_out: Path) -> int:
+    path = cpp_out / "vec_deque_port.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if "export namespace rusty::collections {" in text:
+        return 0
+    anchor = "} // namespace rusty::port::collections::vec_deque\n"
+    if anchor not in text:
+        return 0
+    idx = text.rindex(anchor) + len(anchor)
+    path.write_text(text[:idx] + USER_FACING_ALIAS + text[idx:])
+    return 1
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -1184,6 +1213,8 @@ def main() -> int:
 
     n = patch_all_files(cpp_out)
     print(f"vec_deque_port patches applied to {n} file(s)")
+    if patch_append_user_facing_alias(cpp_out):
+        print("  applied: append user-facing rusty::collections::VecDeque alias")
     return 0
 
 

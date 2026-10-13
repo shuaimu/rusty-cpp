@@ -516,6 +516,16 @@ def patch_stub_dropped_iter_types(cpp_out: Path) -> int:
     if not matches:
         return 0
     insert_at = matches[-1].end()
+    # Under the `--cxx-namespace rusty::port::vec` wrap the stubs must be
+    # INSIDE it: a `SpecFromIter` forward-declared at global scope is a
+    # different template from the `rusty::port::vec::SpecFromIter` the
+    # fallback definition later supplies, and `Vec::from_iter` binds the
+    # global one at definition time ("implicit instantiation of undefined
+    # template 'SpecFromIter<…>'").
+    wrap_open = "\nnamespace rusty::port::vec {\n"
+    wrap_at = text.find(wrap_open)
+    if wrap_at != -1:
+        insert_at = wrap_at + len(wrap_open)
     # When an aux module is in the build, vec.cppm `import`s it and
     # gets the real binary arity; skip stubbing it then.
     has_into_iter_import = "import vec_port.vec.into_iter;" in text
@@ -653,12 +663,11 @@ struct SpecFromElem {
     static auto from_elem(T elem, std::size_t n, A alloc);
 };
 
-// SpecFromIter stub — used in from_iter dispatch.
+// SpecFromIter — forward declaration only; the definition (a generic
+// push-loop fallback, patch_inject_spec_from_iter_fallback_def) follows
+// `struct Vec`, which its return type names.
 template<typename T, typename Iter>
-struct SpecFromIter {
-    template<typename I>
-    static auto from_iter(I);
-};
+struct SpecFromIter;
 
 // SpecExtend stub.
 template<typename T, typename Iter>
@@ -886,6 +895,9 @@ def patch_castproxy_implicit_conv(cpp_out: Path) -> int:
             "this->ptr_field.cast().as_non_null_ptr()",
             "this->ptr_field.cast()",
         )
+        # Any receiver spelling (`ptr_field.cast()`, `this->ptr.cast()`):
+        # the CastProxy → NonNull<T> conversion is what the return needs.
+        text = re.sub(r"\.cast\(\)\.as_non_null_ptr\(\)", ".cast()", text)
         if text != original:
             path.write_text(text)
             n += 1
@@ -1579,6 +1591,16 @@ def patch_into_iter_runtime_body(cpp_out: Path) -> int:
         )
         if old_sh in t:
             t = t.replace(old_sh, new_sh)
+        # 2026-10 transpiler: no IS_ZST ternary, `offset_from_unsigned` on
+        # the raw pointer (a `std::string_view*` has no such member).
+        old_sh2 = (
+            "    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {\n"
+            "        auto exact = (rusty::detail::deref_if_pointer_like(this->end).offset_from_unsigned(this->ptr));\n"
+            "        return std::make_tuple(std::move(exact), rusty::Option<size_t>(std::move(exact)));\n"
+            "    }"
+        )
+        if old_sh2 in t:
+            t = t.replace(old_sh2, new_sh)
 
         # as_raw_mut_slice — wrong return type wrapping
         old_asraw = (
@@ -1693,14 +1715,16 @@ def patch_into_iter_more_fixes(cpp_out: Path) -> int:
             )
             text = text[:sidx] + stub + text[eidx + 7:]
 
-    # Fix 5: stub default_() — the body calls `super::rusty::Vec<...>::new_in`
-    # and `super::` is a Rust keyword that the transpiler doesn't resolve
-    # here (pre-existing limitation; sole non-comment `super::` in the whole
-    # port corpus). Regex-match tolerates template-arg + default-expr drift
-    # (`<auto>` → `<decltype(...)>`, `A::default_()` → `default_like<A>()`).
+    # Fix 5: stub default_() — the body calls `super::Vec::new_in`, and `Vec`
+    # lives in the parent partition (vec_port.vec) that IMPORTS this one: a
+    # module cycle no forward declaration can break (`Vec<T>` is a
+    # non-dependent template name, looked up at definition). Regex-match
+    # tolerates template-arg + default-expr + qualifier drift (`<auto>` →
+    # `<decltype(...)>`, `A::default_()` → `default_like<A>()`, with or
+    # without a `super::`/`rusty::` prefix — 2026-10 emits a bare `Vec<T>`).
     text = re.sub(
         r"    static IntoIter<T, A> default_\(\) \{\n"
-        r"        return rusty::iter\(super::rusty::Vec<.*>::new_in\(.*\)\);\n"
+        r"        return rusty::iter\((?:super::)?(?:rusty::)?Vec<.*>::new_in\(.*\)\);\n"
         r"    \}",
         "    static IntoIter<T, A> default_() {\n"
         "        // STUBBED: super::rusty::Vec::new_in path doesn't resolve\n"
@@ -2638,6 +2662,347 @@ target_sources(vec_port PUBLIC FILE_SET CXX_MODULES FILES
     return 1
 
 
+# ---------------------------------------------------------------------------
+# 2026-10 re-baseline (transpiler @ rusty_ext removal): three drifts.
+# ---------------------------------------------------------------------------
+
+def patch_dedupe_method_dispatch_macros(cpp_out: Path) -> int:
+    """The drain/extract_if/aux merges paste each source module's
+    `namespace rusty { namespace detail { RUSTY_METHOD_DISPATCH(m) ... } }`
+    block into vec.cppm, so a method name two modules both dispatch
+    (`next`) defines `rusty::detail::__mdisp_next` twice in one TU
+    ("redefinition of '__mdisp_next'"). Keep the first expansion of each
+    name, drop the later duplicates (the macro only declares the functor).
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        seen: set[str] = set()
+        out = []
+        changed = False
+        for line in text.split("\n"):
+            m = re.match(r"^RUSTY_METHOD_DISPATCH\(([A-Za-z_0-9]+)\)\s*$", line)
+            if m:
+                if m.group(1) in seen:
+                    changed = True
+                    continue
+                seen.add(m.group(1))
+            out.append(line)
+        if changed:
+            path.write_text("\n".join(out))
+            n += 1
+    return n
+
+
+SPEC_FROM_ITER_FALLBACK = (
+    "// SpecFromIter generic fallback (re-baselined from the vendored port,\n"
+    "// where it was a hand-fix the patcher never carried): iterate the input\n"
+    "// and push each item into a fresh Vec<T>. Defined after `struct Vec` so\n"
+    "// the return type is complete; forward-declared before it so Vec's own\n"
+    "// `from_iter` can name it.\n"
+    "template<typename T, typename Iter>\n"
+    "struct SpecFromIter {\n"
+    "    template<typename I>\n"
+    "    static Vec<T> from_iter(I iter) {\n"
+    "        auto vec = Vec<T>::new_();\n"
+    "        while (true) {\n"
+    "            auto next = iter.next();\n"
+    "            if (next.is_none()) break;\n"
+    "            // deref_if_pointer handles slice_iter::Iter (yields T*) and\n"
+    "            // reference-yielding iterators (yields T&/const T&) uniformly.\n"
+    "            vec.push(rusty::detail::deref_if_pointer(next.unwrap()));\n"
+    "        }\n"
+    "        return vec;\n"
+    "    }\n"
+    "};\n"
+)
+
+
+
+def patch_inject_spec_from_iter_fallback_def(cpp_out: Path) -> int:
+    """`struct SpecFromIter { template<typename I> static auto from_iter(I); }`
+    is the stub the pipeline keeps for the dropped spec_from_iter module;
+    `Vec::from_iter` calls it. The vendored port carried an out-of-line
+    generic definition (a push loop) as an un-codified hand-fix. Inject it
+    right after the struct definition of `Vec` (it needs `Vec<T>` complete),
+    once per file.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        if "\nstruct SpecFromIter {\n" in text:
+            continue
+        if "struct SpecFromIter;" not in text:
+            continue
+        # after the end of `struct Vec { ... };` — the first `};` that closes
+        # a line-start `struct Vec {` block (brace-matched).
+        sidx = text.find("\nstruct Vec {\n")
+        if sidx < 0:
+            continue
+        depth = 0
+        i = sidx + 1
+        end = -1
+        while i < len(text):
+            c = text[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = text.find(";", i) + 1
+                    break
+            i += 1
+        if end <= 0:
+            continue
+        text = text[:end] + "\n\n" + SPEC_FROM_ITER_FALLBACK + text[end:]
+        path.write_text(text)
+        n += 1
+    return n
+
+
+VEC_SPEC_EXTEND_MEMBER = (
+    "    // spec_extend: the SpecExtend impls live in the dropped spec_extend\n"
+    "    // module (the lane for a generic trait with several impls on one self\n"
+    "    // type keys them by the iterator type; the port keeps none). One generic\n"
+    "    // member stands in for all of them: pull and push. Reached from\n"
+    "    // extend_from_slice (slice iter: yields const T*, pushed as a copy) and\n"
+    "    // Extend::extend (owning iterators: yields T).\n"
+    "    template<typename I>\n"
+    "    void spec_extend(I iterator) {\n"
+    "        while (true) {\n"
+    "            auto opt = iterator.next();\n"
+    "            if (opt.is_none()) break;\n"
+    "            this->push(rusty::detail::deref_if_pointer(opt.unwrap()));\n"
+    "        }\n"
+    "    }\n"
+)
+
+
+def patch_inject_vec_spec_extend_member(cpp_out: Path) -> int:
+    """`extend_from_slice` and `Extend::extend` call `this->spec_extend(...)`
+    on Vec; the member came from the one SpecExtend impl the old emission
+    merged into the struct, which the lane lowering no longer does (and the
+    spec_extend module is dropped anyway). Inject one generic member ahead
+    of `extend_from_slice`.
+    """
+    n = 0
+    anchor = "    void extend_from_slice(std::span<const T> other) {\n"
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        if "    void spec_extend(I iterator) {" in text or anchor not in text:
+            continue
+        text = text.replace(anchor, VEC_SPEC_EXTEND_MEMBER + anchor, 1)
+        path.write_text(text)
+        n += 1
+    return n
+
+
+# The hand-written tail after the port's namespace wrap: the user-facing
+# `rusty::vec::Vec` alias and the module-purview `rusty::boxed::into_vec`
+# overloads (the `vec![…]` lowering's std::array -> Vec conversion). Neither
+# comes from rust-src; they were appended by hand at the first vendoring and
+# were lost by every regen until this rule.
+USER_FACING_TAIL = """
+// All top-level `::Vec` / `::Drain` / `::IntoIter` aliases removed.
+// They collided with importers' file-scope using-decls. Specifically,
+// transpiler-emitted `using rusty::Vec;` in user crates (smallvec,
+// arrayvec, …) creates a `Vec` in file scope. If `::Vec` exists at
+// file scope (via vec_port export), both decls compete for the same
+// unqualified name and clang errors with "target of using declaration
+// conflicts with declaration already in scope".
+//
+// Consumers use one of:
+//   * `::rusty::port::vec::Vec<T, A>` — internal port code (deepest)
+//   * `rusty::vec::Vec<T, A>` — mirrors Rust's `std::vec::Vec`
+//   * `rusty::Vec<T, A>` — short alias from the umbrella module
+
+// User-facing alias mirroring Rust's `std::vec::Vec`. End users write
+// `rusty::vec::Vec<T>` and don't observe the `rusty::port::*`
+// transpilation scaffolding.
+export namespace rusty::vec {
+    template<typename T, typename A = ::rusty::alloc::Global>
+        requires (rusty::alloc::Allocator<A>)
+    using Vec = ::rusty::port::vec::Vec<T, A>;
+}
+
+// `rusty::boxed::into_vec(std::array<T, N>)` — module-purview overload
+// that converts a `std::array` to a `rusty::Vec<T>`. The header version
+// in `include/rusty/rusty.hpp` (GMF) can't reference `rusty::Vec` (which
+// is module-only), so it falls back to identity. The transpiler emits
+// `rusty::boxed::into_vec(rusty::boxed::box_new(std::array{…}))` for the
+// Rust `vec![…]` macro; without this overload the result stays a
+// `std::array` and call sites expecting `rusty::Vec<T>` (e.g.
+// `SmallVec::from_vec`, `assert_eq!(rusty::collect_range(...), vec![...])`)
+// fail with "no viable conversion from std::array<T, N> to rusty::Vec<T>".
+export namespace rusty::boxed {
+    template<typename T, std::size_t N>
+    constexpr ::rusty::port::vec::Vec<std::remove_cv_t<T>>
+    into_vec(std::array<T, N>&& arr) {
+        // Move elements out one by one rather than `from_iter(arr)` —
+        // `rusty::iter(arr)` returns a slice_iter whose `next()` yields
+        // `const T&`, so `from_iter` ends up copy-constructing T. For
+        // move-only types (rusty::String, rusty::Box, OnceCell, …) the
+        // copy is deleted and clang errors with "call to deleted
+        // constructor". Reserve once and push moved elements.
+        using ElemT = std::remove_cv_t<T>;
+        ::rusty::port::vec::Vec<ElemT> out =
+            ::rusty::port::vec::Vec<ElemT>::with_capacity(N);
+        for (auto&& elem : arr) {
+            out.push(std::move(elem));
+        }
+        return out;
+    }
+    template<typename T, std::size_t N>
+    constexpr ::rusty::port::vec::Vec<std::remove_cv_t<T>>
+    into_vec(const std::array<T, N>& arr) {
+        // Const lvalue path — element copy is unavoidable; constrain
+        // to copy-constructible T so move-only T+const-lvalue is a
+        // compile-time error rather than a silent copy-of-deleted.
+        static_assert(std::is_copy_constructible_v<T>,
+            "into_vec(const std::array&) requires copy-constructible T; "
+            "use std::move(arr) for move-only element types");
+        using ElemT = std::remove_cv_t<T>;
+        ::rusty::port::vec::Vec<ElemT> out =
+            ::rusty::port::vec::Vec<ElemT>::with_capacity(N);
+        for (const auto& elem : arr) {
+            out.push(elem);
+        }
+        return out;
+    }
+}
+
+"""
+
+
+def patch_append_user_facing_tail(cpp_out: Path) -> int:
+    f = cpp_out / "vec_port.vec.cppm"
+    if not f.exists():
+        return 0
+    text = f.read_text()
+    if "export namespace rusty::vec {" in text:
+        return 0
+    close = "} // namespace rusty::port::vec\n"
+    if close not in text:
+        return 0
+    idx = text.rindex(close) + len(close)
+    f.write_text(text[:idx] + USER_FACING_TAIL + text[idx:])
+    return 1
+
+
+def patch_unqualify_wrapped_free_fn_self_calls(cpp_out: Path) -> int:
+    """`--cxx-namespace rusty::port::vec` is a textual wrap: the transpiler
+    still spells a crate-root free function's self-call global-qualified
+    (`::capacity_overflow()`), which no longer names anything once the
+    definition sits inside the wrap. Unqualify every `::f(` whose `f` is
+    declared as a free function in the same file."""
+    import re as _re
+    n = 0
+    for f in sorted(cpp_out.glob("vec_port*.cppm")):
+        text = f.read_text()
+        decls = set(_re.findall(r"^(?:constexpr |inline |static )*(?:void|auto|bool|[A-Za-z_][\w:<>, ]*) ([a-z_][a-z_0-9]*)\(", text, flags=_re.M))
+        new = text
+        for name in decls:
+            new = _re.sub(r"(?<![\w:>])::" + name + r"\(", name + "(", new)
+        if new != text:
+            f.write_text(new); n += 1
+    return n
+
+
+def patch_flatten_merged_wraps(cpp_out: Path) -> int:
+    """Every merged aux module brought its OWN `namespace rusty::port::vec {`
+    … `} // namespace rusty::port::vec` wrap and its purview-scope
+    `namespace rusty { namespace detail { RUSTY_METHOD_DISPATCH(..) } }`
+    block. Spliced inside vec.cppm's wrap they nest: the inner wrap declares
+    `rusty::port::vec::rusty::port::vec`, and the dispatch block a
+    `rusty::port::vec::rusty::detail` that then shadows `::rusty` for every
+    `rusty::alloc::Global` after it ("no member named 'alloc' in namespace
+    'rusty::port::vec::rusty'"). Keep one wrap (first open, last close) and
+    hoist every dispatch block above it."""
+    f = cpp_out / "vec_port.vec.cppm"
+    if not f.exists():
+        return 0
+    lines = f.read_text().split("\n")
+    OPEN = "namespace rusty::port::vec {"
+    CLOSE = "} // namespace rusty::port::vec"
+    D_OPEN = "namespace rusty { namespace detail {"
+    D_CLOSE = "} } // namespace rusty::detail (issue #31 deref_call dispatch)"
+    opens = [i for i, l in enumerate(lines) if l == OPEN]
+    closes = [i for i, l in enumerate(lines) if l == CLOSE]
+    if len(opens) <= 1 and len(closes) <= 1:
+        return 0
+    first_open, last_close = opens[0], closes[-1]
+    # dispatch blocks after the first wrap open
+    hoisted, drop = [], set()
+    i = first_open
+    while i < len(lines):
+        if lines[i] == D_OPEN:
+            j = i
+            while j < len(lines) and lines[j] != D_CLOSE:
+                j += 1
+            if j < len(lines):
+                hoisted.extend(lines[i:j + 1])
+                drop.update(range(i, j + 1))
+                i = j + 1
+                continue
+        i += 1
+    drop.update(o for o in opens if o != first_open)
+    drop.update(c for c in closes if c != last_close)
+    out = []
+    for i, l in enumerate(lines):
+        if i == first_open and hoisted:
+            out.extend(hoisted)
+            out.append("")
+        if i in drop:
+            continue
+        out.append(l)
+    f.write_text("\n".join(out))
+    return 1
+
+
+# The global `::RawVec<T, A>` alias after raw_vec's namespace wrap: the
+# vendored vec_deque / linked_list / binary_heap ports say `using ::RawVec;`.
+# Hand-written at the first vendoring; lost by every regen until this rule.
+RAW_VEC_GLOBAL_ALIAS_TAIL = """
+// Backward-compat global aliases: existing consumers using `::RawVec<T,A>`
+// (or unqualified `RawVec<T,A>` from inside another file in this namespace)
+// keep working. The canonical type lives in `rusty::port::vec::RawVec`.
+export template<typename T, typename A = ::rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+using RawVec = ::rusty::port::vec::RawVec<T, A>;
+
+"""
+
+
+def patch_append_raw_vec_global_alias(cpp_out: Path) -> int:
+    f = cpp_out / "vec_port.raw_vec.cppm"
+    if not f.exists():
+        return 0
+    text = f.read_text()
+    if "using RawVec = ::rusty::port::vec::RawVec<T, A>;" in text:
+        return 0
+    close = "} // namespace rusty::port::vec\n"
+    if close not in text:
+        return 0
+    idx = text.rindex(close) + len(close)
+    f.write_text(text[:idx] + RAW_VEC_GLOBAL_ALIAS_TAIL + text[idx:])
+    return 1
+
+
+def patch_strip_cast_as_non_null_ptr_late(cpp_out: Path) -> int:
+    """Late pass of patch_castproxy_implicit_conv: `.cast().as_non_null_ptr()`
+    returns NonNull<u8> (CastProxy's source) where NonNull<T> is needed; the
+    early rule runs before the rule that (re)writes RawVecInner::non_null, so
+    the spelling survives it."""
+    import re as _re
+    n = 0
+    for f in sorted(cpp_out.glob("vec_port*.cppm")):
+        text = f.read_text()
+        new = _re.sub(r"\.cast\(\)\.as_non_null_ptr\(\)", ".cast()", text)
+        if new != text:
+            f.write_text(new); n += 1
+    return n
+
+
 def main(cpp_out: Path):
     patches = [
         ("set_len_on_drop copy-assign", patch_set_len_on_drop_copy_assign),
@@ -2761,6 +3126,28 @@ def main(cpp_out: Path):
         ("current-transpiler qualification drift (rusty::keyword / rusty::rusty:: / ptr::cast)",
             patch_current_transpiler_qualification_drift),
         ("trim CMakeLists to core 6", patch_trim_cmakelists),
+        # 2026-10 re-baseline (after every merge).
+        ("flatten the merged aux modules' nested wraps + hoist dispatch blocks",
+            patch_flatten_merged_wraps),
+        ("dedupe RUSTY_METHOD_DISPATCH across merged modules",
+            patch_dedupe_method_dispatch_macros),
+        ("inject SpecFromIter::from_iter generic fallback (lost hand-fix)",
+            patch_inject_spec_from_iter_fallback_def),
+        ("inject Vec::spec_extend generic member (dropped spec_extend module)",
+            patch_inject_vec_spec_extend_member),
+        ("append the user-facing rusty::vec alias + rusty::boxed::into_vec tail",
+            patch_append_user_facing_tail),
+        ("unqualify `::f(` self-calls of free fns inside the namespace wrap",
+            patch_unqualify_wrapped_free_fn_self_calls),
+        ("append the global ::RawVec alias after raw_vec's wrap (consumers' `using ::RawVec;`)",
+            patch_append_raw_vec_global_alias),
+        ("strip .cast().as_non_null_ptr() (late pass)",
+            patch_strip_cast_as_non_null_ptr_late),
+        # The into_iter anchors spell `rusty::from_raw_parts_mut`, which only
+        # exists AFTER the bare-namespace rewrite above; the early pass sees
+        # `slice::from_raw_parts_mut` and skips. Idempotent, so run it again.
+        ("into_iter Phase B (late pass, after the namespace rewrites)",
+            patch_into_iter_runtime_body),
     ]
     total = 0
     for name, fn in patches:

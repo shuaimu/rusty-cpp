@@ -17,7 +17,9 @@ module;
 #include <string_view>
 #include <charconv>
 #include <cstdlib>
+#include <cstdio>
 #include <bit>
+#include <cwctype>
 #include <stdexcept>
 #include <print>
 #include <immintrin.h>
@@ -39,7 +41,7 @@ export struct SetLenOnDrop {
     size_t local_len;
     mutable bool _rusty_forgotten = false;
     SetLenOnDrop(size_t& len_init, size_t local_len_init) : len(len_init), local_len(std::move(local_len_init)) {}
-    SetLenOnDrop(const SetLenOnDrop&) = default;
+    SetLenOnDrop(const SetLenOnDrop&) = delete;
     SetLenOnDrop(SetLenOnDrop&& other) noexcept : len(other.len), local_len(std::move(other.local_len)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
@@ -53,7 +55,7 @@ export struct SetLenOnDrop {
         new (this) SetLenOnDrop(std::move(other));
         return *this;
     }
-    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; rusty::detail::mark_forgotten_if_supported(this->local_len); }
 
 
     static SetLenOnDrop new_(size_t& len);
@@ -81,8 +83,3 @@ SetLenOnDrop::~SetLenOnDrop() noexcept(false) {
 }
 
 } // namespace rusty::port::vec
-
-// Backward-compat global alias: `::SetLenOnDrop` keeps working for
-// existing consumers (vec_port.vec internal refs, patcher rules).
-// The canonical type lives in `rusty::port::vec::SetLenOnDrop`.
-export using SetLenOnDrop = ::rusty::port::vec::SetLenOnDrop;
