@@ -46642,6 +46642,7 @@ impl CodeGen {
                 | "leak"
                 | "into_pin"
                 | "into_inner"
+                | "into_inner_with_allocator"
         ) {
             return None;
         }
@@ -47450,6 +47451,7 @@ impl CodeGen {
                     // `this: Self` by value / `&mut Self` — the pointer itself.
                     | "into_raw" | "into_raw_with_allocator" | "unwrap_or_clone"
                     | "make_mut" | "allocator" | "into_unique" | "leak" | "into_pin"
+                    | "into_inner_with_allocator"
             )
             && let Some(first) = call.args.first()
         {
@@ -47464,6 +47466,7 @@ impl CodeGen {
                 method_name.as_str(),
                 "into_raw" | "into_raw_with_allocator" | "unwrap_or_clone" | "make_mut"
                     | "allocator" | "into_unique" | "leak" | "into_pin"
+                    | "into_inner_with_allocator"
             );
             if (takes_self_by_value || self.infer_simple_expr_type(arg).is_none())
                 && matches!(arg, syn::Expr::Path(p) if p.path.segments.len() == 1)

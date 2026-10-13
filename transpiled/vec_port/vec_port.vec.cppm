@@ -4105,6 +4105,112 @@ struct Vec {
     void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; rusty::detail::mark_forgotten_if_supported(this->buf); rusty::detail::mark_forgotten_if_supported(this->len_field); }
 
 
+    // ── C++-ergonomic shortcuts (hand-added so that
+    // `using rusty::Vec = Vec<T,A>` can become a drop-in replacement for
+    // the legacy rusty::VecLegacy class: default ctor, initializer-list
+    // ctor, size_t-capacity ctor, make(), size() alias, mutable
+    // operator[], and begin()/end() iterators). Codify in
+    // post_transpile_patch.py before re-transpiling vec_port. ──────────
+    Vec() requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::new_()), len_field(0) {}
+    explicit Vec(size_t capacity) requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::with_capacity_in(capacity, A{})), len_field(0) {}
+    Vec(std::initializer_list<T> init) requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::with_capacity_in(init.size(), A{})), len_field(0) {
+        for (auto& item : init) {
+            this->push(std::move(const_cast<T&>(item)));
+        }
+    }
+    // Wrap a std::vector<T> into a rusty::Vec (moving elements). Used by the
+    // transpiler's `Vec::from_iter` lowering, which collects into a std::vector
+    // via `rusty::collect_range` and then re-wraps so rusty::Vec methods
+    // (sort_by, partial_cmp, ...) remain available. The implicit deduction
+    // guide handles `rusty::Vec(std::vector<E>{...})` -> Vec<E, Global>.
+    // Codify in post_transpile_patch.py before re-transpiling vec_port.
+    Vec(std::vector<T> init) requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::with_capacity_in(init.size(), A{})), len_field(0) {
+        for (auto& item : init) {
+            this->push(std::move(item));
+        }
+    }
+    static Vec<T, A> make() requires std::is_default_constructible_v<A> {
+        return Vec<T, A>();
+    }
+    size_t size() const { return this->len_field; }
+    // Templated on I (matching the const overload's shape) so calls like
+    // `vec[0]` (where 0 is int) don't fall into ambiguity between const
+    // operator[]<I> and a size_t-only mutable overload.
+    template<typename I>
+    T& operator[](I index) { return this->as_mut_ptr()[index]; }
+    // Rust `Vec::get(index) -> Option<&T>` (bounds-checked borrow).
+    rusty::Option<const T&> get(size_t index) const {
+        if (index < this->len_field) {
+            return rusty::Option<const T&>(this->as_ptr()[index]);
+        }
+        return rusty::Option<const T&>(rusty::None);
+    }
+    T* begin() { return this->as_mut_ptr(); }
+    T* end() { return this->as_mut_ptr() + this->len_field; }
+    const T* begin() const { return this->as_ptr(); }
+    const T* end() const { return this->as_ptr() + this->len_field; }
+
+    // Rust-API parity: in-place sort + sorted-check.
+    void sort() {
+        std::sort(this->begin(), this->end());
+    }
+    // `Vec::reverse` (in Rust a slice method reached via DerefMut); reverse the
+    // elements in place. Codify in post_transpile_patch.py before re-transpiling.
+    void reverse() {
+        std::reverse(this->begin(), this->end());
+    }
+    template<typename Cmp>
+    void sort_by(Cmp&& cmp) {
+        std::sort(this->begin(), this->end(),
+            [&](const T& a, const T& b) {
+                return std::forward<Cmp>(cmp)(a, b) == rusty::cmp::Ordering::Less;
+            });
+    }
+    template<typename Key>
+    void sort_by_key(Key&& key) {
+        std::sort(this->begin(), this->end(),
+            [&](const T& a, const T& b) {
+                return std::forward<Key>(key)(a) < std::forward<Key>(key)(b);
+            });
+    }
+    bool is_sorted() const {
+        return std::is_sorted(this->begin(), this->end());
+    }
+
+    // Hand-written-Vec-compatibility extensions: `data()` returns the
+    // raw buffer (std::vector-like, also matching `as_mut_ptr()`/
+    // `as_ptr()`); `back()` / `front()` return references to the
+    // first/last element. Mako rrr's Marshal serializer + tests use
+    // `vec.data()` and `vec.back()` directly.
+    T* data() { return this->as_mut_ptr(); }
+    const T* data() const { return this->as_ptr(); }
+    T& back() { return this->as_mut_ptr()[this->len_field - 1]; }
+    const T& back() const { return this->as_ptr()[this->len_field - 1]; }
+    T& front() { return this->as_mut_ptr()[0]; }
+    const T& front() const { return this->as_ptr()[0]; }
+
+    // Rust reaches `first`/`last` through `Vec: Deref<Target = [T]>`, so
+    // `vec.last()` really is valid Rust. The port models that deref with the
+    // FREE `rusty::last` / `rusty::last_mut` helpers, which leaves the member
+    // spelling missing whenever the emitter cannot see through the receiver
+    // and lowers a member call anyway (`RefMut<Vec<usize>>` -> `g->last()`).
+    // Slice semantics exactly: shared access is const, `_mut` is the mutable
+    // form, empty is None. Written out directly rather than delegating to
+    // `rusty::last`, which member-PREFERS and would recurse into these.
+    rusty::Option<const T&> last() const {
+        if (this->len_field == 0) return rusty::Option<const T&>(rusty::None);
+        return rusty::Option<const T&>(this->as_ptr()[this->len_field - 1]);
+    }
+    rusty::Option<T&> last_mut() {
+        if (this->len_field == 0) return rusty::Option<T&>(rusty::None);
+        return rusty::Option<T&>(this->as_mut_ptr()[this->len_field - 1]);
+    }
+
+
     static constexpr Vec<T, A> new_() {
         return Vec<T, A>(RawVec<T, A>::new_(), static_cast<size_t>(0));
     }
@@ -4797,8 +4903,13 @@ return ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires {
         return this->as_mut_slice();
     }
     Vec<T, A> clone() const {
-        const A alloc = rusty::clone(this->allocator());
-        return std::span<const T>::to_vec_in(rusty::detail::deref_if_pointer_like((*this)), std::move(alloc));
+        auto alloc = rusty::clone(this->allocator());
+        auto out = Vec<T, A>::with_capacity_in(this->len_field, std::move(alloc));
+        auto src = rusty::as_slice(*this);
+        for (size_t i = 0; i < src.size(); ++i) {
+            out.push(src[i]);
+        }
+        return out;
     }
     void clone_from(const Vec<T, A>& source) {
         SpecCloneIntoVec::clone_into(rusty::as_slice(source), (*this));
@@ -4812,24 +4923,30 @@ return ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires {
         return rusty::as_slice(*this)[static_cast<size_t>(index)];
     }
     template<typename I>
-    decltype(auto) operator[](I index) {
-        return (rusty::detail::deref_if_pointer_like((*this))).index_mut(std::move(index));
-    }
-    template<typename I>
     static Vec<T> from_iter(I iter) {
         return SpecFromIter<T, typename rusty::detail::into_iter_t<I>>::from_iter(rusty::detail::into_iter_value(std::move(iter)));
     }
     IntoIter<T, A> into_iter() {
-        // @unsafe
-        {
-            const auto me = rusty::mem::manually_drop_new(std::move((*this)));
-            auto alloc = rusty::mem::manually_drop_new(rusty::ptr::read(&me.allocator()));
-            auto buf = rusty::detail::deref_if_pointer((*me)).buf.non_null();
-            const auto begin = const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(buf)));
-            auto end = (reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(rusty::ptr::add(begin, rusty::len(me))));
-            auto cap = rusty::detail::deref_if_pointer((*me)).buf.capacity();
-            return IntoIter(std::move(buf), rusty::PhantomData<rusty::Unit>{}, std::move(cap), std::move(alloc), std::move(buf), std::move(end));
-        }
+        // HAND-PORT: bypass ManuallyDrop wrapper + T::IS_ZST.
+        auto buf = this->buf.non_null();
+        auto cap = this->buf.capacity();
+        auto* begin = rusty::as_ptr(buf);
+        auto* end_ptr = static_cast<std::add_pointer_t<std::add_const_t<T>>>(begin + this->len_field);
+        // Steal the allocator (move-construct into a fresh holder)
+        auto alloc_copy = rusty::mem::manually_drop_new(
+            std::move(const_cast<A&>(this->buf.allocator())));
+        // Neutralize this Vec's RawVec so ~Vec doesn't double-free —
+        // IntoIter takes ownership of the buffer.
+        this->len_field = 0;
+        this->buf.rusty_mark_forgotten();
+        return IntoIter<T, A>(
+            buf,
+            rusty::PhantomData<T>{},
+            cap,
+            std::move(alloc_copy),
+            buf,
+            end_ptr
+        );
     }
     template<typename I>
     void extend(I iter) {

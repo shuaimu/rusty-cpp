@@ -32,3 +32,5 @@ sed -i \
   -e 's|use crate::slice::|use std::slice::|g' \
   "$SRC"
 echo "[cell_port prep] normalized $SRC"
+# unstable `core::range::Range` (not ops::Range): no C++ carrier in the port.
+sed -i '/CloneFromCell for range::Range<T>/d' "$SRC"

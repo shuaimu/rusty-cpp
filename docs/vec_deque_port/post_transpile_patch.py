@@ -27,10 +27,36 @@ def patch_all_files(cpp_out: Path) -> int:
 
         # Patch 1: rusty::Vec<…> → ::Vec<…> (Vec is global after VecLegacy
         # retirement).
-        text = re.sub(r"(?<![A-Za-z0-9_])rusty::Vec<", "::Vec<", text)
+        # 2026-10: there is no global `::Vec` any more — the port's Vec is
+        # `::rusty::port::vec::Vec` (the umbrella's `rusty::Vec` alias is not
+        # visible inside the closure).
+        text = re.sub(r"(?<![A-Za-z0-9_:])rusty::Vec<", "::rusty::port::vec::Vec<", text)
+        text = re.sub(r"(?<![A-Za-z0-9_:])rusty::Vec\(", "::rusty::port::vec::Vec(", text)
+        text = re.sub(r"(?<![A-Za-z0-9_:])::Vec<", "::rusty::port::vec::Vec<", text)
+        # `slice::range` is the patcher's shim; `rusty::ptr::slice_from_raw_parts_mut`
+        # is the header's top-level `rusty::from_raw_parts_mut`.
+        text = text.replace("std::slice::range(", "slice::range(")
+        text = text.replace("rusty::ptr::slice_from_raw_parts_mut", "rusty::from_raw_parts_mut")
+        text = text.replace("rusty::rusty::from_raw_parts_mut", "rusty::from_raw_parts_mut")
+        # `RawVec::try_with_capacity_in(cap, Global)` names the global alias
+        # template without its arguments (the element type is the deque's).
+        text = text.replace("RawVec::try_with_capacity_in(", "RawVec<T>::try_with_capacity_in(")
+        text = text.replace("RawVec::from_raw_parts_in(", "RawVec<T, A>::from_raw_parts_in(")
+        # `impl<T, const N: usize> From<[T; N]>`: the emitter spelled the const
+        # generic as the element type.
+        text = text.replace("VecDeque<N>::with_capacity(N)", "VecDeque<T>::with_capacity(N)")
+        # IntoIterator lane: `using IntoIter = typename VecDeque<T, A>::IntoIter;`
+        # (the member alias) shadows the namespace-level template.
+        text = text.replace("return IntoIter<T, A>::new_(std::move((*this)));",
+                            "return ::rusty::port::collections::vec_deque::IntoIter<T, A>::new_(std::move((*this)));")
+        # `resize`: `self.extend(repeat_n(value, extra))` — no repeat_n adapter
+        # in the port; push `extra` clones.
+        text = text.replace(
+            "this->extend(std::iter::repeat_n(std::move(value), std::move(extra)));",
+            "for (size_t _i = 0; _i < extra; ++_i) { this->push_back(rusty::clone(value)); }")
 
         # Patch 8: bare `rusty::Vec{}` (no template args)
-        text = text.replace("rusty::Vec{}", "::Vec<T>{}")
+        text = text.replace("rusty::Vec{}", "::rusty::port::vec::Vec<T>::new_()")
 
         # Patch 4: `using rusty::Vec;` — Vec is module-only now.
         text = re.sub(r"^using rusty::Vec;\s*$",
@@ -40,10 +66,13 @@ def patch_all_files(cpp_out: Path) -> int:
         # Patch 6: `vec::IntoIter`/`Drain` from a `vec` sub-namespace
         # that doesn't exist (binary_heap_port hit this from the
         # vec_port import emit).
+        # 2026-10: vec_port's IntoIter/Drain live in `rusty::port::vec`
+        # (the deep path, never a global `::IntoIter`); a bare `vec::X`
+        # becomes the deep path and the deep path itself stays untouched.
         text = re.sub(r"(?<![A-Za-z0-9_:])vec::IntoIter",
-                      "::IntoIter", text)
+                      "::rusty::port::vec::IntoIter", text)
         text = re.sub(r"(?<![A-Za-z0-9_:])vec::Drain",
-                      "::Drain", text)
+                      "::rusty::port::vec::Drain", text)
 
         # Patch 7: std::collections::TryReserveError → rusty::collections
         text = text.replace("std::collections::TryReserveError",
@@ -169,10 +198,16 @@ def patch_all_files(cpp_out: Path) -> int:
         # `vec::IntoIter` path. The vec_port module exports these at
         # global namespace (`::IntoIter`, `::Drain`), so the `::vec::`
         # prefix never resolves. Patcher: drop the `vec::` segment.
-        text = re.sub(r"(?<![A-Za-z0-9_]):?:?vec::IntoIter",
-                      "::IntoIter", text)
-        text = re.sub(r"(?<![A-Za-z0-9_]):?:?vec::Drain",
-                      "::Drain", text)
+        text = re.sub(r"(?<![A-Za-z0-9_:])::vec::IntoIter",
+                      "::rusty::port::vec::IntoIter", text)
+        text = re.sub(r"(?<![A-Za-z0-9_:])::vec::Drain",
+                      "::rusty::port::vec::Drain", text)
+        # Whatever reached a global `::IntoIter`/`::Drain` through older
+        # rules or the emitter: the deep path is the only declaration.
+        text = re.sub(r"(?<![A-Za-z0-9_:])::IntoIter<", "::rusty::port::vec::IntoIter<", text)
+        text = re.sub(r"(?<![A-Za-z0-9_:])::Drain<", "::rusty::port::vec::Drain<", text)
+        text = text.replace("::rusty::port:::IntoIter<", "::rusty::port::vec::IntoIter<")
+        text = text.replace("::rusty::port:::Drain<", "::rusty::port::vec::Drain<")
 
         # serde-de prelude's `visit_byte_buf(::Vec<uint8_t> value)` lives
         # in the GMF, where module imports (vec_port.vec) haven't kicked
@@ -657,6 +692,10 @@ def _stub_non_smoke_methods(text: str) -> str:
     # retired — the transpiler now emits compiling bodies for the
     # whole surface. Names left here get re-stubbed with a reason.
     STUB_NAMES = MODULE_STUB_NAMES
+    if not STUB_NAMES:
+        # An empty alternation `()` matches EVERY `(`: with the list retired
+        # the walker stubbed every definition-shaped line, prelude included.
+        return text
     name_set = set(STUB_NAMES)
     lines = text.splitlines(keepends=True)
     n = len(lines)
@@ -1034,6 +1073,10 @@ def _stub_copied_spec_extend_front(text: str) -> str:
             and "(" in ln  # rules out the `using` line
         )
         if is_sig:
+            # The 2026 lane shape puts `export template<…>` on its own line
+            # ahead of the signature; it must go with the definition.
+            if out and re.match(r"^\s*(?:export )?template<[^\n]*>\s*$", out[-1]):
+                out.pop()
             indent_match = re.match(r"^(\s*)", ln)
             indent = indent_match.group(1) if indent_match else "    "
             out.append(
@@ -1202,6 +1245,72 @@ def patch_append_user_facing_alias(cpp_out: Path) -> int:
     return 1
 
 
+def patch_hoist_imports_after_module_decl(cpp_out: Path) -> int:
+    """C++20: `import` declarations must immediately follow `export module`.
+    The slice-range shim and the patcher-injected imports interleave with
+    the transpiler's own import lines; gather every purview-level import
+    (deduped, first-seen order) right after the module declaration."""
+    import re as _re
+    path = cpp_out / "vec_deque_port.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    m = _re.search(r"^export module vec_deque_port;\n", text, flags=_re.M)
+    if not m:
+        return 0
+    head, body = text[:m.end()], text[m.end():]
+    imports, kept, seen = [], [], set()
+    for line in body.split("\n"):
+        if _re.match(r"^import [A-Za-z0-9_.]+;", line):
+            key = line.split(";")[0]
+            if key not in seen:
+                seen.add(key); imports.append(line)
+            continue
+        kept.append(line)
+    new = head + "\n".join(imports) + "\n" + "\n".join(kept)
+    if new == text:
+        return 0
+    path.write_text(new)
+    return 1
+
+
+WRITE_ITER_WRAPPING_BODY = (
+    "        // patcher: `ByRefSized(&mut iter).take(head_room)` has no port adapter —\n"
+    "        // write element by element at the wrapped physical index (the same\n"
+    "        // effect as the two-segment write). The iterator arrived by value in\n"
+    "        // Rust; the `const auto&` is the emitter's spelling of that parameter.\n"
+    "        (void)len;\n"
+    "        auto& it = const_cast<std::remove_cvref_t<decltype(iter)>&>(iter);\n"
+    "        size_t written = 0;\n"
+    "        while (true) {\n"
+    "            auto next = it.next();\n"
+    "            if (next.is_none()) { break; }\n"
+    "            this->buffer_write(this->wrap_add(dst, written), next.unwrap());\n"
+    "            ++written;\n"
+    "        }\n"
+    "        return written;\n"
+)
+
+
+def patch_write_iter_wrapping(cpp_out: Path) -> int:
+    path = cpp_out / "vec_deque_port.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if "ByRefSized(&mut iter).take(head_room)` has no port adapter" in text:
+        return 0
+    sig = "    size_t write_iter_wrapping(size_t dst, const auto& iter, size_t len) {\n"
+    i = text.find(sig)
+    if i == -1:
+        return 0
+    end = text.find("\n    }\n", i + len(sig))
+    if end == -1:
+        return 0
+    text = text[:i + len(sig)] + WRITE_ITER_WRAPPING_BODY + text[end + 1:]
+    path.write_text(text)
+    return 1
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -1215,6 +1324,10 @@ def main() -> int:
     print(f"vec_deque_port patches applied to {n} file(s)")
     if patch_append_user_facing_alias(cpp_out):
         print("  applied: append user-facing rusty::collections::VecDeque alias")
+    if patch_write_iter_wrapping(cpp_out):
+        print("  applied: write_iter_wrapping without ByRefSized")
+    if patch_hoist_imports_after_module_decl(cpp_out):
+        print("  applied: hoist imports to the module declaration")
     return 0
 
 

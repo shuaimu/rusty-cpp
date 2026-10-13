@@ -496,7 +496,7 @@ def patch_arc_specific(cpp_out: Path) -> int:
 
     # `ptr::slice_from_raw_parts_mut` → `rusty::from_raw_parts_mut`.
     text = re.sub(
-        r"(?<![A-Za-z0-9_])ptr::slice_from_raw_parts_mut\b",
+        r"(?<![A-Za-z0-9_:])ptr::slice_from_raw_parts_mut\b",
         "rusty::from_raw_parts_mut",
         text)
 
@@ -504,7 +504,7 @@ def patch_arc_specific(cpp_out: Path) -> int:
     # namespace isn't visible here; spin_loop is a perf hint we can
     # safely no-op for correctness.
     text = re.sub(
-        r"\bhint::spin_loop\(\);",
+        r"(?<![A-Za-z0-9_:])hint::spin_loop\(\);",
         "(void)0;  // patcher: hint::spin_loop() no-oped",
         text)
     # `rusty::hint::assert_unchecked(…)` → `(void)0`.
@@ -589,6 +589,16 @@ def patch_arc_specific(cpp_out: Path) -> int:
             STUBBED_VISIT_BYTE_BUF,
             text)
 
+    # 2026-10 transpiler spellings.
+    text = text.replace("rusty::ptr::slice_from_raw_parts_mut", "rusty::from_raw_parts_mut")
+    text = re.sub(r"(?<![A-Za-z0-9_:])string::String\b", "rusty::String", text)
+    text = text.replace(
+        "rusty::Box<ArcInner>::write_(rusty::Box<ArcInner>::new_uninit()",
+        "rusty::Box<rusty::MaybeUninit<ArcInner<T>>>::write_(rusty::Box<rusty::MaybeUninit<ArcInner<T>>>::new_uninit()")
+    if "borrow::Cow<" in text and "// patcher: Cow stub" not in text:
+        wrap = "namespace rusty::port::sync {\n"
+        if wrap in text:
+            text = text.replace(wrap, wrap + "namespace borrow { template<class T> struct Cow; }  // patcher: Cow stub (borrow module not vendored)\n", 1)
     if text != original:
         path.write_text(text)
         return 1
@@ -717,6 +727,47 @@ def patch_stub_orphan_impls(cpp_out: Path) -> int:
     return 0
 
 
+def patch_static_slice_default_lanes(cpp_out: Path) -> int:
+    """`impl Default for Arc<str>` / `Arc<CStr>` / `Arc<[T]>` share a static
+    `ArcInner` (STATIC_INNER_SLICE) through raw-pointer casts the port cannot
+    express (`NonNull::from(&static.inner)`, `(*ManuallyDrop).clone()`). The
+    vendored port never carried them; keep the declared lane functions
+    defined (an undefined `inline` is an error) with a panicking body."""
+    path = cpp_out / ARC_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    n = 0
+    for self_ty in ("std::string_view", "rusty::ffi::CStr", "std::span<const T>"):
+        esc = re.escape(self_ty)
+        sig = re.compile(
+            r"^    (?:export )?inline Arc<" + esc + r"> default_\(Default_::impl_::tag, rusty::self_tag<Arc<"
+            + esc + r">>\) \{\n",
+            re.M,
+        )
+        pos = 0
+        while True:
+            m = sig.search(text, pos)
+            if not m:
+                break
+            end = text.find("\n    }\n", m.end())
+            if end == -1:
+                break
+            if "patcher: static-slice Default" in text[m.end():end]:
+                pos = end
+                continue
+            body = (
+                "        // patcher: static-slice Default (STATIC_INNER_SLICE raw-pointer casts) not ported\n"
+                "        rusty::panic::do_panic(\"Arc<" + self_ty + ">::default() is not ported\");\n"
+            )
+            text = text[:m.end()] + body + text[end + 1:]
+            pos = m.end() + len(body)
+            n += 1
+    if n:
+        path.write_text(text)
+    return n
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -733,6 +784,7 @@ def main() -> int:
         ("arc ergonomic shims (make / operator->)", patch_arc_ergonomic_shims),
         ("arc is_send / is_sync specializations (Arc<T,A>, Weak<T,A>)", patch_arc_traits_specializations),
         ("stub orphan impls", patch_stub_orphan_impls),
+        ("static-slice Default lanes → panic bodies", patch_static_slice_default_lanes),
     ]
 
     total = 0

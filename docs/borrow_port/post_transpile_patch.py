@@ -41,13 +41,25 @@ BORROW_FILE = "borrow_port.cppm"
 
 
 def patch_to_owned_traits_primary_body(text: str) -> str:
+    """`impl<T: Clone> ToOwned for T { type Owned = T }` is the blanket in this
+    very file, so the Traits primary is `Owned = B` (the emitted primary reads
+    `typename B::Owned`, which no C++ type has); `str`'s impl lives in
+    alloc::str and is spelled here as an explicit specialization."""
     needle = "template <class B> struct ToOwnedTraits;"
-    if needle not in text:
-        return text
-    return text.replace(
-        needle,
-        "template <class B> struct ToOwnedTraits { using Owned = B; };",
-    )
+    if needle in text:
+        return text.replace(
+            needle,
+            "template <class B> struct ToOwnedTraits { using Owned = B; };",
+        )
+    needle = "export template <class B> struct ToOwnedTraits { using Owned = typename B::Owned; };"
+    if needle in text:
+        return text.replace(
+            needle,
+            "export template <class B> struct ToOwnedTraits { using Owned = B; };\n"
+            "// patcher: `impl ToOwned for str { type Owned = String; }` (alloc::str)\n"
+            "export template <> struct ToOwnedTraits<std::string_view> { using Owned = rusty::String; };",
+        )
+    return text
 
 
 # ---------------------------------------------------------------------------

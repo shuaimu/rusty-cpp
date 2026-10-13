@@ -295,6 +295,38 @@ def patch_from_u8_unchecked_call(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+ASCII_DEBUG_FMT_BODY = (
+    "    // patcher: Rust `impl Debug for AsciiChar` (quoted char with escapes)\n"
+    "    const auto b = static_cast<uint8_t>(self_);\n"
+    "    char buf[8];\n"
+    "    size_t n = 0;\n"
+    "    buf[n++] = '\\'';\n"
+    "    if (b == '\\'' || b == '\\\\') { buf[n++] = '\\\\'; buf[n++] = static_cast<char>(b); }\n"
+    "    else if (b == '\\n') { buf[n++] = '\\\\'; buf[n++] = 'n'; }\n"
+    "    else if (b == '\\r') { buf[n++] = '\\\\'; buf[n++] = 'r'; }\n"
+    "    else if (b == '\\t') { buf[n++] = '\\\\'; buf[n++] = 't'; }\n"
+    "    else if (b == 0) { buf[n++] = '\\\\'; buf[n++] = '0'; }\n"
+    "    else if (b >= 0x20 && b < 0x7f) { buf[n++] = static_cast<char>(b); }\n"
+    "    else { static constexpr char HEX[] = \"0123456789abcdef\"; buf[n++] = '\\\\'; buf[n++] = 'x'; buf[n++] = HEX[b >> 4]; buf[n++] = HEX[b & 15]; }\n"
+    "    buf[n++] = '\\'';\n"
+    "    return f.write_str(std::string_view(buf, n));\n"
+)
+
+
+def patch_ascii_debug_fmt(text: str) -> str:
+    marker = "// patcher: Rust `impl Debug for AsciiChar`"
+    if marker in text:
+        return text
+    rx = re.compile(r"^inline rusty::fmt::Result rusty_debug_fmt\(const AsciiChar& self_, rusty::fmt::Formatter& f\) \{\n", re.MULTILINE)
+    m = rx.search(text)
+    if not m:
+        return text
+    end = text.find("\n}\n", m.end())
+    if end == -1:
+        return text
+    return text[:m.end()] + ASCII_DEBUG_FMT_BODY + text[end + 1:]
+
+
 def patch_file(path: Path) -> bool:
     text = path.read_text()
     original = text
@@ -305,6 +337,7 @@ def patch_file(path: Path) -> bool:
     text = patch_escape_ascii_stub(text)
     text = patch_stub_primitive_method_bodies(text)
     text = patch_from_u8_unchecked_call(text)
+    text = patch_ascii_debug_fmt(text)
     if text != original:
         path.write_text(text)
         return True

@@ -30,6 +30,11 @@ module;
 #pragma GCC diagnostic ignored "-Wunused-local-typedefs"
 #endif
 
+template<class... Ts>
+struct overloaded : Ts... { using Ts::operator()...; };
+template<class... Ts>
+overloaded(Ts...) -> overloaded<Ts...>;
+
 #define RUSTY_SERDE_TOKEN_NS rusty_token_placeholder
 struct TokenTree;
 namespace rusty {
@@ -3044,13 +3049,13 @@ export template<typename T, typename A>
 struct RawVec;
 using Cap = size_t;
 constexpr Cap ZERO_CAP = static_cast<size_t>(0);
-constexpr void capacity_overflow();
+[[noreturn]] constexpr void capacity_overflow();
 template<typename T>
 Cap new_cap(size_t cap);
 constexpr size_t min_non_zero_cap(size_t size);
-constexpr void handle_error(rusty::collections::TryReserveError e);
+[[noreturn]] constexpr void handle_error(rusty::collections::TryReserveError e);
 constexpr rusty::Result<rusty::alloc::Layout, rusty::collections::TryReserveError> layout_array(size_t cap, rusty::alloc::Layout elem_layout);
-constexpr void capacity_overflow() {
+[[noreturn]] constexpr void capacity_overflow() {
     rusty::panic::do_panic(std::format("capacity overflow"));
 }
 constexpr size_t min_non_zero_cap(size_t size) {
@@ -3062,7 +3067,7 @@ constexpr size_t min_non_zero_cap(size_t size) {
         return static_cast<size_t>(1);
     }
 }
-constexpr void handle_error(rusty::collections::TryReserveError e) {
+[[noreturn]] constexpr void handle_error(rusty::collections::TryReserveError e) {
     if (e.kind == rusty::collections::TryReserveErrorKind::CapacityOverflow) {
         capacity_overflow();
     }

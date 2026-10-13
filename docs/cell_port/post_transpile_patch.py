@@ -94,7 +94,7 @@ def patch_drop_global_qualifier_on_intra_module_helpers(cpp_out: Path) -> int:
     original = text
     for name in ("panic_already_borrowed", "panic_already_mutably_borrowed",
                  "is_writing", "is_reading"):
-        text = re.sub(rf"::{name}\b", name, text)
+        text = re.sub(rf"(?<![A-Za-z0-9_:])::{name}\b", name, text)
     if text != original:
         path.write_text(text)
         return 1
@@ -401,6 +401,42 @@ def patch_inject_flat_alias(cpp_out: Path) -> int:
     return 0
 
 
+def patch_panic_helpers_2026(cpp_out: Path) -> int:
+    """`[[noreturn]] constexpr void panic_already_borrowed(BorrowMutError err)` is
+    DEFINED before `struct BorrowMutError` is complete (incomplete by-value
+    parameter), and its body is the `const_panic!` comment. Take the error by
+    `const auto&` (as the vendored port did) and panic for real."""
+    path = cpp_out / "cell_port.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    for name, ty, msg in (("panic_already_borrowed", "BorrowMutError", "RefCell already borrowed"),
+                          ("panic_already_mutably_borrowed", "BorrowError", "RefCell already mutably borrowed")):
+        text = text.replace(f"[[noreturn]] constexpr void {name}({ty} err);",
+                            f"[[noreturn]] void {name}(const auto& err);")
+        text = re.sub(rf"\[\[noreturn\]\] constexpr void {name}\({ty} err\) \{{\n\s*(?:return )?/\* const_panic!.*?\*/;\n\}}",
+                      f"[[noreturn]] void {name}(const auto& err) {{\n    (void)err;\n    rusty::panic::do_panic(\"{msg}\");\n}}", text, flags=re.S)
+    if text == original:
+        return 0
+    path.write_text(text)
+    return 1
+
+
+def patch_is_nonoverlapping_this(cpp_out: Path) -> int:
+    """`Cell::swap`: `is_nonoverlapping(self, other)` takes two `*const Cell`;
+    the receiver was spelled `(*this)` (a reference) — pass `this`."""
+    path = cpp_out / "cell_port.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    new = text.replace("is_nonoverlapping((*this), &other)", "is_nonoverlapping(this, &other)")
+    if new == text:
+        return 0
+    path.write_text(new)
+    return 1
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -425,6 +461,9 @@ def main() -> int:
         ("Option<&Location> → Option<Location>",
          patch_unref_option_location),
         ("drop misplaced module imports", patch_drop_misplaced_module_imports),
+        ("panic helpers: const auto& param + real panic (2026)",
+         patch_panic_helpers_2026),
+        ("Cell::swap is_nonoverlapping(this, &other)", patch_is_nonoverlapping_this),
         ("rewrite `return [[noreturn]] panic_xxx(...)`",
          patch_return_void_noreturn),
         ("Cell::swap helpers (size_of, ptr::eq)",

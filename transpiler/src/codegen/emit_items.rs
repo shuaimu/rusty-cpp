@@ -1,6 +1,18 @@
 use super::*;
 use super::predicates::AutoTrait;
 
+/// `constexpr [[noreturn]] void f()` is ill-formed: an attribute-specifier-seq
+/// opens the declaration, ahead of `static`/`inline`/`constexpr`. A `const fn
+/// f() -> !` maps its return to `[[noreturn]] void`; hoist the attribute.
+fn hoist_noreturn_attribute(static_prefix: &str, return_type: &str) -> (String, String) {
+    match return_type.strip_prefix("[[noreturn]] ") {
+        Some(rest) if !static_prefix.is_empty() => {
+            (format!("[[noreturn]] {}", static_prefix), rest.to_string())
+        }
+        _ => (static_prefix.to_string(), return_type.to_string()),
+    }
+}
+
 impl CodeGen {
     fn cpp_abi_facade_params(
         &self,
@@ -500,6 +512,7 @@ impl CodeGen {
             linkage_prefix,
             constexpr_prefix
         );
+        let (static_prefix, return_type) = hoist_noreturn_attribute(&static_prefix, &return_type);
         self.emit_template_declaration_with_type_defaults(
             &emitted_generics,
             export_prefix,
@@ -1497,6 +1510,7 @@ impl CodeGen {
         // Otherwise in-scope params are treated as already declared and the `template<...>`
         // prefix is dropped.
         self.pop_type_param_scope();
+        let (static_prefix, return_type) = hoist_noreturn_attribute(&static_prefix, &return_type);
         self.emit_template_declaration_with_type_defaults(
             &emitted_generics,
             export_prefix,
@@ -9935,7 +9949,27 @@ impl CodeGen {
                                         .chars()
                                         .next()
                                         .is_some_and(|c| c.is_ascii_lowercase() || c == '_');
-                                if leaf_is_const_like {
+                                // `use AsciiChar::ReverseSolidus as Backslash;`: a
+                                // renamed c-like enum VARIANT is a value — bind
+                                // the constant (a type alias is ill-formed).
+                                let leaf_is_enum_variant = {
+                                    let parent = target_norm
+                                        .rsplit("::")
+                                        .nth(1)
+                                        .unwrap_or("");
+                                    !parent.is_empty()
+                                        && self
+                                            .unique_c_like_enum_owner_for_variant_name(leaf)
+                                            .is_some_and(|owner| owner == parent)
+                                };
+                                if leaf_is_enum_variant {
+                                    self.writeln(&format!(
+                                        "{}constexpr auto {} = {};",
+                                        export_prefix,
+                                        escape_cpp_keyword(alias.trim()),
+                                        target.trim()
+                                    ));
+                                } else if leaf_is_const_like {
                                     self.writeln(&format!(
                                         "{}constexpr const auto& {} = {};",
                                         export_prefix,

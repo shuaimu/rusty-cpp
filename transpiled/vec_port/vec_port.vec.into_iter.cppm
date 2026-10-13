@@ -3160,24 +3160,12 @@ struct IntoIter {
         return this->as_slice();
     }
     rusty::Option<T> next() {
-        decltype(this->ptr) ptr_shadow1 {};
-        {
-            if constexpr (requires { T::IS_ZST; } && false) {
-                if (const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(rusty::as_ptr(this->ptr))) == (const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(this->end)))) {
-                    return rusty::Option<T>{rusty::None};
-                }
-                this->end = this->end->wrapping_byte_sub(1);
-                ptr_shadow1 = this->ptr;
-            } else {
-                if (rusty::detail::deref_if_pointer_like(this->ptr) == rusty::detail::deref_if_pointer_like(this->end)) {
-                    return rusty::Option<T>{rusty::None};
-                }
-                const auto old = this->ptr;
-                this->ptr = old.add(1);
-                ptr_shadow1 = old;
-            }
-        }
-        return rusty::Option<T>(ptr_shadow1.read());
+        // HAND-PORT: simple pointer-based; no IS_ZST, no .read().
+        auto* p = rusty::as_ptr(this->ptr);
+        if (p == this->end) return rusty::Option<T>{rusty::None};
+        T value = std::move(*p);
+        this->ptr = rusty::ptr::NonNull<T>::new_unchecked(p + 1);
+        return rusty::Option<T>(std::move(value));
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         // HAND-PORT: no IS_ZST.
@@ -3264,7 +3252,7 @@ struct IntoIter {
             this->end = this->end->wrapping_byte_sub(1);
             return rusty::Option<T>(rusty::ptr::read(rusty::as_ptr(this->ptr)));
         } else {
-            if (rusty::detail::deref_if_pointer_like(this->ptr) == rusty::detail::deref_if_pointer_like(this->end)) {
+            if (rusty::as_ptr(this->ptr) == (this->end)) {
                 return rusty::Option<T>{rusty::None};
             }
             // @unsafe

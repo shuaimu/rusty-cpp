@@ -171,8 +171,13 @@ def patch_rusty_vec_namespace(text: str) -> str:
 
 
 def patch_vec_submodule_paths(text: str) -> str:
-    text = re.sub(r"\bvec::IntoIter\b", "::IntoIter", text)
-    text = re.sub(r"\bvec::Drain\b", "::Drain", text)
+    # (lookbehind: the 2026 transpiler spells the deep `::rusty::port::vec::IntoIter`,
+    # which must stay as is — `\b` matched after the `::`.)
+    text = re.sub(r"(?<![A-Za-z0-9_:])vec::IntoIter\b", "::IntoIter", text)
+    # `BinaryHeap { data: vec![] }`: the field's element type did not reach
+    # the `vec![]` lowering (`Vec{}` has no deduction guide).
+    text = text.replace("{.data = ::rusty::port::vec::Vec{}}", "{.data = ::rusty::port::vec::Vec<T>::new_()}")
+    text = re.sub(r"(?<![A-Za-z0-9_:])vec::Drain\b", "::Drain", text)
     return text
 
 

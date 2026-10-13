@@ -1530,6 +1530,15 @@ def patch_into_iter_runtime_body(cpp_out: Path) -> int:
         )
         if old in t:
             t = t.replace(old, new)
+        elif "HAND-PORT: bypass ManuallyDrop wrapper" not in t:
+            # 2026-10 body shape differs; the hand-port is keyed on the
+            # signature instead (first `    }` closes the method).
+            sig = "    IntoIter<T, A> into_iter() {\n"
+            i = t.find(sig)
+            if i != -1:
+                e = t.find("\n    }\n", i)
+                if e != -1:
+                    t = t[:i] + new + t[e + 6:]
         if t != orig:
             p_vec.write_text(t)
             n += 1
@@ -1574,7 +1583,19 @@ def patch_into_iter_runtime_body(cpp_out: Path) -> int:
         )
         if old_next in t:
             t = t.replace(old_next, new_next)
+        elif "HAND-PORT: simple pointer-based; no IS_ZST" not in t:
+            sig = "    rusty::Option<T> next() {\n"
+            i = t.find(sig)
+            if i != -1:
+                e = t.find("\n    }\n", i)
+                if e != -1:
+                    t = t[:i] + new_next + t[e + 6:]
 
+        # `this->ptr == this->end` (NonNull vs raw pointer): the emitter derefs
+        # the raw `end` through deref_if_pointer_like — compare the addresses.
+        t = t.replace(
+            "if (rusty::detail::deref_if_pointer_like(this->ptr) == rusty::detail::deref_if_pointer_like(this->end))",
+            "if (rusty::as_ptr(this->ptr) == (this->end))")
         # size_hint() — drop IS_ZST branch
         old_sh = (
             "    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {\n"
@@ -1888,6 +1909,13 @@ def patch_clone_to_vec_in(cpp_out: Path) -> int:
             "        return std::span<const T>::to_vec_in(rusty::detail::deref_if_pointer_like((*this)), std::move(alloc));\n"
             "    }"
         )
+        # 2026-10 spelling: the local is typed `const A`.
+        text = text.replace(
+            "    Vec<T, A> clone() const {\n"
+            "        const A alloc = rusty::clone(this->allocator());\n"
+            "        return std::span<const T>::to_vec_in(rusty::detail::deref_if_pointer_like((*this)), std::move(alloc));\n"
+            "    }",
+            old)
         new = (
             "    Vec<T, A> clone() const {\n"
             "        auto alloc = rusty::clone(this->allocator());\n"
@@ -2423,14 +2451,18 @@ def patch_handle_error_function(cpp_out: Path) -> int:
     #     return [&]() -> [[noreturn]] void { ... }();
     #   }
     # Replace the body with a simple throw.
+    # (2026-10: the transpiler now spells the const fn `[[noreturn]] constexpr
+    # void`; the attribute leads, constexpr is optional here.)
     pattern = re.compile(
-        r"\[\[noreturn\]\] void handle_error\(([^)]+)\) \{[\s\S]*?\n\}",
+        r"\[\[noreturn\]\] (constexpr )?void handle_error\(([^)]+)\) \{[\s\S]*?\n\}",
         re.MULTILINE,
     )
+    # (`constexpr` is kept when the declaration has it: a non-constexpr
+    # definition may not follow a constexpr declaration.)
     replacement = (
-        "[[noreturn]] void handle_error(\\1) {\n"
+        "[[noreturn]] \\1void handle_error(\\2) {\n"
         "    if (e.kind == rusty::collections::TryReserveErrorKind::CapacityOverflow) {\n"
-        "        ::capacity_overflow();\n"
+        "        capacity_overflow();\n"
         "    }\n"
         "    // AllocError branch — abort for now; full impl would call handle_alloc_error.\n"
         "    rusty::intrinsics::abort();\n"
@@ -3003,6 +3035,147 @@ def patch_strip_cast_as_non_null_ptr_late(cpp_out: Path) -> int:
     return n
 
 
+# The vendored Vec carried a HAND-WRITTEN block of C++-ergonomic members
+# (default / capacity / initializer_list / std::vector ctors, make(), size(),
+# a plain `T& operator[]`, begin()/end(), sort*, data()/back()/front(),
+# last()/last_mut()) that `using rusty::Vec = …` consumers and the test
+# ports rely on (`Vec{5, 9, 3}`, `vec.back()`). Its own comment asked for
+# this rule.
+VEC_ERGONOMIC_MEMBERS = """    // ── C++-ergonomic shortcuts (hand-added so that
+    // `using rusty::Vec = Vec<T,A>` can become a drop-in replacement for
+    // the legacy rusty::VecLegacy class: default ctor, initializer-list
+    // ctor, size_t-capacity ctor, make(), size() alias, mutable
+    // operator[], and begin()/end() iterators). Codify in
+    // post_transpile_patch.py before re-transpiling vec_port. ──────────
+    Vec() requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::new_()), len_field(0) {}
+    explicit Vec(size_t capacity) requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::with_capacity_in(capacity, A{})), len_field(0) {}
+    Vec(std::initializer_list<T> init) requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::with_capacity_in(init.size(), A{})), len_field(0) {
+        for (auto& item : init) {
+            this->push(std::move(const_cast<T&>(item)));
+        }
+    }
+    // Wrap a std::vector<T> into a rusty::Vec (moving elements). Used by the
+    // transpiler's `Vec::from_iter` lowering, which collects into a std::vector
+    // via `rusty::collect_range` and then re-wraps so rusty::Vec methods
+    // (sort_by, partial_cmp, ...) remain available. The implicit deduction
+    // guide handles `rusty::Vec(std::vector<E>{...})` -> Vec<E, Global>.
+    // Codify in post_transpile_patch.py before re-transpiling vec_port.
+    Vec(std::vector<T> init) requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::with_capacity_in(init.size(), A{})), len_field(0) {
+        for (auto& item : init) {
+            this->push(std::move(item));
+        }
+    }
+    static Vec<T, A> make() requires std::is_default_constructible_v<A> {
+        return Vec<T, A>();
+    }
+    size_t size() const { return this->len_field; }
+    // Templated on I (matching the const overload's shape) so calls like
+    // `vec[0]` (where 0 is int) don't fall into ambiguity between const
+    // operator[]<I> and a size_t-only mutable overload.
+    template<typename I>
+    T& operator[](I index) { return this->as_mut_ptr()[index]; }
+    // Rust `Vec::get(index) -> Option<&T>` (bounds-checked borrow).
+    rusty::Option<const T&> get(size_t index) const {
+        if (index < this->len_field) {
+            return rusty::Option<const T&>(this->as_ptr()[index]);
+        }
+        return rusty::Option<const T&>(rusty::None);
+    }
+    T* begin() { return this->as_mut_ptr(); }
+    T* end() { return this->as_mut_ptr() + this->len_field; }
+    const T* begin() const { return this->as_ptr(); }
+    const T* end() const { return this->as_ptr() + this->len_field; }
+
+    // Rust-API parity: in-place sort + sorted-check.
+    void sort() {
+        std::sort(this->begin(), this->end());
+    }
+    // `Vec::reverse` (in Rust a slice method reached via DerefMut); reverse the
+    // elements in place. Codify in post_transpile_patch.py before re-transpiling.
+    void reverse() {
+        std::reverse(this->begin(), this->end());
+    }
+    template<typename Cmp>
+    void sort_by(Cmp&& cmp) {
+        std::sort(this->begin(), this->end(),
+            [&](const T& a, const T& b) {
+                return std::forward<Cmp>(cmp)(a, b) == rusty::cmp::Ordering::Less;
+            });
+    }
+    template<typename Key>
+    void sort_by_key(Key&& key) {
+        std::sort(this->begin(), this->end(),
+            [&](const T& a, const T& b) {
+                return std::forward<Key>(key)(a) < std::forward<Key>(key)(b);
+            });
+    }
+    bool is_sorted() const {
+        return std::is_sorted(this->begin(), this->end());
+    }
+
+    // Hand-written-Vec-compatibility extensions: `data()` returns the
+    // raw buffer (std::vector-like, also matching `as_mut_ptr()`/
+    // `as_ptr()`); `back()` / `front()` return references to the
+    // first/last element. Mako rrr's Marshal serializer + tests use
+    // `vec.data()` and `vec.back()` directly.
+    T* data() { return this->as_mut_ptr(); }
+    const T* data() const { return this->as_ptr(); }
+    T& back() { return this->as_mut_ptr()[this->len_field - 1]; }
+    const T& back() const { return this->as_ptr()[this->len_field - 1]; }
+    T& front() { return this->as_mut_ptr()[0]; }
+    const T& front() const { return this->as_ptr()[0]; }
+
+    // Rust reaches `first`/`last` through `Vec: Deref<Target = [T]>`, so
+    // `vec.last()` really is valid Rust. The port models that deref with the
+    // FREE `rusty::last` / `rusty::last_mut` helpers, which leaves the member
+    // spelling missing whenever the emitter cannot see through the receiver
+    // and lowers a member call anyway (`RefMut<Vec<usize>>` -> `g->last()`).
+    // Slice semantics exactly: shared access is const, `_mut` is the mutable
+    // form, empty is None. Written out directly rather than delegating to
+    // `rusty::last`, which member-PREFERS and would recurse into these.
+    rusty::Option<const T&> last() const {
+        if (this->len_field == 0) return rusty::Option<const T&>(rusty::None);
+        return rusty::Option<const T&>(this->as_ptr()[this->len_field - 1]);
+    }
+    rusty::Option<T&> last_mut() {
+        if (this->len_field == 0) return rusty::Option<T&>(rusty::None);
+        return rusty::Option<T&>(this->as_mut_ptr()[this->len_field - 1]);
+    }
+
+
+"""
+
+
+def patch_inject_vec_ergonomic_members(cpp_out: Path) -> int:
+    f = cpp_out / "vec_port.vec.cppm"
+    if not f.exists():
+        return 0
+    text = f.read_text()
+    if "C++-ergonomic shortcuts (hand-added" in text:
+        return 0
+    anchor = "    static constexpr Vec<T, A> new_() {\n"
+    if anchor not in text:
+        anchor = "    static Vec<T, A> new_() {\n"
+    if anchor not in text:
+        return 0
+    # The block's `T& operator[](I)` replaces the transpiled mutable
+    # subscript (`index_mut` through the span deref — no member for a
+    # ZST element's `std::span<std::tuple<>>`).
+    text = text.replace(
+        "    template<typename I>\n"
+        "    decltype(auto) operator[](I index) {\n"
+        "        return (rusty::detail::deref_if_pointer_like((*this))).index_mut(std::move(index));\n"
+        "    }\n",
+        "", 1)
+    idx = text.index(anchor)
+    f.write_text(text[:idx] + VEC_ERGONOMIC_MEMBERS + text[idx:])
+    return 1
+
+
 def main(cpp_out: Path):
     patches = [
         ("set_len_on_drop copy-assign", patch_set_len_on_drop_copy_assign),
@@ -3143,6 +3316,8 @@ def main(cpp_out: Path):
             patch_append_raw_vec_global_alias),
         ("strip .cast().as_non_null_ptr() (late pass)",
             patch_strip_cast_as_non_null_ptr_late),
+        ("inject the vendored hand-written Vec ergonomic members (ctors, operator[], iterators, …)",
+            patch_inject_vec_ergonomic_members),
         # The into_iter anchors spell `rusty::from_raw_parts_mut`, which only
         # exists AFTER the bare-namespace rewrite above; the early pass sees
         # `slice::from_raw_parts_mut` and skips. Idempotent, so run it again.

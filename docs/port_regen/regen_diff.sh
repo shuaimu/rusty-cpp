@@ -136,6 +136,8 @@ case "$PORT" in
   linked_list_port)  CXX_NS=rusty::port::collections::linked_list ;;
   vec_deque_port)    CXX_NS=rusty::port::collections::vec_deque ;;
   hashbrown_port)    CXX_NS=rusty::port::collections::hashbrown ;;
+  borrow_port)       CXX_NS=borrow_port ;;
+  ascii_port)        CXX_NS=ascii_port ;;
   *)                 CXX_NS= ;;
 esac
 ns_flag=()

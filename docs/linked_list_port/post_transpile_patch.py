@@ -237,6 +237,10 @@ def patch_namespace_migration(text: str) -> str:
 
     Idempotent: bails when the migration has already been done."""
     if "namespace rusty::port::collections::linked_list" in text:
+        # The driver's --cxx-namespace already provides the wrap; the
+        # user-facing alias is still ours to append.
+        if "rusty::collections::LinkedList" not in text:
+            text = text.rstrip() + "\n" + USER_FACING_ALIAS
         return text
     text = re.sub(
         r"^namespace linked_list_port \{",

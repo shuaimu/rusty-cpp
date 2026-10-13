@@ -17,7 +17,9 @@ module;
 #include <string_view>
 #include <charconv>
 #include <cstdlib>
+#include <cstdio>
 #include <bit>
+#include <cwctype>
 #include <stdexcept>
 #include <print>
 #include <immintrin.h>
@@ -28,10 +30,22 @@ module;
 #pragma GCC diagnostic ignored "-Wunused-local-typedefs"
 #endif
 
+#define RUSTY_SERDE_TOKEN_NS rusty_token_placeholder
 struct TokenTree;
 namespace rusty {
 namespace cmp {
 enum class Ordering { Less, Equal, Greater };
+inline std::string rusty_debug_string(Ordering o) {
+return o == Ordering::Less ? "Less" : (o == Ordering::Greater ? "Greater" : "Equal");
+}
+constexpr Ordering then(Ordering a, Ordering b) { return a == Ordering::Equal ? b : a; }
+constexpr Ordering reverse(Ordering a) { return a == Ordering::Less ? Ordering::Greater : (a == Ordering::Greater ? Ordering::Less : Ordering::Equal); }
+constexpr bool is_lt(Ordering a) { return a == Ordering::Less; }
+constexpr bool is_gt(Ordering a) { return a == Ordering::Greater; }
+constexpr bool is_eq(Ordering a) { return a == Ordering::Equal; }
+constexpr bool is_ne(Ordering a) { return a != Ordering::Equal; }
+constexpr bool is_le(Ordering a) { return a != Ordering::Greater; }
+constexpr bool is_ge(Ordering a) { return a != Ordering::Less; }
 template<typename T>
 struct Reverse {
 T _0;
@@ -49,6 +63,14 @@ template<typename L, typename R>
 bool less_than(const L& lhs, const R& rhs) {
 if constexpr (requires { lhs < rhs; }) {
 return lhs < rhs;
+} else if constexpr (requires {
+rusty::detail::deref_if_pointer_like(lhs) < rusty::detail::deref_if_pointer_like(rhs);
+}) {
+/* Pointer-carried operand (addr_of_temp needle): peel and compare.
+Without this tier the permissive fallback returned false BOTH
+ways - cmp::cmp called everything Equal and binary_search found
+phantom matches. */
+return rusty::detail::deref_if_pointer_like(lhs) < rusty::detail::deref_if_pointer_like(rhs);
 } else if constexpr (requires {
 std::begin(lhs); std::end(lhs); std::begin(rhs); std::end(rhs);
 *std::begin(lhs) < *std::begin(rhs);
@@ -78,6 +100,136 @@ if (detail::less_than(b, a)) return Ordering::Greater;
 return Ordering::Equal;
 }
 }
+// A char[N] operand is the C++ carrier of a Rust `str` LITERAL needle
+// (`map.contains_key("a")` with String keys): content semantics, no
+// trailing NUL. No member/operator tier can take it (raw arrays have no
+// members) and the elementwise tier would walk the NUL byte.
+template<typename X>
+concept str_literal_carrier = std::is_array_v<std::remove_cvref_t<X>>
+&& std::is_same_v<std::remove_cv_t<std::remove_extent_t<std::remove_cvref_t<X>>>, char>;
+// One side of an element-wise eq must be iterable in a shape rusty::for_in
+// accepts — mirrors its tiers structurally (for_in itself static_asserts,
+// so it can't be probed directly). Scalars fail this and keep the plain
+// operator== diagnostic.
+template<typename X>
+concept eq_elementwise_side = requires(std::remove_cvref_t<X>& x) { x.next(); }
+|| requires(std::remove_cvref_t<X>& x) { x.iter(); }
+|| requires(const std::remove_cvref_t<X>& x) { x.data(); x.size(); }
+|| requires(const std::remove_cvref_t<X>& x) { std::begin(x); std::end(x); }
+|| requires(std::remove_cvref_t<X>& x) { x.begin(); x.end(); };
+// Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==,
+// else ELEMENT-WISE over both sides (Rust Iterator::eq and cross-container
+// PartialEq like `IndexSet == Vec` / `Keys == slice::Iter` have no C++
+// operator== between distinct types). Derefs pointer-like rhs (Rust `&other`
+// becomes addr_of_temp() in C++ emit).
+template<typename A, typename B>
+bool eq(const A& a, const B& b) {
+if constexpr (std::is_pointer_v<std::remove_cvref_t<A>>
+&& std::is_pointer_v<std::remove_cvref_t<B>>) {
+/* Two pointer carriers are lowered Rust REFERENCES: PartialEq
+delegates to the pointees. Raw pointer == compared ADDRESSES,
+so `&mut 1` map keys never matched (occupied_entry_key). */
+return eq(*a, *b);
+} else if constexpr ((str_literal_carrier<A>
+|| str_literal_carrier<decltype(rusty::detail::deref_if_pointer_like(b))>)
+&& requires {
+std::string_view(a);
+std::string_view(rusty::detail::deref_if_pointer_like(b));
+}) {
+/* str-literal needle vs a string-viewable partner: compare CONTENT
+(string_view drops the array's trailing NUL). */
+return std::string_view(a)
+== std::string_view(rusty::detail::deref_if_pointer_like(b));
+} else if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {
+return a.eq(rusty::detail::deref_if_pointer_like(b));
+} else if constexpr (requires {
+{ a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;
+}) {
+/* PartialEq-impl wrappers delegate their body back here with the
+SAME instantiation (Slice::operator==(array) -> cmp::eq(self,
+other) -> that operator==): a per-instantiation re-entrancy
+guard breaks the cycle by falling to the elementwise compare,
+which IS the Rust slice-family semantics of those wrappers. */
+thread_local int _rusty_eq_depth = 0;
+if (_rusty_eq_depth == 0) {
+struct _DepthGuard {
+int& d;
+~_DepthGuard() { --d; }
+} _g{(++_rusty_eq_depth, _rusty_eq_depth)};
+return a == rusty::detail::deref_if_pointer_like(b);
+}
+if constexpr (
+eq_elementwise_side<A>
+&& eq_elementwise_side<decltype(rusty::detail::deref_if_pointer_like(b))>
+) {
+auto&& ra = rusty::for_in(a);
+auto&& rb = rusty::for_in(rusty::detail::deref_if_pointer_like(b));
+auto ita = ra.begin();
+auto ea = ra.end();
+auto itb = rb.begin();
+auto eb = rb.end();
+for (; ita != ea && itb != eb; ++ita, ++itb) {
+if (!rusty::cmp::eq(*ita, *itb)) {
+return false;
+}
+}
+return !(ita != ea) && !(itb != eb);
+} else {
+return a == rusty::detail::deref_if_pointer_like(b);
+}
+} else if constexpr (
+eq_elementwise_side<A>
+&& eq_elementwise_side<decltype(rusty::detail::deref_if_pointer_like(b))>
+) {
+auto&& ra = rusty::for_in(a);
+auto&& rb = rusty::for_in(rusty::detail::deref_if_pointer_like(b));
+auto ita = ra.begin();
+auto ea = ra.end();
+auto itb = rb.begin();
+auto eb = rb.end();
+for (; ita != ea && itb != eb; ++ita, ++itb) {
+if (!rusty::cmp::eq(*ita, *itb)) {
+return false;
+}
+}
+return !(ita != ea) && !(itb != eb);
+} else if constexpr (requires {
+{ rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;
+}) {
+/* both sides pointer-carried references (Q-key equivalence) */
+return rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b);
+} else if constexpr (requires {
+a.key_field;
+a.value_field;
+std::get<0>(rusty::detail::deref_if_pointer_like(b));
+std::get<1>(rusty::detail::deref_if_pointer_like(b));
+}) {
+/* map-entry projection: a Bucket{hash, key, value} against a
+(K, V) tuple compares by key/value (Rust's Slice iter yields
+entry pairs, not raw buckets). */
+auto&& bb = rusty::detail::deref_if_pointer_like(b);
+return rusty::cmp::eq(a.key_field, std::get<0>(bb))
+&& rusty::cmp::eq(a.value_field, std::get<1>(bb));
+} else if constexpr (requires { a.key_field; }) {
+/* set-entry projection: Bucket<T, ()> against a bare element
+compares the key only (set iteration yields keys). */
+return rusty::cmp::eq(a.key_field, rusty::detail::deref_if_pointer_like(b));
+} else {
+return a == rusty::detail::deref_if_pointer_like(b);
+}
+}
+template<typename A, typename B>
+bool ne(const A& a, const B& b) {
+if constexpr (requires { a.ne(rusty::detail::deref_if_pointer_like(b)); }) {
+return a.ne(rusty::detail::deref_if_pointer_like(b));
+} else if constexpr (requires {
+{ a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;
+}) {
+return !(a == rusty::detail::deref_if_pointer_like(b));
+} else {
+return !(rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b));
+}
+}
 template<typename F>
 Ordering then_with(Ordering ord, F&& f) {
 if (ord == Ordering::Equal) {
@@ -96,18 +248,20 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Clone: dispatches to .clone() if available, otherwise copy-constructs.
-template<typename T>
-auto clone(const T& value) {
-if constexpr (requires { value.clone(); }) {
-return value.clone();
-} else {
-return value;
-}
-}
+// `rusty::clone` was previously defined here, but `<rusty/move.hpp>`
+// (pulled in via `<rusty/rusty.hpp>`) already provides it. Emitting
+// it again as a redundant duplicate makes call sites that pass a
+// type accepted by both overloads ambiguous, so we omit it.
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
+}
+// Rust's Iterator::size_hint DEFAULT ((0, None)) for adapter types that
+// do not override it (rusty map/filter next-iter wrappers).
+template<typename Iter>
+requires (!requires(const Iter& it) { it.size_hint(); })
+std::tuple<size_t, rusty::Option<size_t>> size_hint(const Iter&) {
+return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::None));
 }
 template<typename Value>
 decltype(auto) left(Value&& value) {
@@ -128,6 +282,27 @@ template<typename L, typename R>
 Either_Left<L, R> Left(L _0) { return Either_Left<L, R>{std::forward<L>(_0)}; }
 template<typename L, typename R>
 Either_Right<L, R> Right(R _0) { return Either_Right<L, R>{std::forward<R>(_0)}; }
+// Deferred one-sided constructions: Rust infers the OTHER Either side from
+// the use site, so a bare `Either::Left(x)` can't spell R at construction.
+// These carry the payload and convert to any Either<L, R2> at the point
+// where C++ knows the destination (function argument, return, Option
+// converting constructor, ...).
+template<typename L>
+struct left_value {
+L __v;
+template<typename R2>
+operator Either<L, R2>() && { return Either_Left<L, R2>{std::move(__v)}; }
+};
+template<typename R>
+struct right_value {
+R __v;
+template<typename L2>
+operator Either<L2, R>() && { return Either_Right<L2, R>{std::move(__v)}; }
+};
+template<typename L>
+left_value<L> Left(L _0) { return {std::forward<L>(_0)}; }
+template<typename R>
+right_value<R> Right(R _0) { return {std::forward<R>(_0)}; }
 }
 // Display-oriented conversion helper used by format_args lowering.
 template<typename T>
@@ -239,1948 +414,7 @@ return false;
 }
 }
 } // namespace rusty
-extern "C++" {
-namespace rusty_token_placeholder {
-struct Token;
-struct Token_Bool;
-struct Token_I8;
-struct Token_I16;
-struct Token_I32;
-struct Token_I64;
-struct Token_U8;
-struct Token_U16;
-struct Token_U32;
-struct Token_U64;
-struct Token_F32;
-struct Token_F64;
-struct Token_Bytes;
-struct Token_BorrowedBytes;
-struct Token_ByteBuf;
-struct Token_None;
-struct Token_Some;
-struct Token_Seq;
-struct Token_SeqEnd {};
-struct Token_Tuple;
-struct Token_TupleEnd {};
-struct Token_TupleStruct;
-struct Token_TupleStructEnd {};
-struct Token_Unit;
-struct Token_UnitStruct;
-struct Token_Char;
-struct Token_Str;
-struct Token_BorrowedStr;
-struct Token_String;
-inline Token_SeqEnd SeqEnd() { return Token_SeqEnd{}; }
-inline Token_TupleEnd TupleEnd() { return Token_TupleEnd{}; }
-inline Token_TupleStructEnd TupleStructEnd() { return Token_TupleStructEnd{}; }
-}
-}
-namespace rusty {
-template<typename Target, typename Input>
-Target from_into(Input&& input);
-#if !defined(RUSTY_HAS_ADDR_OF_TEMP)
-template<typename T>
-constexpr T* addr_of_temp(T& value);
-template<typename T>
-const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value);
-#endif
-}
-namespace de {
-namespace impls {
-namespace rusty_ext {
-}
-}
-namespace rusty_ext {
-template<typename Seed, typename Deserializer>
-decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer);
-}
-namespace detail {
-template<typename T>
-struct is_phantom_data : std::false_type {};
-template<typename U>
-struct is_phantom_data<rusty::PhantomData<U>> : std::true_type {};
-template<typename T>
-inline constexpr bool is_phantom_data_v =
-is_phantom_data<std::remove_cv_t<std::remove_reference_t<T>>>::value;
-
-template<typename ValueT, typename VisitorT>
-struct identifier_seed {
-using Value = ValueT;
-
-template<typename D>
-auto deserialize(D&& deserializer) {
-return ([&](auto&& __recv) -> decltype(auto) {
-if constexpr (requires {
-std::forward<decltype(__recv)>(__recv).deserialize_identifier(VisitorT{});
-}) {
-return std::forward<decltype(__recv)>(__recv).deserialize_identifier(VisitorT{});
-} else {
-return std::forward<decltype(__recv)>(__recv)->deserialize_identifier(VisitorT{});
-}
-})(std::forward<D>(deserializer));
-}
-};
-
-struct bytes_span_visitor {
-using Value = std::span<const uint8_t>;
-
-template<typename E>
-rusty::Result<Value, E> visit_bytes(std::span<const uint8_t> value) {
-return rusty::Result<Value, E>::Ok(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_borrowed_bytes(std::span<const uint8_t> value) {
-return rusty::Result<Value, E>::Ok(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_byte_buf(auto&&) { return rusty::Result<Value, E>::Err(E{}); }
-
-template<typename E>
-rusty::Result<Value, E> visit_str(std::string_view value) {
-return rusty::Result<Value, E>::Ok(rusty::as_bytes(value));
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_borrowed_str(std::string_view value) {
-return rusty::Result<Value, E>::Ok(rusty::as_bytes(value));
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_string(rusty::String value) {
-return rusty::Result<Value, E>::Ok(rusty::as_bytes(rusty::to_string_view(value)));
-}
-};
-
-template<typename Target>
-struct scalar_visitor {
-using Value = Target;
-
-template<typename E, typename V>
-rusty::Result<Value, E> accept(V&& value) const {
-using RawValue = std::remove_cv_t<std::remove_reference_t<Value>>;
-using RawInput = std::remove_cv_t<std::remove_reference_t<V>>;
-if constexpr (std::is_enum_v<RawValue> && std::is_integral_v<RawInput>) {
-using Underlying = std::underlying_type_t<RawValue>;
-Underlying raw = static_cast<Underlying>(value);
-if constexpr (requires { RawValue::Other; }) {
-if (raw > static_cast<Underlying>(RawValue::Other)) {
-return rusty::Result<Value, E>::Ok(RawValue::Other);
-}
-}
-return rusty::Result<Value, E>::Ok(static_cast<RawValue>(raw));
-} else if constexpr (std::is_constructible_v<Value, V&&>) {
-return rusty::Result<Value, E>::Ok(Value(std::forward<V>(value)));
-} else if constexpr (std::is_convertible_v<V&&, Value>) {
-return rusty::Result<Value, E>::Ok(static_cast<Value>(std::forward<V>(value)));
-} else {
-return rusty::Result<Value, E>::Err(E::custom("expected numeric token"));
-}
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_bool(bool value) const {
-return accept<E>(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_u8(uint8_t value) const {
-return accept<E>(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_u16(uint16_t value) const {
-return accept<E>(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_u32(uint32_t value) const {
-return accept<E>(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_u64(uint64_t value) const {
-return accept<E>(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_i8(int8_t value) const {
-return accept<E>(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_i16(int16_t value) const {
-return accept<E>(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_i32(int32_t value) const {
-return accept<E>(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_i64(int64_t value) const {
-return accept<E>(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_f32(float value) const {
-return accept<E>(value);
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_f64(double value) const {
-return accept<E>(value);
-}
-};
-
-struct unit_visitor {
-using Value = rusty::Unit;
-
-template<typename E>
-rusty::Result<Value, E> visit_unit() const {
-return rusty::Result<Value, E>::Ok(std::make_tuple());
-}
-};
-
-template<typename Target>
-struct option_visitor {
-using Value = Target;
-using Inner = std::remove_cv_t<std::remove_reference_t<typename Target::value_type>>;
-
-template<typename E>
-rusty::Result<Value, E> visit_none() const {
-return rusty::Result<Value, E>::Ok(Value(rusty::None));
-}
-
-template<typename E>
-rusty::Result<Value, E> visit_unit() const {
-return visit_none<E>();
-}
-
-template<typename E, typename Deserializer>
-rusty::Result<Value, E> visit_some(Deserializer&& deserializer) const {
-auto __inner = ::de::rusty_ext::deserialize(
-rusty::PhantomData<Inner>{},
-std::forward<Deserializer>(deserializer));
-if (__inner.is_err()) {
-return rusty::Result<Value, E>::Err(__inner.unwrap_err());
-}
-auto&& __inner_value = __inner.unwrap();
-if constexpr (requires { Value(std::forward<decltype(__inner_value)>(__inner_value)); }) {
-return rusty::Result<Value, E>::Ok(
-Value(std::forward<decltype(__inner_value)>(__inner_value)));
-} else {
-return rusty::Result<Value, E>::Err(E::custom("unsupported option target"));
-}
-}
-};
-
-template<typename De, typename EndToken>
-struct seq_access_bridge {
-using Error = std::remove_cv_t<std::remove_reference_t<
-decltype(rusty::peek_token(std::declval<De&>()).unwrap_err())>>;
-
-De& de;
-rusty::Option<size_t> len;
-EndToken end;
-
-template<typename Seed>
-auto next_element_seed(Seed&& seed) {
-using SeedType = std::remove_cv_t<std::remove_reference_t<Seed>>;
-using Ret = rusty::Result<rusty::Option<typename SeedType::Value>, Error>;
-
-auto __peek_res = rusty::peek_token(rusty::detail::deref_if_pointer_like(de));
-if (__peek_res.is_err()) {
-return Ret::Err(__peek_res.unwrap_err());
-}
-auto __peek_tok = __peek_res.unwrap();
-if constexpr (requires { rusty::detail::variant_holds<EndToken>(__peek_tok); }) {
-if (rusty::detail::variant_holds<EndToken>(__peek_tok)) {
-return Ret::Ok(rusty::Option<typename SeedType::Value>(rusty::None));
-}
-}
-len = len.map([](auto&& __len) -> size_t {
-return rusty::saturating_sub(__len, static_cast<size_t>(1));
-});
-
-auto __value = ::de::rusty_ext::deserialize(
-std::forward<Seed>(seed),
-rusty::detail::deref_if_pointer_like(de));
-return __value.map([](auto&& _v) {
-return rusty::Some(std::forward<decltype(_v)>(_v));
-});
-}
-
-rusty::Option<size_t> size_hint() const {
-return len;
-}
-};
-}
-namespace rusty_ext {
-template<typename Deserializer, typename Visitor>
-decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor);
-
-template<typename Seed, typename Deserializer>
-decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
-if constexpr (requires {
-std::forward<Seed>(seed).deserialize(std::forward<Deserializer>(deserializer));
-}) {
-return std::forward<Seed>(seed).deserialize(std::forward<Deserializer>(deserializer));
-} else if constexpr (detail::is_phantom_data_v<Seed>) {
-using SeedType = std::remove_cv_t<std::remove_reference_t<Seed>>;
-using Target = typename SeedType::value_type;
-if constexpr (requires { Target::deserialize(std::forward<Deserializer>(deserializer)); }) {
-return Target::deserialize(std::forward<Deserializer>(deserializer));
-} else if constexpr (requires {
-Target::deserialize(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-}) {
-return Target::deserialize(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-} else if constexpr (std::is_reference_v<Target>) {
-using Owned = std::remove_cv_t<std::remove_reference_t<Target>>;
-auto __owned = ::de::rusty_ext::deserialize(
-rusty::PhantomData<Owned>{},
-std::forward<Deserializer>(deserializer));
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(__owned.unwrap_err())>>;
-using Ret = rusty::Result<Target, Err>;
-if (__owned.is_err()) {
-return Ret::Err(__owned.unwrap_err());
-}
-if constexpr (std::is_const_v<std::remove_reference_t<Target>>) {
-auto __bound = rusty::addr_of_temp(std::move(__owned.unwrap()));
-return Ret::Ok(static_cast<Target>(*__bound));
-} else {
-return Ret::Err(Err::custom("unsupported non-const reference target"));
-}
-} else if constexpr (
-std::is_same_v<Target, rusty::Unit>
-&& requires {
-rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer))
-.deserialize_unit(detail::unit_visitor{});
-}) {
-return rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer))
-.deserialize_unit(detail::unit_visitor{});
-} else if constexpr (
-std::is_same_v<Target, rusty::Unit>
-&& requires {
-rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-}) {
-auto __tok_res = rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(__tok_res.unwrap_err())>>;
-if (__tok_res.is_err()) {
-return rusty::Result<rusty::Unit, Err>::Err(__tok_res.unwrap_err());
-}
-auto __tok = __tok_res.unwrap();
-if constexpr (requires { rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok); }) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok)) {
-return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok);
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok)) {
-return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
-}
-}
-return rusty::Result<rusty::Unit, Err>::Err(
-Err::custom("expected unit token"));
-} else if constexpr (
-(std::is_arithmetic_v<Target> || std::is_enum_v<Target> || std::is_same_v<Target, bool>)
-&& requires {
-::de::rusty_ext::deserialize_any(
-rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)),
-detail::scalar_visitor<Target>{});
-}) {
-return ::de::rusty_ext::deserialize_any(
-rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)),
-detail::scalar_visitor<Target>{});
-} else if constexpr (
-(std::is_arithmetic_v<Target> || std::is_enum_v<Target> || std::is_same_v<Target, bool>)
-&& requires {
-rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-}) {
-auto __tok_res = rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(__tok_res.unwrap_err())>>;
-using Ret = rusty::Result<Target, Err>;
-if (__tok_res.is_err()) {
-return Ret::Err(__tok_res.unwrap_err());
-}
-auto __tok = __tok_res.unwrap();
-auto __from = [&](auto&& __value) {
-return Ret::Ok(static_cast<Target>(__value));
-};
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bool>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Bool>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bool>(__tok)) {
-return __from(rusty::detail::variant_get<::rusty_token_placeholder::Token_Bool>(__tok)._0);
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_U8>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_U8>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_U8>(__tok)) {
-return __from(rusty::detail::variant_get<::rusty_token_placeholder::Token_U8>(__tok)._0);
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_U16>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_U16>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_U16>(__tok)) {
-return __from(rusty::detail::variant_get<::rusty_token_placeholder::Token_U16>(__tok)._0);
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_U32>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_U32>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_U32>(__tok)) {
-return __from(rusty::detail::variant_get<::rusty_token_placeholder::Token_U32>(__tok)._0);
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_U64>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_U64>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_U64>(__tok)) {
-return __from(rusty::detail::variant_get<::rusty_token_placeholder::Token_U64>(__tok)._0);
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_I8>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_I8>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_I8>(__tok)) {
-return __from(rusty::detail::variant_get<::rusty_token_placeholder::Token_I8>(__tok)._0);
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_I16>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_I16>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_I16>(__tok)) {
-return __from(rusty::detail::variant_get<::rusty_token_placeholder::Token_I16>(__tok)._0);
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_I32>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_I32>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_I32>(__tok)) {
-return __from(rusty::detail::variant_get<::rusty_token_placeholder::Token_I32>(__tok)._0);
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_I64>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_I64>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_I64>(__tok)) {
-return __from(rusty::detail::variant_get<::rusty_token_placeholder::Token_I64>(__tok)._0);
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_F32>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_F32>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_F32>(__tok)) {
-return __from(rusty::detail::variant_get<::rusty_token_placeholder::Token_F32>(__tok)._0);
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_F64>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_F64>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_F64>(__tok)) {
-return __from(rusty::detail::variant_get<::rusty_token_placeholder::Token_F64>(__tok)._0);
-}
-}
-return Ret::Err(Err::custom("expected numeric token"));
-} else if constexpr (
-requires {
-typename Target::value_type;
-Target(rusty::None);
-std::declval<Target&>().is_some();
-std::declval<Target&>().is_none();
-rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer))
-.deserialize_option(detail::option_visitor<Target>{});
-}) {
-return rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer))
-.deserialize_option(detail::option_visitor<Target>{});
-} else if constexpr (
-requires {
-typename Target::value_type;
-Target(rusty::None);
-std::declval<Target&>().is_some();
-std::declval<Target&>().is_none();
-rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-}) {
-auto __tok_res = rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(__tok_res.unwrap_err())>>;
-using Ret = rusty::Result<Target, Err>;
-if (__tok_res.is_err()) {
-return Ret::Err(__tok_res.unwrap_err());
-}
-auto __tok = __tok_res.unwrap();
-if constexpr (requires { rusty::detail::variant_holds<::rusty_token_placeholder::Token_None>(__tok); }) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_None>(__tok)) {
-return Ret::Ok(Target(rusty::None));
-}
-}
-if constexpr (requires { rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok); }) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok)) {
-return Ret::Ok(Target(rusty::None));
-}
-}
-if constexpr (requires { rusty::detail::variant_holds<::rusty_token_placeholder::Token_Some>(__tok); }) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Some>(__tok)) {
-using Inner = std::remove_cv_t<std::remove_reference_t<
-typename Target::value_type>>;
-auto __inner = ::de::rusty_ext::deserialize(
-rusty::PhantomData<Inner>{},
-std::forward<Deserializer>(deserializer));
-if (__inner.is_err()) {
-return Ret::Err(__inner.unwrap_err());
-}
-auto&& __inner_value = __inner.unwrap();
-if constexpr (requires {
-Target(std::forward<decltype(__inner_value)>(__inner_value));
-}) {
-return Ret::Ok(Target(std::forward<decltype(__inner_value)>(
-__inner_value)));
-} else {
-return Ret::Err(Err::custom("unsupported option target"));
-}
-}
-}
-return Ret::Err(Err::custom("expected option token"));
-} else if constexpr (requires { std::declval<Target&>().value; }) {
-using ValueMember = std::remove_cv_t<std::remove_reference_t<decltype(std::declval<Target&>().value)>>;
-auto __inner = ::de::rusty_ext::deserialize(
-rusty::PhantomData<ValueMember>{},
-std::forward<Deserializer>(deserializer));
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(__inner.unwrap_err())>>;
-using Ret = rusty::Result<Target, Err>;
-if (__inner.is_err()) {
-return Ret::Err(__inner.unwrap_err());
-}
-auto&& __inner_value = __inner.unwrap();
-if constexpr (requires {
-Target{.value = std::forward<decltype(__inner_value)>(__inner_value)};
-}) {
-return Ret::Ok(Target{
-.value = std::forward<decltype(__inner_value)>(__inner_value)});
-} else if constexpr (requires {
-Target{std::forward<decltype(__inner_value)>(__inner_value)};
-}) {
-return Ret::Ok(Target{
-std::forward<decltype(__inner_value)>(__inner_value)});
-} else {
-return Ret::Err(Err::custom("unsupported seed wrapper"));
-}
-} else if constexpr (requires {
-::de::rusty_ext::deserialize_any(
-rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer)),
-detail::bytes_span_visitor{});
-requires (
-std::is_same_v<Target, std::span<const uint8_t>>
-|| rusty::detail::is_std_array_type_v<std::remove_reference_t<Target>>
-|| requires { Target::from(std::declval<std::span<const uint8_t>>()); }
-|| requires { Target::new_(std::declval<std::span<const uint8_t>>()); });
-}) {
-auto __bytes_res = ::de::rusty_ext::deserialize_any(
-rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer)),
-detail::bytes_span_visitor{});
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(__bytes_res.unwrap_err())>>;
-using Ret = rusty::Result<Target, Err>;
-if (__bytes_res.is_err()) {
-return Ret::Err(__bytes_res.unwrap_err());
-}
-auto __bytes = __bytes_res.unwrap();
-if constexpr (std::is_same_v<Target, std::span<const uint8_t>>) {
-return Ret::Ok(__bytes);
-} else if constexpr (rusty::detail::is_std_array_type_v<std::remove_reference_t<Target>>) {
-auto __arr_res = rusty::try_from<Target>(__bytes);
-if (__arr_res.is_err()) {
-return Ret::Err(Err::custom("expected bytes token"));
-}
-return Ret::Ok(__arr_res.unwrap());
-} else if constexpr (requires { Target::from(__bytes); }) {
-return Ret::Ok(Target::from(__bytes));
-} else {
-return Ret::Ok(Target::new_(__bytes));
-}
-} else if constexpr (requires {
-{ Target::new_(std::declval<std::span<const uint8_t>>()) };
-rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-}) {
-auto __tok_res = rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(__tok_res.unwrap_err())>>;
-using Ret = rusty::Result<Target, Err>;
-if (__tok_res.is_err()) {
-return Ret::Err(__tok_res.unwrap_err());
-}
-auto __tok = __tok_res.unwrap();
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(__tok)) {
-return Ret::Ok(Target::new_(rusty::as_u8_slice(
-rusty::detail::deref_if_pointer(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(__tok)._0))));
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(__tok)) {
-return Ret::Ok(Target::new_(rusty::as_u8_slice(
-rusty::detail::deref_if_pointer(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(__tok)._0))));
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(__tok)) {
-return Ret::Ok(Target::new_(rusty::as_u8_slice(
-rusty::detail::deref_if_pointer(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(__tok)._0))));
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_Str>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Str>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Str>(__tok)) {
-return Ret::Ok(Target::new_(rusty::as_bytes(rusty::to_string_view(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Str>(__tok)._0))));
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedStr>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedStr>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedStr>(__tok)) {
-return Ret::Ok(Target::new_(rusty::as_bytes(rusty::to_string_view(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedStr>(__tok)._0))));
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_String>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_String>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_String>(__tok)) {
-return Ret::Ok(Target::new_(rusty::as_bytes(rusty::to_string_view(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_String>(__tok)._0))));
-}
-}
-return Ret::Err(Err::custom("expected bytes token"));
-} else if constexpr (requires {
-rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-requires std::is_same_v<Target, std::span<const uint8_t>>;
-}) {
-auto __tok_res = rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(__tok_res.unwrap_err())>>;
-using Ret = rusty::Result<Target, Err>;
-if (__tok_res.is_err()) {
-return Ret::Err(__tok_res.unwrap_err());
-}
-auto __tok = __tok_res.unwrap();
-auto __as_target = [&](auto&& __bytes_expr) {
-return Ret::Ok(rusty::as_u8_slice(
-std::forward<decltype(__bytes_expr)>(__bytes_expr)));
-};
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(__tok)) {
-return __as_target(rusty::detail::deref_if_pointer(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(__tok)._0));
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(__tok)) {
-return __as_target(rusty::detail::deref_if_pointer(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(__tok)._0));
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(__tok)) {
-return __as_target(rusty::detail::deref_if_pointer(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(__tok)._0));
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_Str>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Str>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Str>(__tok)) {
-return __as_target(rusty::as_bytes(rusty::to_string_view(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Str>(__tok)._0)));
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedStr>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedStr>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedStr>(__tok)) {
-return __as_target(rusty::as_bytes(rusty::to_string_view(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedStr>(__tok)._0)));
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_String>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_String>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_String>(__tok)) {
-return __as_target(rusty::as_bytes(rusty::to_string_view(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_String>(__tok)._0)));
-}
-}
-return Ret::Err(Err::custom("expected bytes token"));
-} else if constexpr (requires {
-::de::rusty_ext::deserialize_any(
-rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer)),
-detail::bytes_span_visitor{});
-}) {
-auto __bytes_res = ::de::rusty_ext::deserialize_any(
-rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer)),
-detail::bytes_span_visitor{});
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(__bytes_res.unwrap_err())>>;
-using Ret = rusty::Result<Target, Err>;
-if (__bytes_res.is_err()) {
-return Ret::Err(__bytes_res.unwrap_err());
-}
-auto __bytes = __bytes_res.unwrap();
-if constexpr (std::is_same_v<Target, std::span<const uint8_t>>) {
-return Ret::Ok(__bytes);
-} else if constexpr (
-rusty::detail::is_std_array_type_v<std::remove_reference_t<Target>>) {
-auto __arr_res = rusty::try_from<Target>(__bytes);
-if (__arr_res.is_err()) {
-return Ret::Err(Err::custom("expected bytes token"));
-}
-return Ret::Ok(__arr_res.unwrap());
-} else if constexpr (requires { Target::from(__bytes); }) {
-return Ret::Ok(Target::from(__bytes));
-} else if constexpr (requires { Target::new_(__bytes); }) {
-return Ret::Ok(Target::new_(__bytes));
-} else if constexpr (std::is_constructible_v<Target, decltype(__bytes)>) {
-return Ret::Ok(Target(__bytes));
-} else if constexpr (std::is_convertible_v<decltype(__bytes), Target>) {
-return Ret::Ok(static_cast<Target>(__bytes));
-} else if constexpr (requires {
-typename std::variant_alternative_t<
-0,
-std::remove_cv_t<std::remove_reference_t<Target>>>;
-}) {
-using VariantTarget = std::remove_cv_t<std::remove_reference_t<Target>>;
-using Alt0 = std::variant_alternative_t<0, VariantTarget>;
-if constexpr (std::is_constructible_v<Alt0, decltype(__bytes)>) {
-return Ret::Ok(VariantTarget{Alt0(__bytes)});
-} else if constexpr (
-std::is_constructible_v<Alt0, decltype(rusty::to_vec(__bytes))>) {
-return Ret::Ok(VariantTarget{Alt0(rusty::to_vec(__bytes))});
-} else if constexpr (
-std::is_constructible_v<Alt0, std::span<const uint8_t>>) {
-return Ret::Ok(VariantTarget{Alt0(rusty::as_u8_slice(__bytes))});
-}
-} else if constexpr (requires { Target::from(rusty::to_vec(__bytes)); }) {
-return Ret::Ok(Target::from(rusty::to_vec(__bytes)));
-} else if constexpr (requires { Target::new_(rusty::to_vec(__bytes)); }) {
-return Ret::Ok(Target::new_(rusty::to_vec(__bytes)));
-} else if constexpr (
-std::is_constructible_v<Target, decltype(rusty::to_vec(__bytes))>) {
-return Ret::Ok(Target(rusty::to_vec(__bytes)));
-} else if constexpr (
-std::is_convertible_v<decltype(rusty::to_vec(__bytes)), Target>) {
-return Ret::Ok(static_cast<Target>(rusty::to_vec(__bytes)));
-} else if constexpr (requires {
-Target::from(rusty::into_boxed_slice(rusty::to_vec(__bytes)));
-}) {
-return Ret::Ok(Target::from(rusty::into_boxed_slice(rusty::to_vec(__bytes))));
-} else if constexpr (requires {
-Target::new_(rusty::into_boxed_slice(rusty::to_vec(__bytes)));
-}) {
-return Ret::Ok(Target::new_(rusty::into_boxed_slice(rusty::to_vec(__bytes))));
-} else if constexpr (
-std::is_constructible_v<
-Target,
-decltype(rusty::into_boxed_slice(rusty::to_vec(__bytes)))>) {
-return Ret::Ok(Target(rusty::into_boxed_slice(rusty::to_vec(__bytes))));
-} else if constexpr (
-std::is_convertible_v<
-decltype(rusty::into_boxed_slice(rusty::to_vec(__bytes))),
-Target>) {
-return Ret::Ok(static_cast<Target>(
-rusty::into_boxed_slice(rusty::to_vec(__bytes))));
-} else if constexpr (
-requires { *std::declval<Target&>(); }
-&& requires {
-Target::new_(
-std::declval<std::remove_cvref_t<
-decltype(*std::declval<Target&>())>>());
-}) {
-using Inner = std::remove_cv_t<std::remove_reference_t<
-decltype(*std::declval<Target&>())>>;
-if constexpr (std::is_same_v<Inner, std::span<uint8_t>>) {
-return Ret::Ok(rusty::into_boxed_slice(rusty::to_vec(__bytes)));
-} else if constexpr (std::is_same_v<Inner, std::span<const uint8_t>>) {
-return Ret::Ok(Target::new_(rusty::as_u8_slice(__bytes)));
-} else if constexpr (rusty::detail::is_std_array_type_v<Inner>) {
-auto __arr_res = rusty::try_from<Inner>(__bytes);
-if (__arr_res.is_err()) {
-return Ret::Err(Err::custom("expected bytes token"));
-}
-return Ret::Ok(Target::new_(__arr_res.unwrap()));
-} else if constexpr (requires { Inner::from(__bytes); }) {
-return Ret::Ok(Target::new_(Inner::from(__bytes)));
-} else if constexpr (requires { Inner::new_(__bytes); }) {
-return Ret::Ok(Target::new_(Inner::new_(__bytes)));
-} else if constexpr (std::is_constructible_v<Inner, decltype(__bytes)>) {
-return Ret::Ok(Target::new_(Inner(__bytes)));
-} else if constexpr (std::is_convertible_v<decltype(__bytes), Inner>) {
-return Ret::Ok(Target::new_(static_cast<Inner>(__bytes)));
-} else if constexpr (requires { Inner::from(rusty::to_vec(__bytes)); }) {
-return Ret::Ok(Target::new_(Inner::from(rusty::to_vec(__bytes))));
-} else if constexpr (requires { Inner::new_(rusty::to_vec(__bytes)); }) {
-return Ret::Ok(Target::new_(Inner::new_(rusty::to_vec(__bytes))));
-} else if constexpr (
-std::is_constructible_v<Inner, decltype(rusty::to_vec(__bytes))>) {
-return Ret::Ok(Target::new_(Inner(rusty::to_vec(__bytes))));
-} else if constexpr (
-std::is_convertible_v<decltype(rusty::to_vec(__bytes)), Inner>) {
-return Ret::Ok(Target::new_(static_cast<Inner>(rusty::to_vec(__bytes))));
-} else {
-return Ret::Err(Err::custom(std::format("unsupported bytes target: {0}", typeid(Target).name())));
-}
-} else {
-return Ret::Err(Err::custom(std::format("unsupported bytes target: {0}", typeid(Target).name())));
-}
-} else if constexpr (requires { std::declval<Target&>().value; }) {
-using ValueMember = std::remove_cv_t<std::remove_reference_t<decltype(std::declval<Target&>().value)>>;
-auto __inner = ::de::rusty_ext::deserialize(
-rusty::PhantomData<ValueMember>{},
-std::forward<Deserializer>(deserializer));
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(__inner.unwrap_err())>>;
-using Ret = rusty::Result<Target, Err>;
-if (__inner.is_err()) {
-return Ret::Err(__inner.unwrap_err());
-}
-auto&& __inner_value = __inner.unwrap();
-if constexpr (requires {
-Target{.value = std::forward<decltype(__inner_value)>(__inner_value)};
-}) {
-return Ret::Ok(Target{
-.value = std::forward<decltype(__inner_value)>(__inner_value)});
-} else if constexpr (requires {
-Target{std::forward<decltype(__inner_value)>(__inner_value)};
-}) {
-return Ret::Ok(Target{
-std::forward<decltype(__inner_value)>(__inner_value)});
-} else {
-return Ret::Err(Err::custom("unsupported seed wrapper"));
-}
-} else {
-return std::forward<Seed>(seed).deserialize(std::forward<Deserializer>(deserializer));
-}
-} else if constexpr (requires {
-std::remove_cv_t<std::remove_reference_t<Seed>>::deserialize(
-std::forward<Deserializer>(deserializer));
-}) {
-using SeedType = std::remove_cv_t<std::remove_reference_t<Seed>>;
-return SeedType::deserialize(std::forward<Deserializer>(deserializer));
-} else if constexpr (requires {
-std::remove_cv_t<std::remove_reference_t<Seed>>::deserialize(
-rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer)));
-}) {
-using SeedType = std::remove_cv_t<std::remove_reference_t<Seed>>;
-return SeedType::deserialize(
-rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer)));
-} else {
-return std::forward<Seed>(seed).deserialize(std::forward<Deserializer>(deserializer));
-}
-}
-template<typename Deserializer, typename Visitor>
-decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor) {
-if constexpr (requires {
-std::forward<Deserializer>(deserializer)
-.deserialize_any(std::forward<Visitor>(visitor));
-requires (!std::is_void_v<decltype(std::forward<Deserializer>(deserializer)
-.deserialize_any(std::forward<Visitor>(visitor)))>);
-}) {
-return std::forward<Deserializer>(deserializer).deserialize_any(std::forward<Visitor>(visitor));
-} else if constexpr (requires {
-rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer))
-.deserialize_any(std::forward<Visitor>(visitor));
-requires (!std::is_void_v<decltype(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer))
-.deserialize_any(std::forward<Visitor>(visitor)))>);
-}) {
-return rusty::detail::deref_if_pointer_like(std::forward<Deserializer>(deserializer))
-.deserialize_any(std::forward<Visitor>(visitor));
-} else if constexpr (requires {
-typename std::remove_cv_t<std::remove_reference_t<Visitor>>::Value;
-rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-}) {
-using Value = typename std::remove_cv_t<std::remove_reference_t<Visitor>>::Value;
-auto __tok_res = rusty::next_token(rusty::detail::deref_if_pointer_like(
-std::forward<Deserializer>(deserializer)));
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(__tok_res.unwrap_err())>>;
-using Ret = rusty::Result<Value, Err>;
-if (__tok_res.is_err()) {
-return Ret::Err(__tok_res.unwrap_err());
-}
-auto __tok = __tok_res.unwrap();
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok);
-std::forward<Visitor>(visitor).visit_unit();
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok)) {
-return std::forward<Visitor>(visitor).visit_unit();
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok);
-std::forward<Visitor>(visitor).visit_unit();
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok)) {
-return std::forward<Visitor>(visitor).visit_unit();
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(__tok)) {
-auto __bytes = rusty::as_u8_slice(
-rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(__tok)._0));
-if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_bytes<Err>(__bytes);
-}) {
-return std::forward<Visitor>(visitor).template visit_bytes<Err>(__bytes);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_bytes(__bytes);
-}) {
-return std::forward<Visitor>(visitor).visit_bytes(__bytes);
-}
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(__tok)) {
-auto __bytes = rusty::as_u8_slice(rusty::detail::deref_if_pointer(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(__tok)._0));
-if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_borrowed_bytes<Err>(__bytes);
-}) {
-return std::forward<Visitor>(visitor).template visit_borrowed_bytes<Err>(__bytes);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_borrowed_bytes(__bytes);
-}) {
-return std::forward<Visitor>(visitor).visit_borrowed_bytes(__bytes);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_bytes<Err>(__bytes);
-}) {
-return std::forward<Visitor>(visitor).template visit_bytes<Err>(__bytes);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_bytes(__bytes);
-}) {
-return std::forward<Visitor>(visitor).visit_bytes(__bytes);
-}
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(__tok)) {
-auto&& __bytes = rusty::detail::deref_if_pointer(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(__tok)._0);
-if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_byte_buf<Err>(__bytes);
-}) {
-return std::forward<Visitor>(visitor).template visit_byte_buf<Err>(__bytes);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_byte_buf(__bytes);
-}) {
-return std::forward<Visitor>(visitor).visit_byte_buf(__bytes);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_bytes<Err>(rusty::as_u8_slice(__bytes));
-}) {
-return std::forward<Visitor>(visitor).template visit_bytes<Err>(rusty::as_u8_slice(__bytes));
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_bytes(rusty::as_u8_slice(__bytes));
-}) {
-return std::forward<Visitor>(visitor).visit_bytes(rusty::as_u8_slice(__bytes));
-}
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_Seq>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Seq>(__tok).len;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Seq>(__tok)) {
-auto __len = rusty::detail::variant_get<::rusty_token_placeholder::Token_Seq>(__tok).len;
-if constexpr (requires {
-std::forward<Visitor>(visitor).visit_seq(
-::de::detail::seq_access_bridge<
-std::remove_cv_t<std::remove_reference_t<
-decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
-::rusty_token_placeholder::Token_SeqEnd>{
-.de = rusty::detail::deref_if_pointer_like(deserializer),
-.len = __len,
-.end = ::rusty_token_placeholder::SeqEnd()});
-}) {
-auto __ret = std::forward<Visitor>(visitor).visit_seq(
-::de::detail::seq_access_bridge<
-std::remove_cv_t<std::remove_reference_t<
-decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
-::rusty_token_placeholder::Token_SeqEnd>{
-.de = rusty::detail::deref_if_pointer_like(deserializer),
-.len = __len,
-.end = ::rusty_token_placeholder::SeqEnd()});
-if constexpr (requires {
-__ret.is_ok();
-rusty::peek_token(rusty::detail::deref_if_pointer_like(deserializer));
-}) {
-if (__ret.is_ok()) {
-auto __peek = rusty::peek_token(
-rusty::detail::deref_if_pointer_like(deserializer));
-if (__peek.is_ok()) {
-auto __peek_tok = __peek.unwrap();
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_SeqEnd>(__peek_tok);
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_SeqEnd>(__peek_tok)) {
-static_cast<void>(rusty::next_token(
-rusty::detail::deref_if_pointer_like(deserializer)));
-}
-}
-}
-}
-}
-return __ret;
-}
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_Tuple>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Tuple>(__tok).len;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Tuple>(__tok)) {
-auto __len = rusty::Option<size_t>(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Tuple>(__tok).len);
-if constexpr (requires {
-std::forward<Visitor>(visitor).visit_seq(
-::de::detail::seq_access_bridge<
-std::remove_cv_t<std::remove_reference_t<
-decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
-::rusty_token_placeholder::Token_TupleEnd>{
-.de = rusty::detail::deref_if_pointer_like(deserializer),
-.len = __len,
-.end = ::rusty_token_placeholder::TupleEnd()});
-}) {
-auto __ret = std::forward<Visitor>(visitor).visit_seq(
-::de::detail::seq_access_bridge<
-std::remove_cv_t<std::remove_reference_t<
-decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
-::rusty_token_placeholder::Token_TupleEnd>{
-.de = rusty::detail::deref_if_pointer_like(deserializer),
-.len = __len,
-.end = ::rusty_token_placeholder::TupleEnd()});
-if constexpr (requires {
-__ret.is_ok();
-rusty::peek_token(rusty::detail::deref_if_pointer_like(deserializer));
-}) {
-if (__ret.is_ok()) {
-auto __peek = rusty::peek_token(
-rusty::detail::deref_if_pointer_like(deserializer));
-if (__peek.is_ok()) {
-auto __peek_tok = __peek.unwrap();
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_TupleEnd>(__peek_tok);
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_TupleEnd>(__peek_tok)) {
-static_cast<void>(rusty::next_token(
-rusty::detail::deref_if_pointer_like(deserializer)));
-}
-}
-}
-}
-}
-return __ret;
-}
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_TupleStruct>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_TupleStruct>(__tok).len;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_TupleStruct>(__tok)) {
-auto __len = rusty::Option<size_t>(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_TupleStruct>(__tok).len);
-if constexpr (requires {
-std::forward<Visitor>(visitor).visit_seq(
-::de::detail::seq_access_bridge<
-std::remove_cv_t<std::remove_reference_t<
-decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
-::rusty_token_placeholder::Token_TupleStructEnd>{
-.de = rusty::detail::deref_if_pointer_like(deserializer),
-.len = __len,
-.end = ::rusty_token_placeholder::TupleStructEnd()});
-}) {
-auto __ret = std::forward<Visitor>(visitor).visit_seq(
-::de::detail::seq_access_bridge<
-std::remove_cv_t<std::remove_reference_t<
-decltype(rusty::detail::deref_if_pointer_like(deserializer))>>,
-::rusty_token_placeholder::Token_TupleStructEnd>{
-.de = rusty::detail::deref_if_pointer_like(deserializer),
-.len = __len,
-.end = ::rusty_token_placeholder::TupleStructEnd()});
-if constexpr (requires {
-__ret.is_ok();
-rusty::peek_token(rusty::detail::deref_if_pointer_like(deserializer));
-}) {
-if (__ret.is_ok()) {
-auto __peek = rusty::peek_token(
-rusty::detail::deref_if_pointer_like(deserializer));
-if (__peek.is_ok()) {
-auto __peek_tok = __peek.unwrap();
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_TupleStructEnd>(__peek_tok);
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_TupleStructEnd>(__peek_tok)) {
-static_cast<void>(rusty::next_token(
-rusty::detail::deref_if_pointer_like(deserializer)));
-}
-}
-}
-}
-}
-return __ret;
-}
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_Str>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Str>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Str>(__tok)) {
-auto __s = rusty::to_string_view(rusty::detail::variant_get<::rusty_token_placeholder::Token_Str>(__tok)._0);
-auto __bytes = rusty::as_bytes(__s);
-if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_bytes<Err>(__bytes);
-}) {
-return std::forward<Visitor>(visitor).template visit_bytes<Err>(__bytes);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_bytes(__bytes);
-}) {
-return std::forward<Visitor>(visitor).visit_bytes(__bytes);
-}
-if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_str<Err>(__s);
-}) {
-return std::forward<Visitor>(visitor).template visit_str<Err>(__s);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_str(__s);
-}) {
-return std::forward<Visitor>(visitor).visit_str(__s);
-}
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedStr>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedStr>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedStr>(__tok)) {
-auto __s = rusty::to_string_view(rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedStr>(__tok)._0);
-auto __bytes = rusty::as_bytes(__s);
-if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_borrowed_bytes<Err>(__bytes);
-}) {
-return std::forward<Visitor>(visitor).template visit_borrowed_bytes<Err>(__bytes);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_borrowed_bytes(__bytes);
-}) {
-return std::forward<Visitor>(visitor).visit_borrowed_bytes(__bytes);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_bytes<Err>(__bytes);
-}) {
-return std::forward<Visitor>(visitor).template visit_bytes<Err>(__bytes);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_bytes(__bytes);
-}) {
-return std::forward<Visitor>(visitor).visit_bytes(__bytes);
-}
-if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_borrowed_str<Err>(__s);
-}) {
-return std::forward<Visitor>(visitor).template visit_borrowed_str<Err>(__s);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_borrowed_str(__s);
-}) {
-return std::forward<Visitor>(visitor).visit_borrowed_str(__s);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_str<Err>(__s);
-}) {
-return std::forward<Visitor>(visitor).template visit_str<Err>(__s);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_str(__s);
-}) {
-return std::forward<Visitor>(visitor).visit_str(__s);
-}
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_String>(__tok);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_String>(__tok)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_String>(__tok)) {
-auto&& __s = rusty::detail::deref_if_pointer(
-rusty::detail::variant_get<::rusty_token_placeholder::Token_String>(__tok)._0);
-if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_string<Err>(__s);
-}) {
-return std::forward<Visitor>(visitor).template visit_string<Err>(__s);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_string(__s);
-}) {
-return std::forward<Visitor>(visitor).visit_string(__s);
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_bytes<Err>(rusty::as_bytes(rusty::to_string_view(__s)));
-}) {
-return std::forward<Visitor>(visitor).template visit_bytes<Err>(rusty::as_bytes(rusty::to_string_view(__s)));
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_bytes(rusty::as_bytes(rusty::to_string_view(__s)));
-}) {
-return std::forward<Visitor>(visitor).visit_bytes(rusty::as_bytes(rusty::to_string_view(__s)));
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).template visit_str<Err>(rusty::to_string_view(__s));
-}) {
-return std::forward<Visitor>(visitor).template visit_str<Err>(rusty::to_string_view(__s));
-} else if constexpr (requires {
-std::forward<Visitor>(visitor).visit_str(rusty::to_string_view(__s));
-}) {
-return std::forward<Visitor>(visitor).visit_str(rusty::to_string_view(__s));
-}
-}
-}
-return Ret::Err(Err::custom(std::format(
-"unsupported token for deserialize_any: {0}",
-rusty::to_string(__tok))));
-} else if constexpr (requires {
-typename std::remove_cv_t<std::remove_reference_t<Visitor>>::Value;
-::de::rusty_ext::deserialize(
-rusty::PhantomData<typename std::remove_cv_t<std::remove_reference_t<Visitor>>::Value>{},
-std::forward<Deserializer>(deserializer));
-}) {
-using Target = typename std::remove_cv_t<std::remove_reference_t<Visitor>>::Value;
-return ::de::rusty_ext::deserialize(
-rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer));
-} else {
-return std::forward<Deserializer>(deserializer).deserialize_any(std::forward<Visitor>(visitor));
-}
-}
-template<typename Target, typename Deserializer, typename Place>
-decltype(auto) deserialize_in_place(
-rusty::PhantomData<Target>,
-Deserializer&& deserializer,
-Place&& place) {
-if constexpr (requires {
-Target::deserialize_in_place(
-std::forward<Deserializer>(deserializer), std::forward<Place>(place));
-}) {
-return Target::deserialize_in_place(
-std::forward<Deserializer>(deserializer), std::forward<Place>(place));
-} else if constexpr (requires {
-{ ::de::rusty_ext::deserialize(
-rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer)) };
-::de::rusty_ext::deserialize(
-rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer)).is_ok();
-::de::rusty_ext::deserialize(
-rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer)).unwrap_err();
-}) {
-auto __res = ::de::rusty_ext::deserialize(
-rusty::PhantomData<Target>{}, std::forward<Deserializer>(deserializer));
-using Err = std::remove_cv_t<std::remove_reference_t<decltype(__res.unwrap_err())>>;
-if (__res.is_ok()) {
-static_cast<void>(rusty::mem::replace(
-rusty::detail::deref_if_pointer_like(std::forward<Place>(place)),
-__res.unwrap()));
-return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
-}
-return rusty::Result<rusty::Unit, Err>::Err(__res.unwrap_err());
-} else {
-return Target::deserialize_in_place(
-std::forward<Deserializer>(deserializer), std::forward<Place>(place));
-}
-}
-template<typename Deserializer, typename Place>
-decltype(auto) deserialize_in_place(Deserializer&& deserializer, Place&& place) {
-using Target = std::remove_cv_t<std::remove_reference_t<Place>>;
-return ::de::rusty_ext::deserialize_in_place(
-rusty::PhantomData<Target>{},
-std::forward<Deserializer>(deserializer),
-std::forward<Place>(place));
-}
-template<typename Value, typename Deserializer, typename Place>
-decltype(auto) deserialize_in_place(
-Value&& value,
-Deserializer&& deserializer,
-Place&& place) {
-if constexpr (requires {
-std::forward<Value>(value).deserialize_in_place(
-std::forward<Deserializer>(deserializer), std::forward<Place>(place));
-}) {
-return std::forward<Value>(value).deserialize_in_place(
-std::forward<Deserializer>(deserializer), std::forward<Place>(place));
-} else if constexpr (requires {
-std::remove_cv_t<std::remove_reference_t<Value>>::deserialize_in_place(
-std::forward<Deserializer>(deserializer), std::forward<Place>(place));
-}) {
-using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;
-return ValueType::deserialize_in_place(
-std::forward<Deserializer>(deserializer), std::forward<Place>(place));
-} else {
-return std::forward<Value>(value).deserialize_in_place(
-std::forward<Deserializer>(deserializer), std::forward<Place>(place));
-}
-}
-}
-namespace impls {
-namespace rusty_ext {
-template<typename Seed, typename Deserializer>
-decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
-return ::de::rusty_ext::deserialize(
-std::forward<Seed>(seed), std::forward<Deserializer>(deserializer));
-}
-template<typename Value, typename Deserializer, typename Place>
-decltype(auto) deserialize_in_place(
-Value&& value,
-Deserializer&& deserializer,
-Place&& place) {
-return ::de::rusty_ext::deserialize_in_place(
-std::forward<Value>(value),
-std::forward<Deserializer>(deserializer),
-std::forward<Place>(place));
-}
-}
-}
-}
-namespace ser {
-namespace impls {
-namespace rusty_ext {
-}
-}
-namespace rusty_ext {
-namespace detail {
-template<typename T>
-struct is_std_span : std::false_type {};
-template<typename Elem, std::size_t Extent>
-struct is_std_span<std::span<Elem, Extent>> : std::true_type {};
-template<typename T>
-inline constexpr bool is_std_span_v =
-is_std_span<std::remove_cv_t<std::remove_reference_t<T>>>::value;
-}
-template<typename Serializer>
-struct serializer_ref {
-using serializer_ref_marker = void;
-using Target = std::remove_cv_t<std::remove_reference_t<Serializer>>;
-Target* ptr;
-using Ok = typename Target::Ok;
-using Error = typename Target::Error;
-using SerializeSeq = std::conditional_t<
-std::is_same_v<typename Target::SerializeSeq, Target>,
-serializer_ref<Serializer>,
-typename Target::SerializeSeq>;
-using SerializeTuple = std::conditional_t<
-std::is_same_v<typename Target::SerializeTuple, Target>,
-serializer_ref<Serializer>,
-typename Target::SerializeTuple>;
-using SerializeTupleStruct = std::conditional_t<
-std::is_same_v<typename Target::SerializeTupleStruct, Target>,
-serializer_ref<Serializer>,
-typename Target::SerializeTupleStruct>;
-using SerializeTupleVariant = std::conditional_t<
-std::is_same_v<typename Target::SerializeTupleVariant, Target>,
-serializer_ref<Serializer>,
-typename Target::SerializeTupleVariant>;
-using SerializeMap = std::conditional_t<
-std::is_same_v<typename Target::SerializeMap, Target>,
-serializer_ref<Serializer>,
-typename Target::SerializeMap>;
-using SerializeStruct = std::conditional_t<
-std::is_same_v<typename Target::SerializeStruct, Target>,
-serializer_ref<Serializer>,
-typename Target::SerializeStruct>;
-using SerializeStructVariant = std::conditional_t<
-std::is_same_v<typename Target::SerializeStructVariant, Target>,
-serializer_ref<Serializer>,
-typename Target::SerializeStructVariant>;
-template<typename ResultLike>
-static decltype(auto) rebind_self_result(Target* __ptr, ResultLike&& __result) {
-using StoredResult = std::remove_cv_t<std::remove_reference_t<ResultLike>>;
-if constexpr (
-requires (StoredResult __state) {
-__state.is_ok();
-__state.is_err();
-__state.unwrap();
-__state.unwrap_err();
-}
-&& std::is_same_v<
-std::remove_cv_t<std::remove_reference_t<decltype(
-std::declval<StoredResult&>().unwrap())>>,
-Target>
-) {
-auto __state = std::forward<ResultLike>(__result);
-using Err = std::remove_cv_t<std::remove_reference_t<
-decltype(std::declval<StoredResult&>().unwrap_err())>>;
-using Ret = rusty::Result<serializer_ref<Serializer>, Err>;
-if (__state.is_err()) {
-return Ret::Err(__state.unwrap_err());
-}
-static_cast<void>(__state.unwrap());
-return Ret::Ok(serializer_ref<Serializer>{__ptr});
-} else {
-auto __state = std::forward<ResultLike>(__result);
-return __state;
-}
-}
-Target& operator*() { return *ptr; }
-const Target& operator*() const { return *ptr; }
-Target* operator->() { return ptr; }
-const Target* operator->() const { return ptr; }
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_str(std::forward<T>(__value));
-}
-decltype(auto) serialize_str(T&& value) const {
-return ptr->serialize_str(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_bool(std::forward<T>(__value));
-}
-decltype(auto) serialize_bool(T&& value) const {
-return ptr->serialize_bool(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_i8(std::forward<T>(__value));
-}
-decltype(auto) serialize_i8(T&& value) const {
-return ptr->serialize_i8(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_i16(std::forward<T>(__value));
-}
-decltype(auto) serialize_i16(T&& value) const {
-return ptr->serialize_i16(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_i32(std::forward<T>(__value));
-}
-decltype(auto) serialize_i32(T&& value) const {
-return ptr->serialize_i32(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_i64(std::forward<T>(__value));
-}
-decltype(auto) serialize_i64(T&& value) const {
-return ptr->serialize_i64(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_u8(std::forward<T>(__value));
-}
-decltype(auto) serialize_u8(T&& value) const {
-return ptr->serialize_u8(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_u16(std::forward<T>(__value));
-}
-decltype(auto) serialize_u16(T&& value) const {
-return ptr->serialize_u16(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_u32(std::forward<T>(__value));
-}
-decltype(auto) serialize_u32(T&& value) const {
-return ptr->serialize_u32(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_u64(std::forward<T>(__value));
-}
-decltype(auto) serialize_u64(T&& value) const {
-return ptr->serialize_u64(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_f32(std::forward<T>(__value));
-}
-decltype(auto) serialize_f32(T&& value) const {
-return ptr->serialize_f32(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_f64(std::forward<T>(__value));
-}
-decltype(auto) serialize_f64(T&& value) const {
-return ptr->serialize_f64(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_char(std::forward<T>(__value));
-}
-decltype(auto) serialize_char(T&& value) const {
-return ptr->serialize_char(std::forward<T>(value));
-}
-decltype(auto) serialize_unit() const
-requires requires (Target& __target) {
-__target.serialize_unit();
-} {
-return ptr->serialize_unit();
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_bytes(std::forward<T>(__value));
-}
-decltype(auto) serialize_bytes(T&& value) const {
-return ptr->serialize_bytes(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_some(std::forward<T>(__value));
-}
-decltype(auto) serialize_some(T&& value) const {
-return ptr->serialize_some(std::forward<T>(value));
-}
-decltype(auto) serialize_none() const
-requires requires (Target& __target) {
-__target.serialize_none();
-} {
-return ptr->serialize_none();
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_element(std::forward<T>(__value));
-}
-decltype(auto) serialize_element(T&& value) const {
-return ptr->serialize_element(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_field(std::forward<T>(__value));
-}
-decltype(auto) serialize_field(T&& value) const {
-return ptr->serialize_field(std::forward<T>(value));
-}
-template<typename K, typename V>
-requires requires (Target& __target, K&& __key, V&& __value) {
-__target.serialize_field(std::forward<K>(__key), std::forward<V>(__value));
-}
-decltype(auto) serialize_field(K&& key, V&& value) const {
-return ptr->serialize_field(std::forward<K>(key), std::forward<V>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_key(std::forward<T>(__value));
-}
-decltype(auto) serialize_key(T&& value) const {
-return ptr->serialize_key(std::forward<T>(value));
-}
-template<typename T>
-requires requires (Target& __target, T&& __value) {
-__target.serialize_value(std::forward<T>(__value));
-}
-decltype(auto) serialize_value(T&& value) const {
-return ptr->serialize_value(std::forward<T>(value));
-}
-template<typename... Args>
-requires requires (Target& __target, Args&&... __args) {
-__target.serialize_seq(std::forward<Args>(__args)...);
-}
-decltype(auto) serialize_seq(Args&&... args) const {
-return rebind_self_result(
-ptr,
-ptr->serialize_seq(std::forward<Args>(args)...));
-}
-template<typename... Args>
-requires requires (Target& __target, Args&&... __args) {
-__target.serialize_tuple(std::forward<Args>(__args)...);
-}
-decltype(auto) serialize_tuple(Args&&... args) const {
-return rebind_self_result(
-ptr,
-ptr->serialize_tuple(std::forward<Args>(args)...));
-}
-template<typename... Args>
-requires requires (Target& __target, Args&&... __args) {
-__target.serialize_tuple_struct(std::forward<Args>(__args)...);
-}
-decltype(auto) serialize_tuple_struct(Args&&... args) const {
-return rebind_self_result(
-ptr,
-ptr->serialize_tuple_struct(std::forward<Args>(args)...));
-}
-template<typename... Args>
-requires requires (Target& __target, Args&&... __args) {
-__target.serialize_tuple_variant(std::forward<Args>(__args)...);
-}
-decltype(auto) serialize_tuple_variant(Args&&... args) const {
-return rebind_self_result(
-ptr,
-ptr->serialize_tuple_variant(std::forward<Args>(args)...));
-}
-template<typename... Args>
-requires requires (Target& __target, Args&&... __args) {
-__target.serialize_map(std::forward<Args>(__args)...);
-}
-decltype(auto) serialize_map(Args&&... args) const {
-return rebind_self_result(
-ptr,
-ptr->serialize_map(std::forward<Args>(args)...));
-}
-template<typename... Args>
-requires requires (Target& __target, Args&&... __args) {
-__target.serialize_struct(std::forward<Args>(__args)...);
-}
-decltype(auto) serialize_struct(Args&&... args) const {
-return rebind_self_result(
-ptr,
-ptr->serialize_struct(std::forward<Args>(args)...));
-}
-template<typename... Args>
-requires requires (Target& __target, Args&&... __args) {
-__target.serialize_struct_variant(std::forward<Args>(__args)...);
-}
-decltype(auto) serialize_struct_variant(Args&&... args) const {
-return rebind_self_result(
-ptr,
-ptr->serialize_struct_variant(std::forward<Args>(args)...));
-}
-decltype(auto) end() const
-requires requires (Target& __target) {
-__target.end();
-} {
-return ptr->end();
-}
-decltype(auto) next_token() const
-requires requires (Target& __target) {
-__target.next_token();
-} {
-return ptr->next_token();
-}
-};
-template<typename Serializer>
-decltype(auto) forward_serializer(Serializer&& serializer) {
-using Raw = std::remove_cv_t<std::remove_reference_t<Serializer>>;
-if constexpr (
-std::is_lvalue_reference_v<Serializer&&>
-&& std::is_class_v<Raw>
-&& !requires { typename Raw::serializer_ref_marker; }
-&& requires { typename Raw::Ok; typename Raw::Error; }
-) {
-return serializer_ref<Serializer&&>{&serializer};
-} else {
-return std::forward<Serializer>(serializer);
-}
-}
-template<typename Serializer, typename BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes);
-struct fallback_error {
-rusty::String message;
-
-static fallback_error custom(std::string_view msg) {
-return fallback_error{rusty::String::from(msg)};
-}
-};
-template<typename Value, typename Serializer>
-decltype(auto) serialize_value(Value&& value, Serializer&& serializer) {
-using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;
-if constexpr (requires {
-std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));
-}) {
-return std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));
-} else if constexpr (requires {
-rusty::detail::deref_if_pointer_like(std::forward<Value>(value))
-.serialize(std::forward<Serializer>(serializer));
-}) {
-return rusty::detail::deref_if_pointer_like(std::forward<Value>(value))
-.serialize(std::forward<Serializer>(serializer));
-} else if constexpr (requires {
-std::remove_cv_t<std::remove_reference_t<Value>>::serialize(
-std::forward<Serializer>(serializer));
-}) {
-using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;
-return ValueType::serialize(std::forward<Serializer>(serializer));
-} else if constexpr (requires {
-std::remove_cv_t<std::remove_reference_t<Value>>::serialize(
-std::forward<Value>(value), std::forward<Serializer>(serializer));
-}) {
-using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;
-return ValueType::serialize(
-std::forward<Value>(value), std::forward<Serializer>(serializer));
-} else if constexpr (requires {
-::ser::rusty_ext::serialize_bytes(
-std::forward<Serializer>(serializer), std::forward<Value>(value));
-} && !(
-std::is_convertible_v<
-std::remove_cv_t<std::remove_reference_t<Value>>,
-std::string_view>
-|| requires { std::forward<Value>(value).as_str(); }
-)) {
-return ::ser::rusty_ext::serialize_bytes(
-std::forward<Serializer>(serializer), std::forward<Value>(value));
-} else if constexpr (requires {
-std::forward<Serializer>(serializer)
-.serialize_str(rusty::to_string_view(std::forward<Value>(value)));
-}) {
-return std::forward<Serializer>(serializer)
-.serialize_str(rusty::to_string_view(std::forward<Value>(value)));
-} else if constexpr (std::is_same_v<ValueType, bool> && requires {
-std::forward<Serializer>(serializer).serialize_bool(std::forward<Value>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_bool(std::forward<Value>(value));
-} else if constexpr (std::is_integral_v<ValueType> && std::is_signed_v<ValueType> && sizeof(ValueType) <= sizeof(int8_t) && requires {
-std::forward<Serializer>(serializer).serialize_i8(static_cast<int8_t>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_i8(static_cast<int8_t>(value));
-} else if constexpr (std::is_integral_v<ValueType> && std::is_signed_v<ValueType> && sizeof(ValueType) <= sizeof(int16_t) && requires {
-std::forward<Serializer>(serializer).serialize_i16(static_cast<int16_t>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_i16(static_cast<int16_t>(value));
-} else if constexpr (std::is_integral_v<ValueType> && std::is_signed_v<ValueType> && sizeof(ValueType) <= sizeof(int32_t) && requires {
-std::forward<Serializer>(serializer).serialize_i32(static_cast<int32_t>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_i32(static_cast<int32_t>(value));
-} else if constexpr (std::is_integral_v<ValueType> && std::is_signed_v<ValueType> && sizeof(ValueType) <= sizeof(int64_t) && requires {
-std::forward<Serializer>(serializer).serialize_i64(static_cast<int64_t>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_i64(static_cast<int64_t>(value));
-} else if constexpr (std::is_integral_v<ValueType> && std::is_signed_v<ValueType> && sizeof(ValueType) > sizeof(int64_t) && requires {
-std::forward<Serializer>(serializer).serialize_i128(static_cast<__int128>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_i128(static_cast<__int128>(value));
-} else if constexpr (std::is_integral_v<ValueType> && !std::is_signed_v<ValueType> && !std::is_same_v<ValueType, bool> && sizeof(ValueType) <= sizeof(uint8_t) && requires {
-std::forward<Serializer>(serializer).serialize_u8(static_cast<uint8_t>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_u8(static_cast<uint8_t>(value));
-} else if constexpr (std::is_integral_v<ValueType> && !std::is_signed_v<ValueType> && !std::is_same_v<ValueType, bool> && sizeof(ValueType) <= sizeof(uint16_t) && requires {
-std::forward<Serializer>(serializer).serialize_u16(static_cast<uint16_t>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_u16(static_cast<uint16_t>(value));
-} else if constexpr (std::is_integral_v<ValueType> && !std::is_signed_v<ValueType> && !std::is_same_v<ValueType, bool> && sizeof(ValueType) <= sizeof(uint32_t) && requires {
-std::forward<Serializer>(serializer).serialize_u32(static_cast<uint32_t>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_u32(static_cast<uint32_t>(value));
-} else if constexpr (std::is_integral_v<ValueType> && !std::is_signed_v<ValueType> && !std::is_same_v<ValueType, bool> && sizeof(ValueType) <= sizeof(uint64_t) && requires {
-std::forward<Serializer>(serializer).serialize_u64(static_cast<uint64_t>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_u64(static_cast<uint64_t>(value));
-} else if constexpr (std::is_integral_v<ValueType> && !std::is_signed_v<ValueType> && !std::is_same_v<ValueType, bool> && sizeof(ValueType) > sizeof(uint64_t) && requires {
-std::forward<Serializer>(serializer).serialize_u128(static_cast<unsigned __int128>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_u128(static_cast<unsigned __int128>(value));
-} else if constexpr (std::is_same_v<ValueType, float> && requires {
-std::forward<Serializer>(serializer).serialize_f32(std::forward<Value>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_f32(std::forward<Value>(value));
-} else if constexpr (std::is_same_v<ValueType, double> && requires {
-std::forward<Serializer>(serializer).serialize_f64(std::forward<Value>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_f64(std::forward<Value>(value));
-} else if constexpr (std::is_same_v<ValueType, char32_t> && requires {
-std::forward<Serializer>(serializer).serialize_char(std::forward<Value>(value));
-}) {
-return std::forward<Serializer>(serializer).serialize_char(std::forward<Value>(value));
-} else if constexpr (std::is_same_v<ValueType, rusty::Unit> && requires {
-std::forward<Serializer>(serializer).serialize_unit();
-}) {
-return std::forward<Serializer>(serializer).serialize_unit();
-} else if constexpr (requires {
-serialize(std::forward<Value>(value), std::forward<Serializer>(serializer));
-}) {
-return serialize(std::forward<Value>(value), std::forward<Serializer>(serializer));
-} else {
-return std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));
-}
-}
-template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
-return ::ser::rusty_ext::serialize_value(
-std::forward<Value>(value), std::forward<Serializer>(serializer));
-}
-template<typename Serializer, typename BytesLike>
-concept serialize_bytes_compatible =
-requires(Serializer&& serializer, BytesLike&& bytes) {
-std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
-}
-|| requires(Serializer&& serializer, BytesLike&& bytes) {
-std::forward<Serializer>(serializer).serialize_bytes(
-rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(
-std::forward<BytesLike>(bytes))));
-}
-|| (requires(Serializer&& serializer) {
-rusty::detail::deref_if_pointer_like(std::forward<Serializer>(serializer)).next_token();
-} && requires(BytesLike&& bytes) {
-rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(std::forward<BytesLike>(bytes)));
-});
-template<typename Serializer, typename BytesLike>
-requires serialize_bytes_compatible<Serializer, BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes) {
-if constexpr (requires {
-std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
-}) {
-return std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
-} else if constexpr (requires {
-std::forward<Serializer>(serializer).serialize_bytes(
-rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(
-std::forward<BytesLike>(bytes))));
-}) {
-return std::forward<Serializer>(serializer).serialize_bytes(
-rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(
-std::forward<BytesLike>(bytes))));
-} else if constexpr (requires {
-rusty::detail::deref_if_pointer_like(std::forward<Serializer>(serializer)).next_token();
-}) {
-using SerializerType = std::remove_cv_t<std::remove_reference_t<Serializer>>;
-using SerializerError = std::conditional_t<
-requires { typename SerializerType::Error; },
-typename SerializerType::Error,
-fallback_error>;
-auto&& __bytes = bytes;
-auto&& __serializer_recv = rusty::detail::deref_if_pointer_like(std::forward<Serializer>(serializer));
-auto expected = [&]() -> std::span<const uint8_t> {
-auto&& __bytes_value = rusty::detail::deref_if_pointer_like(__bytes);
-if constexpr (requires { rusty::as_u8_slice(__bytes_value); }) {
-return rusty::as_u8_slice(__bytes_value);
-} else if constexpr (requires { rusty::as_slice(__bytes_value); }) {
-return rusty::as_slice(__bytes_value);
-} else if constexpr (requires { __bytes_value.as_ref(); }) {
-return rusty::as_u8_slice(__bytes_value.as_ref());
-} else {
-return std::span<const uint8_t>();
-}
-}();
-auto same_bytes = [&](std::span<const uint8_t> got) {
-if (got.size() != expected.size()) {
-return false;
-}
-for (size_t i = 0; i < got.size(); ++i) {
-if (got[i] != expected[i]) {
-return false;
-}
-}
-return true;
-};
-auto token_opt = __serializer_recv.next_token();
-if (token_opt.is_none()) {
-return rusty::Result<rusty::Unit, SerializerError>::Err(
-SerializerError::custom("expected Token::Bytes, Token::BorrowedBytes, or Token::ByteBuf"));
-}
-auto token = token_opt.unwrap();
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(token);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(token)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(token)
-&& same_bytes(rusty::as_u8_slice(
-rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(token)._0)))) {
-return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(token);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(token)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(token)
-&& same_bytes(rusty::as_u8_slice(
-rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(token)._0)))) {
-return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
-}
-}
-if constexpr (requires {
-rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(token);
-rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(token)._0;
-}) {
-if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(token)
-&& same_bytes(rusty::as_u8_slice(
-rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(token)._0)))) {
-return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
-}
-}
-return rusty::Result<rusty::Unit, SerializerError>::Err(
-SerializerError::custom(std::format(
-"serialized bytes did not match expected token (expected_len={0}, token={1})",
-expected.size(), rusty::to_string(token))));
-} else {
-return std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
-}
-}
-}
-namespace impls {
-namespace rusty_ext {
-template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
-return ::ser::rusty_ext::serialize_value(
-std::forward<Value>(value), std::forward<Serializer>(serializer));
-}
-}
-}
-}
+#include <rusty/serde_runtime.hpp>
 // DefaultHasher stub — used by expanded #[derive(Hash)] test code.
 struct DefaultHasher {
 std::size_t state = 14695981039346656037ULL;
@@ -2188,6 +422,214 @@ static DefaultHasher new_() { return DefaultHasher{}; }
 std::size_t finish() const { return state; }
 };
 namespace rusty {
+// Rust slice binary-search family. Free functions PREFER a member spelling
+// (transpiled Slice types keep their own delegating methods); otherwise any
+// as_slice()-viewable receiver binary-searches with the Ordering-returning
+// comparator, mirroring core::slice semantics (Result<usize, usize>).
+template<typename R, typename F>
+auto binary_search_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).binary_search_by(std::forward<F>(f)); }) {
+return std::forward<R>(recv).binary_search_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_slice(recv);
+size_t lo = 0;
+size_t hi = s.size();
+while (lo < hi) {
+const size_t mid = lo + (hi - lo) / 2;
+const auto ord = f(s[mid]);
+if (ord == rusty::cmp::Ordering::Less) {
+lo = mid + 1;
+} else if (ord == rusty::cmp::Ordering::Greater) {
+hi = mid;
+} else {
+return rusty::Result<size_t, size_t>::Ok(mid);
+}
+}
+return rusty::Result<size_t, size_t>::Err(lo);
+}
+}
+template<typename R, typename T>
+auto binary_search(R&& recv, const T& target) {
+if constexpr (requires { std::forward<R>(recv).binary_search(target); }) {
+return std::forward<R>(recv).binary_search(target);
+} else {
+return rusty::binary_search_by(std::forward<R>(recv),
+[&](const auto& x) { return rusty::cmp::cmp(x, rusty::detail::deref_if_pointer_like(target)); });
+}
+}
+template<typename R, typename B, typename F>
+auto binary_search_by_key(R&& recv, const B& b, F&& f) {
+if constexpr (requires { std::forward<R>(recv).binary_search_by_key(b, std::forward<F>(f)); }) {
+return std::forward<R>(recv).binary_search_by_key(b, std::forward<F>(f));
+} else {
+return rusty::binary_search_by(std::forward<R>(recv),
+[&](const auto& x) { return rusty::cmp::cmp(f(x), rusty::detail::deref_if_pointer_like(b)); });
+}
+}
+// Rust slice is_sorted family: member-preference, else pairwise compare
+// through rusty::cmp over the as_slice view.
+template<typename R>
+bool is_sorted(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).is_sorted(); }) {
+return std::forward<R>(recv).is_sorted();
+} else {
+auto s = rusty::as_slice(recv);
+for (size_t i = 1; i < s.size(); ++i) {
+/* PartialOrd semantics: NAN pairs are NOT sorted (native <= says false) */
+if constexpr (requires { s[i - 1] <= s[i]; }) {
+if (!(s[i - 1] <= s[i])) { return false; }
+} else {
+if (rusty::cmp::cmp(s[i - 1], s[i]) == rusty::cmp::Ordering::Greater) { return false; }
+}
+}
+return true;
+}
+}
+template<typename R, typename F>
+bool is_sorted_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).is_sorted_by(std::forward<F>(f)); }) {
+return std::forward<R>(recv).is_sorted_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_slice(recv);
+for (size_t i = 1; i < s.size(); ++i) {
+if (!f(s[i - 1], s[i])) { return false; }
+}
+return true;
+}
+}
+template<typename R, typename F>
+bool is_sorted_by_key(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).is_sorted_by_key(std::forward<F>(f)); }) {
+return std::forward<R>(recv).is_sorted_by_key(std::forward<F>(f));
+} else {
+auto s = rusty::as_slice(recv);
+for (size_t i = 1; i < s.size(); ++i) {
+/* PartialOrd semantics: NAN keys are NOT sorted (native <= says false) */
+if constexpr (requires { f(s[i - 1]) <= f(s[i]); }) {
+if (!(f(s[i - 1]) <= f(s[i]))) { return false; }
+} else {
+if (rusty::cmp::cmp(f(s[i - 1]), f(s[i])) == rusty::cmp::Ordering::Greater) { return false; }
+}
+}
+return true;
+}
+}
+template<typename R, typename P>
+auto partition_point(R&& recv, P&& pred) {
+if constexpr (requires { std::forward<R>(recv).partition_point(std::forward<P>(pred)); }) {
+return std::forward<R>(recv).partition_point(std::forward<P>(pred));
+} else {
+auto s = rusty::as_slice(recv);
+size_t lo = 0;
+size_t hi = s.size();
+while (lo < hi) {
+const size_t mid = lo + (hi - lo) / 2;
+if (pred(s[mid])) {
+lo = mid + 1;
+} else {
+hi = mid;
+}
+}
+return lo;
+}
+}
+// Rust slice sort family (Vec reaches these through Deref). Members win;
+// the port Vec spells only the STABLE sorts, and a stable sort is a valid
+// unstable sort, so sort_unstable_* fall back to the sort_* members before
+// the generic std::sort over as_mut_slice.
+template<typename R, typename F>
+void sort_unstable_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).sort_unstable_by(std::forward<F>(f)); }) {
+std::forward<R>(recv).sort_unstable_by(std::forward<F>(f));
+} else if constexpr (requires { std::forward<R>(recv).sort_by(std::forward<F>(f)); }) {
+std::forward<R>(recv).sort_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return f(a, b) == rusty::cmp::Ordering::Less;
+});
+}
+}
+template<typename R>
+void sort_unstable(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).sort_unstable(); }) {
+std::forward<R>(recv).sort_unstable();
+} else if constexpr (requires { std::forward<R>(recv).sort(); }) {
+std::forward<R>(recv).sort();
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::sort(s.begin(), s.end());
+}
+}
+template<typename R, typename K>
+void sort_unstable_by_key(R&& recv, K&& key) {
+if constexpr (requires { std::forward<R>(recv).sort_unstable_by_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_unstable_by_key(std::forward<K>(key));
+} else if constexpr (requires { std::forward<R>(recv).sort_by_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_by_key(std::forward<K>(key));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return key(a) < key(b);
+});
+}
+}
+// STABLE sort family - members win (the port Vec spells these); the
+// std::stable_sort fallback serves array/vector receivers reached
+// through routed chains (collect_range results, [T; N] locals).
+template<typename R>
+void sort(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).sort(); }) {
+std::forward<R>(recv).sort();
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end());
+}
+}
+template<typename R, typename F>
+void sort_by(R&& recv, F&& f) {
+if constexpr (requires { std::forward<R>(recv).sort_by(std::forward<F>(f)); }) {
+std::forward<R>(recv).sort_by(std::forward<F>(f));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return f(a, b) == rusty::cmp::Ordering::Less;
+});
+}
+}
+template<typename R, typename K>
+void sort_by_key(R&& recv, K&& key) {
+if constexpr (requires { std::forward<R>(recv).sort_by_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_by_key(std::forward<K>(key));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return key(a) < key(b);
+});
+}
+}
+// Rust caches the key per element; recomputing gives the same order for
+// the pure keys sorts see, so the fallback reuses the sort_by_key shape.
+template<typename R, typename K>
+void sort_by_cached_key(R&& recv, K&& key) {
+if constexpr (requires { std::forward<R>(recv).sort_by_cached_key(std::forward<K>(key)); }) {
+std::forward<R>(recv).sort_by_cached_key(std::forward<K>(key));
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::stable_sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {
+return key(a) < key(b);
+});
+}
+}
+template<typename R>
+void reverse(R&& recv) {
+if constexpr (requires { std::forward<R>(recv).reverse(); }) {
+std::forward<R>(recv).reverse();
+} else {
+auto s = rusty::as_mut_slice(recv);
+std::reverse(s.begin(), s.end());
+}
+}
 // Convert Option<Ordering> to std::partial_ordering for C++ spaceship operator
 inline std::partial_ordering to_partial_ordering(const rusty::Option<rusty::cmp::Ordering>& opt) {
 if (opt.is_none()) return std::partial_ordering::unordered;
@@ -2202,6 +644,27 @@ template<typename A, typename B>
 auto partial_cmp(const A& a, const B& b) {
 if constexpr (requires { a.partial_cmp(b); }) {
 return a.partial_cmp(b);
+} else if constexpr (
+requires(A& x, B& y) { x.next().is_some(); y.next().is_some(); }
+&& std::is_copy_constructible_v<A> && std::is_copy_constructible_v<B>) {
+/* Option-like next() iterators compare LEXICOGRAPHICALLY (Rust
+PartialOrd through iterators); the old fallback compared the
+ITERATOR OBJECTS themselves - silent-wrong Equal. */
+auto ita = a;
+auto itb = b;
+for (;;) {
+auto va = ita.next();
+auto vb = itb.next();
+const bool ha = va.is_some();
+const bool hb = vb.is_some();
+if (!ha && !hb) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Equal);
+if (!ha) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Less);
+if (!hb) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Greater);
+const auto& ea = rusty::detail::deref_if_pointer_like(std::move(va).unwrap());
+const auto& eb = rusty::detail::deref_if_pointer_like(std::move(vb).unwrap());
+if (rusty::cmp::detail::less_than(ea, eb)) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Less);
+if (rusty::cmp::detail::less_than(eb, ea)) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Greater);
+}
 } else {
 if (rusty::cmp::detail::less_than(a, b)) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Less);
 if (rusty::cmp::detail::less_than(b, a)) return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Greater);
@@ -2210,16 +673,49 @@ return rusty::Option<rusty::cmp::Ordering>(rusty::cmp::Ordering::Equal);
 }
 namespace fmt {
 // Error and Result are defined in rusty/fmt.hpp
-struct Arguments {};
+// Carries prerendered text: `write!(w, ...)` sites lower their
+// format_args!() through std::format, so Arguments accepts the
+// resulting string and Write::write_fmt forwards it to write_str.
+struct Arguments {
+std::string text;
+Arguments() = default;
+Arguments(std::string s) : text(std::move(s)) {}
+Arguments(std::string_view s) : text(s) {}
+Arguments(const char* s) : text(s ? s : "") {}
+};
 enum class Alignment { Left, Right, Center };
 struct DebugList {
 template<typename... Args>
 DebugList& entries(Args&&...) { return *this; }
+template<typename... Args>
+DebugList& entry(Args&&...) { return *this; }
+Result finish() { return Result::Ok(std::make_tuple()); }
+};
+struct DebugSet {
+template<typename... Args>
+DebugSet& entries(Args&&...) { return *this; }
+template<typename... Args>
+DebugSet& entry(Args&&...) { return *this; }
+Result finish() { return Result::Ok(std::make_tuple()); }
+};
+struct DebugMap {
+template<typename... Args>
+DebugMap& entries(Args&&...) { return *this; }
+template<typename... Args>
+DebugMap& entry(Args&&...) { return *this; }
+template<typename... Args>
+DebugMap& key(Args&&...) { return *this; }
+template<typename... Args>
+DebugMap& value(Args&&...) { return *this; }
 Result finish() { return Result::Ok(std::make_tuple()); }
 };
 struct Formatter {
 mutable std::string out_;
 std::string str() const { return out_; }
+// Rust `f.alternate()` ({:#} flag). This shim only backs plain `{}`
+// formatting (to_string/Display), so the flag is always false; the
+// fmt_rt cutover (task #60) carries the real spec.
+bool alternate() const { return false; }
 struct DebugTuple {
 const Formatter* formatter;
 bool first = true;
@@ -2277,6 +773,13 @@ formatter->out_ += "}";
 }
 return Result::Ok(std::make_tuple());
 }
+Result finish_non_exhaustive() {
+if (formatter) {
+if (!first) { formatter->out_ += ", "; }
+formatter->out_ += ".. }";
+}
+return Result::Ok(std::make_tuple());
+}
 };
 template<typename... Args>
 static Result debug_tuple_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }
@@ -2328,6 +831,10 @@ st.name(std::forward<Name>(name));
 return st;
 }
 DebugList debug_list() const { return DebugList{}; }
+DebugSet debug_set() const { return DebugSet{}; }
+DebugMap debug_map() const { return DebugMap{}; }
+template<typename Str>
+Result pad(Str&& s) const { out_ += rusty::to_string(std::forward<Str>(s)); return Result::Ok(std::make_tuple()); }
 private:
 template<typename Arg>
 void append_one(Arg&& arg) const { out_ += rusty::to_string(std::forward<Arg>(arg)); }
@@ -2363,8 +870,59 @@ case '"': out += "\\\""; break;
 case '\n': out += "\\n"; break;
 case '\r': out += "\\r"; break;
 case '\t': out += "\\t"; break;
-default: out.push_back(ch); break;
+case '\0': out += "\\0"; break;
+default: {
+/* Rust escape_debug also escapes the rest of the control
+range as \u{..}; raw pass-through put literal control
+bytes into every {:?} of a string. Non-ASCII stays raw. */
+const auto byte = static_cast<unsigned char>(ch);
+if (byte < 0x20 || byte == 0x7F) {
+char buf[16];
+std::snprintf(buf, sizeof(buf), "\\u{%x}", static_cast<unsigned>(byte));
+out += buf;
+} else {
+out.push_back(ch);
 }
+break;
+}
+}
+}
+return out;
+}
+inline std::string escape_default_char(char32_t code) {
+switch (code) {
+case U'\\': return "\\\\";
+case U'"': return "\\\"";
+case U'\'': return "\\'";
+case U'\n': return "\\n";
+case U'\r': return "\\r";
+case U'\t': return "\\t";
+default: break;
+}
+if (code >= 0x20 && code < 0x7F) {
+return std::string(1, static_cast<char>(code));
+}
+return std::format("\\u{{{:x}}}", static_cast<std::uint32_t>(code));
+}
+inline std::string escape_default_string(std::string_view input) {
+std::string out;
+out.reserve(input.size());
+std::size_t i = 0;
+while (i < input.size()) {
+const unsigned char b = static_cast<unsigned char>(input[i]);
+char32_t code = b;
+std::size_t len = 1;
+if ((b & 0xE0) == 0xC0) { code = b & 0x1F; len = 2; }
+else if ((b & 0xF0) == 0xE0) { code = b & 0x0F; len = 3; }
+else if ((b & 0xF8) == 0xF0) { code = b & 0x07; len = 4; }
+if (len > 1) {
+if (i + len > input.size()) { break; }
+for (std::size_t k = 1; k < len; ++k) {
+code = (code << 6) | (static_cast<unsigned char>(input[i + k]) & 0x3F);
+}
+}
+out += escape_default_char(code);
+i += len;
 }
 return out;
 }
@@ -2430,6 +988,9 @@ if (!stack.empty()) {
 stack.back().saw_value = true;
 stack.back().last_was_comma = false;
 }
+if (ch == '{' && !out.empty() && out.back() != ' ' && out.back() != '\n') {
+out.push_back(' ');
+}
 out.push_back(ch);
 stack.push_back(Frame{ch, false, false});
 std::size_t j = i + 1;
@@ -2467,6 +1028,9 @@ stack.back().last_was_comma = false;
 continue;
 }
 out.push_back(ch);
+if (ch == ':') {
+out.push_back(' ');
+}
 if (!stack.empty()) {
 stack.back().saw_value = true;
 stack.back().last_was_comma = false;
@@ -2519,6 +1083,29 @@ if (result.is_ok()) {
 return formatter.str();
 }
 return "<fmt-error>";
+} else if constexpr (std::is_floating_point_v<Value>) {
+return rusty::detail::float_display_string(value);
+} else if constexpr (std::is_same_v<Value, __int128>
+|| std::is_same_v<Value, unsigned __int128>) {
+// std::to_string has no 128-bit overloads; digits by division.
+if (value == 0) { return "0"; }
+unsigned __int128 mag;
+bool neg = false;
+if constexpr (std::is_same_v<Value, __int128>) {
+neg = value < 0;
+mag = neg ? static_cast<unsigned __int128>(-(value + 1)) + 1
+: static_cast<unsigned __int128>(value);
+} else {
+mag = value;
+}
+std::string out;
+while (mag != 0) {
+out.push_back(static_cast<char>('0' + static_cast<int>(mag % 10)));
+mag /= 10;
+}
+if (neg) { out.push_back('-'); }
+std::reverse(out.begin(), out.end());
+return out;
 } else if constexpr (requires { std::to_string(value); }) {
 return std::to_string(value);
 } else if constexpr (requires(rusty::fmt::Formatter& f) { value.fmt(f); }) {
@@ -2553,7 +1140,25 @@ return out;
 template<typename T>
 std::string to_debug_string(const T& value) {
 using Value = std::remove_cv_t<std::remove_reference_t<T>>;
-if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {
+if constexpr (requires { value.rusty_debug_string(); }) {
+return value.rusty_debug_string();
+} else if constexpr (std::is_enum_v<Value> && requires { rusty_debug_string(value); }) {
+return rusty_debug_string(value);
+} else if constexpr (requires { value.is_some(); value.unwrap(); }) {
+if (value.is_some()) {
+return std::string("Some(") + rusty::to_debug_string(value.unwrap()) + ")";
+}
+return "None";
+} else if constexpr (requires { value.is_ok(); value.unwrap(); value.unwrap_err(); }) {
+if (value.is_ok()) {
+return std::string("Ok(") + rusty::to_debug_string(value.unwrap()) + ")";
+}
+return std::string("Err(") + rusty::to_debug_string(value.unwrap_err()) + ")";
+} else if constexpr (requires { std::visit([](const auto&) {}, value); }) {
+return std::visit([](const auto& alt) -> std::string {
+return rusty::to_debug_string(alt);
+}, value);
+} else if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {
 return std::to_string(static_cast<int>(value));
 } else if constexpr (std::is_same_v<Value, char>
 || std::is_same_v<Value, signed char>
@@ -2562,10 +1167,22 @@ return std::to_string(static_cast<int>(value));
 || std::is_same_v<Value, char16_t>
 || std::is_same_v<Value, char32_t>) {
 const auto ch = static_cast<char32_t>(value);
-if (ch == U'\0') {
-return "'\\0'";
+switch (ch) {
+case U'\0': return "'\\0'";
+case U'\\': return "'\\\\'";
+case U'\'': return "'\\''";
+case U'\n': return "'\\n'";
+case U'\r': return "'\\r'";
+case U'\t': return "'\\t'";
+default: break;
 }
 return std::string("'") + rusty::detail::utf8_from_char32(ch) + "'";
+} else if constexpr (std::is_pointer_v<Value>
+&& !std::is_same_v<std::remove_cv_t<std::remove_pointer_t<Value>>, char>) {
+if (value == nullptr) {
+return "<null>";
+}
+return rusty::to_debug_string(*value);
 } else if constexpr (std::is_convertible_v<T, std::string_view>) {
 return std::string("\"")
 + rusty::detail::escape_debug_string(std::string(std::string_view(value)))
@@ -2581,6 +1198,29 @@ return std::string("\"")
 + rusty::detail::escape_debug_string(std::string(s))
 + "\"";
 }
+} else if constexpr (std::is_floating_point_v<Value>) {
+std::string s = rusty::to_string(value);
+if (std::isfinite(value) && s.find_first_of(".eEin") == std::string::npos) {
+s += ".0";
+}
+return s;
+} else if constexpr (requires { std::tuple_size<Value>::value; }
+&& !requires { std::begin(value); std::end(value); }) {
+if constexpr (std::tuple_size_v<Value> == 0) {
+return "()";
+} else {
+std::string out = "(";
+bool first = true;
+std::apply([&](const auto&... elems) {
+((out += (first ? "" : ", "), first = false,
+out += rusty::to_debug_string(elems)), ...);
+}, value);
+if constexpr (std::tuple_size_v<Value> == 1) {
+out += ",";
+}
+out += ")";
+return out;
+}
 } else if constexpr (requires { std::begin(value); std::end(value); }) {
 std::string out = "[";
 bool first = true;
@@ -2590,6 +1230,22 @@ out += ", ";
 }
 first = false;
 out += rusty::to_debug_string(item);
+}
+out += "]";
+return out;
+}
+else if constexpr (requires(const Value& v) { v.iter().next().is_some(); }) {
+/* Iterator-backed containers without begin/end (alloc
+VecDeque &c.): Rust Debug list form. */
+std::string out = "[";
+auto it = value.iter();
+bool first = true;
+for (auto e = it.next(); e.is_some(); e = it.next()) {
+if (!first) {
+out += ", ";
+}
+first = false;
+out += rusty::to_debug_string(rusty::detail::deref_if_pointer_like(std::move(e).unwrap()));
 }
 out += "]";
 return out;
@@ -2632,34 +1288,117 @@ return _path_ref_tmp;
 }
 }
 namespace time {
+// Rust's std::time. Duration stores nanoseconds (matching Rust's
+// resolution); Instant is the monotonic clock and SystemTime the
+// wall clock, as in Rust. u128-returning accessors keep Rust's
+// signatures so arithmetic on them cannot silently truncate.
 struct Duration {
 std::chrono::nanoseconds inner;
 static Duration from_secs(unsigned long secs) { return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds(secs))}; }
 static Duration from_millis(unsigned long ms) { return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(ms))}; }
+static Duration from_micros(unsigned long us) { return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::microseconds(us))}; }
 static Duration from_nanos(unsigned long ns) { return Duration{std::chrono::nanoseconds(ns)}; }
+static Duration from_secs_f64(double secs) { return Duration{std::chrono::nanoseconds(static_cast<long long>(secs * 1e9))}; }
+static const Duration ZERO;
+static Duration new_(std::uint64_t secs, std::uint32_t nanos) { return Duration{std::chrono::nanoseconds(static_cast<long long>(secs) * 1000000000LL + static_cast<long long>(nanos))}; }
 std::uint64_t as_secs() const {
 return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(inner).count());
+}
+double as_secs_f64() const { return static_cast<double>(inner.count()) / 1e9; }
+unsigned __int128 as_millis() const {
+return static_cast<unsigned __int128>(std::chrono::duration_cast<std::chrono::milliseconds>(inner).count());
+}
+unsigned __int128 as_micros() const {
+return static_cast<unsigned __int128>(std::chrono::duration_cast<std::chrono::microseconds>(inner).count());
+}
+unsigned __int128 as_nanos() const {
+return static_cast<unsigned __int128>(inner.count());
+}
+bool is_zero() const { return inner.count() == 0; }
+std::uint32_t subsec_millis() const {
+const auto secs_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+std::chrono::duration_cast<std::chrono::seconds>(inner));
+return static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(inner - secs_ns).count());
+}
+std::uint32_t subsec_micros() const {
+const auto secs_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+std::chrono::duration_cast<std::chrono::seconds>(inner));
+return static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(inner - secs_ns).count());
 }
 std::uint32_t subsec_nanos() const {
 const auto secs_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
 std::chrono::duration_cast<std::chrono::seconds>(inner));
 return static_cast<std::uint32_t>((inner - secs_ns).count());
 }
+// Rust's checked_/saturating_ arithmetic: Duration is UNSIGNED, so
+// a subtraction that would go negative is None / ZERO, never a wrap.
+rusty::Option<Duration> checked_add(Duration other) const {
+return rusty::Option<Duration>(Duration{inner + other.inner});
+}
+rusty::Option<Duration> checked_sub(Duration other) const {
+if (inner < other.inner) { return rusty::None; }
+return rusty::Option<Duration>(Duration{inner - other.inner});
+}
+Duration saturating_add(Duration other) const { return Duration{inner + other.inner}; }
+Duration saturating_sub(Duration other) const {
+if (inner < other.inner) { return Duration{std::chrono::nanoseconds(0)}; }
+return Duration{inner - other.inner};
+}
+Duration& operator+=(const Duration& rhs) { inner += rhs.inner; return *this; }
+Duration& operator-=(const Duration& rhs) { inner -= rhs.inner; return *this; }
+friend Duration operator+(const Duration& lhs, const Duration& rhs) { return Duration{lhs.inner + rhs.inner}; }
+friend Duration operator-(const Duration& lhs, const Duration& rhs) { return Duration{lhs.inner - rhs.inner}; }
+friend Duration operator*(const Duration& lhs, std::uint32_t rhs) { return Duration{lhs.inner * rhs}; }
+friend Duration operator*(std::uint32_t lhs, const Duration& rhs) { return Duration{rhs.inner * lhs}; }
+friend Duration operator/(const Duration& lhs, std::uint32_t rhs) { return Duration{lhs.inner / rhs}; }
 friend bool operator==(const Duration& lhs, const Duration& rhs) { return lhs.inner == rhs.inner; }
 friend bool operator!=(const Duration& lhs, const Duration& rhs) { return lhs.inner != rhs.inner; }
 friend bool operator<(const Duration& lhs, const Duration& rhs) { return lhs.inner < rhs.inner; }
 friend bool operator<=(const Duration& lhs, const Duration& rhs) { return lhs.inner <= rhs.inner; }
 friend bool operator>(const Duration& lhs, const Duration& rhs) { return lhs.inner > rhs.inner; }
 friend bool operator>=(const Duration& lhs, const Duration& rhs) { return lhs.inner >= rhs.inner; }
+std::string rusty_debug_string() const {
+const auto ns = inner.count();
+if (ns == 0) { return "0ns"; }
+if (ns % 1000000000LL == 0) { return std::to_string(ns / 1000000000LL) + "s"; }
+if (ns % 1000000LL == 0) { return std::to_string(ns / 1000000LL) + "ms"; }
+if (ns % 1000LL == 0) { return std::to_string(ns / 1000LL) + "us"; }
+return std::to_string(ns) + "ns";
+}
 template<typename Rep, typename Period>
 operator std::chrono::duration<Rep, Period>() const { return std::chrono::duration_cast<std::chrono::duration<Rep, Period>>(inner); }
 };
+inline const Duration Duration::ZERO{std::chrono::nanoseconds(0)};
 struct Instant {
 std::chrono::steady_clock::time_point inner;
 static Instant now() { return Instant{std::chrono::steady_clock::now()}; }
 Duration duration_since(Instant earlier) const {
 return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)};
 }
+Duration elapsed() const {
+return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - inner)};
+}
+Duration saturating_duration_since(Instant earlier) const {
+if (inner < earlier.inner) { return Duration{std::chrono::nanoseconds(0)}; }
+return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)};
+}
+rusty::Option<Duration> checked_duration_since(Instant earlier) const {
+if (inner < earlier.inner) { return rusty::None; }
+return rusty::Option<Duration>(Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)});
+}
+rusty::Option<Instant> checked_add(Duration d) const { return rusty::Option<Instant>(Instant{inner + d.inner}); }
+rusty::Option<Instant> checked_sub(Duration d) const { return rusty::Option<Instant>(Instant{inner - d.inner}); }
+Instant& operator+=(const Duration& rhs) { inner += rhs.inner; return *this; }
+Instant& operator-=(const Duration& rhs) { inner -= rhs.inner; return *this; }
+friend Instant operator+(const Instant& lhs, const Duration& rhs) { return Instant{lhs.inner + rhs.inner}; }
+friend Instant operator-(const Instant& lhs, const Duration& rhs) { return Instant{lhs.inner - rhs.inner}; }
+friend Duration operator-(const Instant& lhs, const Instant& rhs) { return lhs.duration_since(rhs); }
+friend bool operator==(const Instant& lhs, const Instant& rhs) { return lhs.inner == rhs.inner; }
+friend bool operator!=(const Instant& lhs, const Instant& rhs) { return lhs.inner != rhs.inner; }
+friend bool operator<(const Instant& lhs, const Instant& rhs) { return lhs.inner < rhs.inner; }
+friend bool operator<=(const Instant& lhs, const Instant& rhs) { return lhs.inner <= rhs.inner; }
+friend bool operator>(const Instant& lhs, const Instant& rhs) { return lhs.inner > rhs.inner; }
+friend bool operator>=(const Instant& lhs, const Instant& rhs) { return lhs.inner >= rhs.inner; }
 };
 struct SystemTime {
 std::chrono::system_clock::time_point inner;
@@ -2671,6 +1410,13 @@ Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.in
 }
 return rusty::Result<Duration, rusty::Unit>::Err(std::make_tuple());
 }
+rusty::Result<Duration, rusty::Unit> elapsed() const {
+return SystemTime{std::chrono::system_clock::now()}.duration_since(*this);
+}
+friend bool operator==(const SystemTime& lhs, const SystemTime& rhs) { return lhs.inner == rhs.inner; }
+friend bool operator!=(const SystemTime& lhs, const SystemTime& rhs) { return lhs.inner != rhs.inner; }
+friend bool operator<(const SystemTime& lhs, const SystemTime& rhs) { return lhs.inner < rhs.inner; }
+friend bool operator>(const SystemTime& lhs, const SystemTime& rhs) { return lhs.inner > rhs.inner; }
 };
 inline const SystemTime UNIX_EPOCH{std::chrono::system_clock::time_point{}};
 }
@@ -2805,11 +1551,20 @@ return &value;
 }
 template<typename T>
 const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value) {
-using Stored = std::remove_cv_t<std::remove_reference_t<T>>;
-thread_local std::optional<Stored> _addr_of_tmp;
-_addr_of_tmp.reset();
-_addr_of_tmp.emplace(std::forward<T>(value));
-return &*_addr_of_tmp;
+/* The rvalue argument is a caller-side temporary that lives to the end
+of the FULL EXPRESSION - exactly Rust's `&temp` statement scope. The
+old per-TYPE thread_local slot aliased simultaneous same-type temps:
+vec![&1, &2, &3, &4] produced four pointers all reading 4. */
+return &value;
+}
+template<typename T>
+std::remove_reference_t<T>* addr_of_temp_mut(T&& value) {
+if constexpr (std::is_lvalue_reference_v<T&&>) {
+return &value;
+} else {
+/* Same full-expression-lifetime rationale as addr_of_temp above. */
+return &value;
+}
 }
 #endif
 struct Cow_Borrowed {
@@ -2853,6 +1608,14 @@ bool operator==(const Cow_Owned& other) const { return _0 == other._0; }
 bool operator<(const Cow_Owned& other) const { return _0 < other._0; }
 };
 using Cow = std::variant<Cow_Borrowed, Cow_Owned>;
+inline std::string_view cow_view(const Cow& c) {
+return std::visit([](const auto& v) -> std::string_view {
+return std::string_view(v._0);
+}, c);
+}
+// Rust `cow == "literal"` / cross-variant Cow equality.
+inline bool operator==(const Cow& c, std::string_view s) { return cow_view(c) == s; }
+inline bool operator==(std::string_view s, const Cow& c) { return cow_view(c) == s; }
 inline Cow clone(const Cow& value) {
 if (const auto* borrowed = std::get_if<Cow_Borrowed>(&value)) {
 return Cow_Borrowed{borrowed->_0};
@@ -2916,16 +1679,35 @@ return &value;
 namespace hash {
 template<typename State>
 inline void combine(State& state, std::size_t value) {
-std::size_t seed;
 if constexpr (requires { state.state; }) {
-seed = state.state;
-} else {
-seed = static_cast<std::size_t>(state);
-}
+std::size_t seed = state.state;
 seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-if constexpr (requires { state.state; }) {
 state.state = seed;
+} else if constexpr (requires {
+state.write_(std::span<const unsigned char>{});
+state.finish();
+}) {
+/* A real Hasher-protocol state (e.g. the transpiled std
+DefaultHasher wrapping rusty::hash::SipHasher): feed the value's
+bytes through the hasher instead of integer-state mixing. Only
+types that previously FAILED the static_cast fallback take this
+branch, so existing integer-state hashers are unchanged. */
+unsigned char bytes[sizeof(std::size_t)];
+__builtin_memcpy(bytes, &value, sizeof(value));
+state.write_(std::span<const unsigned char>(bytes, sizeof(bytes)));
+} else if constexpr (requires {
+state.write(std::span<const unsigned char>{});
+state.finish();
+}) {
+/* Same Hasher protocol under the plain `write` spelling —
+rusty::hash::SipHasher used directly as the state (the
+btree_set_hash tests drive BTreeSet::hash this way). */
+unsigned char bytes[sizeof(std::size_t)];
+__builtin_memcpy(bytes, &value, sizeof(value));
+state.write(std::span<const unsigned char>(bytes, sizeof(bytes)));
 } else {
+std::size_t seed = static_cast<std::size_t>(state);
+seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
 state = static_cast<State>(seed);
 }
 }
@@ -2933,6 +1715,32 @@ template<typename T, typename State>
 void hash(const T& value, State& state) {
 if constexpr (requires { value.hash(state); }) {
 value.hash(state);
+} else if constexpr (std::is_pointer_v<std::remove_cvref_t<T>>
+&& std::is_same_v<std::remove_cv_t<
+std::remove_pointer_t<std::remove_cvref_t<T>>>, char>) {
+/* Plain-char pointer = Rust str carrier (i8/u8 are signed/unsigned
+char; Rust char is char32_t): hash CONTENT like rusty::String,
+not the pointee char (Pair("a", "b") vs (String, String) keys). */
+hash(std::string_view(value), state);
+} else if constexpr (std::is_pointer_v<std::remove_cvref_t<T>>) {
+/* A pointer carrier is a lowered Rust REFERENCE: Hash delegates
+to the pointee. Hashing the address made `&mut 1` map keys
+miss each other (occupied_entry_key found Vacant). */
+hash(*value, state);
+} else if constexpr (requires {
+std::tuple_size<std::remove_cvref_t<T>>::value;
+} && !requires { std::begin(value); }) {
+/* Rust derives Hash for tuples elementwise; the byte-FNV fallback
+hashed a tuple<String, String> key's HEAP POINTERS. */
+std::apply(
+[&state](const auto&... elems) { (hash(elems, state), ...); },
+value);
+} else if constexpr (std::is_array_v<std::remove_cvref_t<T>>
+&& std::is_same_v<std::remove_cv_t<std::remove_extent_t<std::remove_cvref_t<T>>>, char>) {
+/* char[N] = Rust str-literal needle: hash CONTENT chars without
+the trailing NUL, matching rusty::String's range-tier per-char
+hashing (string_view recurses into the range tier below). */
+hash(std::string_view(value), state);
 } else if constexpr (requires { std::begin(value); std::end(value); }) {
 // Hash range-like containers by element value, not object bytes.
 // This avoids pointer/address-based drift for owning containers.
@@ -2950,6 +1758,22 @@ h *= 1099511628211ULL;
 }
 combine(state, h);
 }
+}
+}
+// Rust BuildHasher::hash_one. Prefers the builder's own member; inert
+// transpiled builders (hashbrown's DefaultHashBuilder — foldhash's
+// methods come from trait defaults that never emit) fall back to rusty's
+// deterministic combine hashing. Hash VALUES never surface in parity
+// assertions (indexmap iterates in insertion order); only internal
+// consistency matters.
+template<typename B, typename T>
+uint64_t hash_one(B&& builder, const T& value) {
+if constexpr (requires { std::forward<B>(builder).hash_one(value); }) {
+return std::forward<B>(builder).hash_one(value);
+} else {
+std::size_t state = 14695981039346656037ULL;
+rusty::hash::hash(value, state);
+return static_cast<uint64_t>(state);
 }
 }
 template<typename Writer, typename FmtArg>
@@ -3080,62 +1904,111 @@ return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(value));
 }
 }
 namespace str_runtime {
-using Utf8Error = rusty::String;
-inline bool is_valid_utf8(const unsigned char* data, std::size_t len) {
+/* Rust char patterns are CODE POINTS, and this prelude searches BYTES.
+Every char32_t overload used to do static_cast<char>(ch), truncating any
+non-ASCII pattern (U+534E -> 0x4E), so "..中华Việt Nam".find('华')
+matched the 'N' of "Nam". Encode to UTF-8 and search on the bytes; the
+pattern length also has to replace the hardcoded +1 in every tail
+substr, or a multibyte delimiter leaves continuation bytes behind. */
+inline std::string char_pattern_utf8(char32_t ch) {
+const uint32_t c = static_cast<uint32_t>(ch);
+std::string out;
+if (c < 0x80u) { out.push_back(static_cast<char>(c)); }
+else if (c < 0x800u) {
+out.push_back(static_cast<char>(0xC0u | (c >> 6)));
+out.push_back(static_cast<char>(0x80u | (c & 0x3Fu)));
+} else if (c < 0x10000u) {
+out.push_back(static_cast<char>(0xE0u | (c >> 12)));
+out.push_back(static_cast<char>(0x80u | ((c >> 6) & 0x3Fu)));
+out.push_back(static_cast<char>(0x80u | (c & 0x3Fu)));
+} else {
+out.push_back(static_cast<char>(0xF0u | (c >> 18)));
+out.push_back(static_cast<char>(0x80u | ((c >> 12) & 0x3Fu)));
+out.push_back(static_cast<char>(0x80u | ((c >> 6) & 0x3Fu)));
+out.push_back(static_cast<char>(0x80u | (c & 0x3Fu)));
+}
+return out;
+}
+// Mirrors core::str::Utf8Error: byte index of the valid prefix plus the
+// invalid-sequence length (None = input ended in the middle of a sequence).
+struct Utf8Error {
+std::size_t valid_up_to_ = 0;
+long long error_len_ = -1;
+std::size_t valid_up_to() const { return valid_up_to_; }
+rusty::Option<std::size_t> error_len() const {
+if (error_len_ < 0) { return rusty::Option<std::size_t>(rusty::None); }
+return rusty::Option<std::size_t>(static_cast<std::size_t>(error_len_));
+}
+std::string to_string() const { return "invalid utf-8 sequence"; }
+constexpr bool operator==(const Utf8Error&) const = default;
+};
+// Rust-faithful UTF-8 validation: on failure reports where the valid prefix
+// ends and how many bytes the broken sequence spans (-1 error_len = the
+// input ended prematurely, Rust's error_len() == None).
+inline Utf8Error validate_utf8(const unsigned char* data, std::size_t len, bool& ok) {
 std::size_t i = 0;
+ok = true;
 while (i < len) {
 const auto byte = data[i];
 if (byte <= 0x7F) {
 ++i;
 continue;
 }
+std::size_t need;
 if ((byte >> 5) == 0x6) {
-if (i + 1 >= len) return false;
-const auto b1 = data[i + 1];
-if ((b1 & 0xC0) != 0x80 || byte < 0xC2) return false;
-i += 2;
-continue;
+if (byte < 0xC2) { ok = false; return Utf8Error{i, 1}; }
+need = 1;
+} else if ((byte >> 4) == 0xE) {
+need = 2;
+} else if ((byte >> 3) == 0x1E) {
+if (byte > 0xF4) { ok = false; return Utf8Error{i, 1}; }
+need = 3;
+} else {
+ok = false;
+return Utf8Error{i, 1};
 }
-if ((byte >> 4) == 0xE) {
-if (i + 2 >= len) return false;
-const auto b1 = data[i + 1];
-const auto b2 = data[i + 2];
-if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return false;
-if (byte == 0xE0 && b1 < 0xA0) return false;
-if (byte == 0xED && b1 >= 0xA0) return false;
-i += 3;
-continue;
+for (std::size_t k = 1; k <= need; ++k) {
+if (i + k >= len) { ok = false; return Utf8Error{i, -1}; }
+const auto cont = data[i + k];
+bool cont_ok = (cont & 0xC0) == 0x80;
+if (k == 1) {
+if (byte == 0xE0) cont_ok = cont >= 0xA0 && cont <= 0xBF;
+else if (byte == 0xED) cont_ok = cont >= 0x80 && cont <= 0x9F;
+else if (byte == 0xF0) cont_ok = cont >= 0x90 && cont <= 0xBF;
+else if (byte == 0xF4) cont_ok = cont >= 0x80 && cont <= 0x8F;
 }
-if ((byte >> 3) == 0x1E) {
-if (i + 3 >= len) return false;
-const auto b1 = data[i + 1];
-const auto b2 = data[i + 2];
-const auto b3 = data[i + 3];
-if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return false;
-if (byte == 0xF0 && b1 < 0x90) return false;
-if (byte == 0xF4 && b1 >= 0x90) return false;
-if (byte > 0xF4) return false;
-i += 4;
-continue;
+if (!cont_ok) { ok = false; return Utf8Error{i, static_cast<long long>(k)}; }
 }
-return false;
+i += need + 1;
 }
-return true;
+return Utf8Error{};
+}
+inline bool is_valid_utf8(const unsigned char* data, std::size_t len) {
+bool ok = true;
+(void)validate_utf8(data, len, ok);
+return ok;
 }
 template<typename Bytes>
-rusty::Result<std::string_view, rusty::String> from_utf8(const Bytes& bytes) {
+rusty::Result<std::string_view, Utf8Error> from_utf8(const Bytes& bytes) {
+const unsigned char* data = nullptr;
+std::size_t len = 0;
 if constexpr (requires { bytes.data(); bytes.size(); }) {
-const auto* raw = bytes.data();
-const std::size_t len = static_cast<std::size_t>(bytes.size());
-const auto* data = reinterpret_cast<const unsigned char*>(raw);
-if (!is_valid_utf8(data, len)) {
-return rusty::Result<std::string_view, rusty::String>::Err(rusty::String::from("invalid utf-8"));
+data = reinterpret_cast<const unsigned char*>(bytes.data());
+len = static_cast<std::size_t>(bytes.size());
+} else if constexpr (requires { rusty::as_ptr(bytes); rusty::len(bytes); }) {
+data = reinterpret_cast<const unsigned char*>(rusty::as_ptr(bytes));
+len = static_cast<std::size_t>(rusty::len(bytes));
+} else {
+return rusty::Result<std::string_view, Utf8Error>::Err(Utf8Error{});
 }
-return rusty::Result<std::string_view, rusty::String>::Ok(
-std::string_view(reinterpret_cast<const char*>(raw), len)
+bool ok = true;
+const auto err = validate_utf8(data, len, ok);
+if (!ok) {
+return rusty::Result<std::string_view, Utf8Error>::Err(err);
+}
+return rusty::Result<std::string_view, Utf8Error>::Ok(
+std::string_view(reinterpret_cast<const char*>(data), len)
 );
-}
-return rusty::Result<std::string_view, rusty::String>::Err(rusty::String::from("unsupported from_utf8 input"));
 }
 template<typename Bytes>
 std::string_view from_utf8_unchecked(Bytes&& bytes) {
@@ -3212,6 +2085,8 @@ using Item = char32_t;
 std::u32string decoded;
 std::size_t index = 0;
 
+Chars into_iter() const { return *this; }
+
 rusty::Option<char32_t> next() {
 if (index >= decoded.size()) {
 return rusty::Option<char32_t>(rusty::None);
@@ -3227,8 +2102,13 @@ return false;
 return static_cast<bool>(std::forward<Pred>(pred)(decoded[index]));
 }
 
-Chars as_str() const {
-return *this;
+std::string as_str() const {
+// Rust Chars::as_str — the UNITERATED remainder as a str.
+std::string out;
+for (std::size_t k = index; k < decoded.size(); ++k) {
+out += rusty::detail::utf8_from_char32(decoded[k]);
+}
+return out;
 }
 
 Chars rev() const {
@@ -3251,12 +2131,17 @@ Chars iter;
 std::size_t index = 0;
 
 rusty::Option<Item> next() {
+/* Rust str::char_indices yields BYTE offsets, not char counts —
+advance by each char's UTF-8 encoded length. */
 auto next_ch = iter.next();
 if (next_ch.is_none()) {
 return rusty::Option<Item>(rusty::None);
 }
-auto value = std::make_tuple(index++, next_ch.unwrap());
-return rusty::Option<Item>(std::move(value));
+const char32_t ch = next_ch.unwrap();
+const std::size_t at = index;
+const auto code = static_cast<uint32_t>(ch);
+index += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+return rusty::Option<Item>(std::make_tuple(at, ch));
 }
 };
 inline CharIndices char_indices(std::string_view text) {
@@ -3329,15 +2214,60 @@ text = std::string_view(input.as_str());
 } else {
 return rusty::Result<T, rusty::String>::Err(rusty::String::from("unsupported parse input"));
 }
-if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+if constexpr (std::is_same_v<T, char32_t>) {
+// Rust str parse::<char>() — exactly one UTF-8 scalar or Err.
+if (text.empty()) {
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("cannot parse char from empty string"));
+}
+const unsigned char lead = static_cast<unsigned char>(text[0]);
+size_t len = lead < 0x80 ? 1 : (lead >> 5) == 0x6 ? 2 : (lead >> 4) == 0xE ? 3 : (lead >> 3) == 0x1E ? 4 : 0;
+if (len == 0 || text.size() != len) {
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("too many characters in char"));
+}
+char32_t code = 0;
+if (len == 1) { code = lead; }
+else {
+code = lead & (0x7F >> len);
+for (size_t k = 1; k < len; ++k) {
+const unsigned char cont = static_cast<unsigned char>(text[k]);
+if ((cont & 0xC0) != 0x80) {
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("too many characters in char"));
+}
+code = (code << 6) | (cont & 0x3F);
+}
+}
+return rusty::Result<T, rusty::String>::Ok(static_cast<T>(code));
+}
+if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool> && !std::is_same_v<T, char32_t>) {
 T value{};
 const auto* begin = text.data();
 const auto* end = begin + text.size();
+if (begin != end && *begin == '+' && (end - begin) > 1) { ++begin; }
 const auto [ptr, ec] = std::from_chars(begin, end, value);
 if (ec == std::errc() && ptr == end) {
 return rusty::Result<T, rusty::String>::Ok(value);
 }
 return rusty::Result<T, rusty::String>::Err(rusty::String::from("invalid digit found in string"));
+}
+if constexpr (std::is_floating_point_v<T>) {
+T value{};
+const auto* begin = text.data();
+const auto* end = begin + text.size();
+if (begin != end && *begin == '+' && (end - begin) > 1) { ++begin; }
+const auto [ptr, ec] = std::from_chars(begin, end, value, std::chars_format::general);
+if (ec == std::errc() && ptr == end) {
+return rusty::Result<T, rusty::String>::Ok(value);
+}
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("invalid float literal"));
+}
+if constexpr (std::is_same_v<T, bool>) {
+if (text == std::string_view("true")) { return rusty::Result<T, rusty::String>::Ok(true); }
+if (text == std::string_view("false")) { return rusty::Result<T, rusty::String>::Ok(false); }
+return rusty::Result<T, rusty::String>::Err(rusty::String::from("provided string was not `true` or `false`"));
+}
+if constexpr (std::is_same_v<T, rusty::String>) {
+/* Rust `FromStr for String` is infallible. */
+return rusty::Result<T, rusty::String>::Ok(rusty::String::from(text));
 }
 return rusty::Result<T, rusty::String>::Err(rusty::String::from("unsupported parse target"));
 }
@@ -3349,13 +2279,38 @@ return s.substr(start, end - start + 1);
 }
 inline std::string_view trim_start_matches(std::string_view s, char32_t ch) {
 size_t start = 0;
-while (start < s.size() && static_cast<char32_t>(static_cast<unsigned char>(s[start])) == ch) ++start;
+const auto _pat = char_pattern_utf8(ch);
+while (s.size() - start >= _pat.size() && s.compare(start, _pat.size(), _pat) == 0) start += _pat.size();
 return s.substr(start);
 }
 inline std::string_view trim_end_matches(std::string_view s, char32_t ch) {
 size_t end = s.size();
-while (end > 0 && static_cast<char32_t>(static_cast<unsigned char>(s[end - 1])) == ch) --end;
+const auto _pat = char_pattern_utf8(ch);
+while (end >= _pat.size() && s.compare(end - _pat.size(), _pat.size(), _pat) == 0) end -= _pat.size();
 return s.substr(0, end);
+}
+inline std::string_view trim_matches(std::string_view s, char32_t ch) {
+const auto _pat = char_pattern_utf8(ch);
+size_t start = 0;
+while (s.size() - start >= _pat.size() && s.compare(start, _pat.size(), _pat) == 0) start += _pat.size();
+size_t end = s.size();
+while (end - start >= _pat.size() && s.compare(end - _pat.size(), _pat.size(), _pat) == 0) end -= _pat.size();
+return s.substr(start, end - start);
+}
+inline std::string_view trim_start_matches(std::string_view s, std::string_view pat) {
+if (!pat.empty()) { while (s.starts_with(pat)) s.remove_prefix(pat.size()); }
+return s;
+}
+inline std::string_view trim_end_matches(std::string_view s, std::string_view pat) {
+if (!pat.empty()) { while (s.ends_with(pat)) s.remove_suffix(pat.size()); }
+return s;
+}
+inline std::string_view trim_matches(std::string_view s, std::string_view pat) {
+if (!pat.empty()) {
+while (s.starts_with(pat)) s.remove_prefix(pat.size());
+while (s.ends_with(pat)) s.remove_suffix(pat.size());
+}
+return s;
 }
 inline rusty::Option<std::string_view> strip_prefix(std::string_view s, std::string_view prefix) {
 if (s.starts_with(prefix)) {
@@ -3394,6 +2349,23 @@ pos += to.size();
 }
 return rusty::String::from(out);
 }
+template<typename To>
+inline rusty::String replace(std::string_view s, char32_t from, To&& to) {
+char pat_buf[4]; size_t pat_n;
+if (from < 0x80) { pat_buf[0] = static_cast<char>(from); pat_n = 1; }
+else if (from < 0x800) { pat_buf[0] = static_cast<char>(0xC0 | (from >> 6)); pat_buf[1] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 2; }
+else if (from < 0x10000) { pat_buf[0] = static_cast<char>(0xE0 | (from >> 12)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 3; }
+else { pat_buf[0] = static_cast<char>(0xF0 | (from >> 18)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 12) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[3] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 4; }
+return replace(s, std::string_view(pat_buf, pat_n), std::string_view(std::forward<To>(to)));
+}
+template<typename S, typename To>
+inline rusty::String replace(const S& value, char32_t from, To&& to) {
+if constexpr (requires { value.as_str(); }) {
+return replace(std::string_view(value.as_str()), from, std::forward<To>(to));
+} else {
+return replace(std::string_view(value), from, std::forward<To>(to));
+}
+}
 template<typename S, typename From, typename To>
 inline rusty::String replace(const S& value, From&& from, To&& to) {
 if constexpr (requires { value.as_str(); }) {
@@ -3412,7 +2384,7 @@ return rusty::Option<std::size_t>(rusty::None);
 return rusty::Option<std::size_t>(pos);
 }
 inline rusty::Option<std::size_t> find(std::string_view s, char32_t ch) {
-const auto pos = s.find(static_cast<char>(ch));
+const auto pos = s.find(char_pattern_utf8(ch));
 if (pos == std::string_view::npos) {
 return rusty::Option<std::size_t>(rusty::None);
 }
@@ -3420,7 +2392,55 @@ return rusty::Option<std::size_t>(pos);
 }
 template<std::size_t N>
 inline rusty::Option<std::size_t> find(std::string_view s, const std::array<char32_t, N>& any_char) {
-for (std::size_t i = 0; i < s.size(); ++i) {
+std::size_t best = std::string_view::npos;
+for (const auto ch : any_char) {
+const auto p = s.find(char_pattern_utf8(ch));
+if (p != std::string_view::npos && (best == std::string_view::npos || p < best)) best = p;
+}
+if (best != std::string_view::npos) return rusty::Option<std::size_t>(best);
+return rusty::Option<std::size_t>(rusty::None);
+}
+template<typename Pred>
+requires (!std::is_convertible_v<Pred, std::string_view> && !std::is_convertible_v<Pred, char32_t> && requires(Pred p) { p(char32_t{}); })
+inline rusty::Option<std::size_t> find(std::string_view s, Pred&& pred) {
+/* Rust str::find(char predicate): byte index of the first char
+satisfying the predicate, walking UTF-8 sequences. */
+std::size_t i = 0;
+while (i < s.size()) {
+const unsigned char b = static_cast<unsigned char>(s[i]);
+std::size_t len = 1;
+char32_t c = b;
+if (b >= 0xF0) { len = 4; c = b & 0x07; }
+else if (b >= 0xE0) { len = 3; c = b & 0x0F; }
+else if (b >= 0xC0) { len = 2; c = b & 0x1F; }
+if (len > 1) {
+if (i + len > s.size()) { break; }
+for (std::size_t k = 1; k < len; ++k) {
+c = static_cast<char32_t>((c << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F));
+}
+}
+if (pred(c)) { return rusty::Option<std::size_t>(i); }
+i += len;
+}
+return rusty::Option<std::size_t>(rusty::None);
+}
+inline rusty::Option<std::size_t> rfind(std::string_view s, std::string_view needle) {
+const auto pos = s.rfind(needle);
+if (pos == std::string_view::npos) {
+return rusty::Option<std::size_t>(rusty::None);
+}
+return rusty::Option<std::size_t>(pos);
+}
+inline rusty::Option<std::size_t> rfind(std::string_view s, char32_t ch) {
+const auto pos = s.rfind(char_pattern_utf8(ch));
+if (pos == std::string_view::npos) {
+return rusty::Option<std::size_t>(rusty::None);
+}
+return rusty::Option<std::size_t>(pos);
+}
+template<std::size_t N>
+inline rusty::Option<std::size_t> rfind(std::string_view s, const std::array<char32_t, N>& any_char) {
+for (std::size_t i = s.size(); i-- > 0; ) {
 const auto cur = static_cast<char32_t>(static_cast<unsigned char>(s[i]));
 for (const auto ch : any_char) {
 if (cur == ch) {
@@ -3430,19 +2450,116 @@ return rusty::Option<std::size_t>(i);
 }
 return rusty::Option<std::size_t>(rusty::None);
 }
+inline std::string_view trim_start(std::string_view s) {
+auto start = s.find_first_not_of(" \t\n\r");
+return start == std::string_view::npos ? std::string_view{} : s.substr(start);
+}
+inline std::string_view trim_end(std::string_view s) {
+auto end = s.find_last_not_of(" \t\n\r");
+return end == std::string_view::npos ? std::string_view{} : s.substr(0, end + 1);
+}
+inline rusty::Option<std::string_view> strip_suffix(std::string_view s, std::string_view suffix) {
+if (s.ends_with(suffix)) return rusty::Option<std::string_view>(s.substr(0, s.size() - suffix.size()));
+return rusty::Option<std::string_view>(rusty::None);
+}
+inline rusty::Option<std::string_view> strip_suffix(std::string_view s, char32_t ch) {
+if (!s.empty() && static_cast<char32_t>(static_cast<unsigned char>(s.back())) == ch) return rusty::Option<std::string_view>(s.substr(0, s.size() - 1));
+return rusty::Option<std::string_view>(rusty::None);
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> split_once(std::string_view s, char32_t delim) {
+const auto _pat = char_pattern_utf8(delim);
+auto pos = s.find(_pat);
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + _pat.size())));
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> split_once(std::string_view s, std::string_view delim) {
+auto pos = s.find(delim);
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + delim.size())));
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> rsplit_once(std::string_view s, char32_t delim) {
+const auto _pat = char_pattern_utf8(delim);
+auto pos = s.rfind(_pat);
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + _pat.size())));
+}
+inline rusty::Option<std::tuple<std::string_view, std::string_view>> rsplit_once(std::string_view s, std::string_view delim) {
+auto pos = s.rfind(delim);
+if (pos == std::string_view::npos) return rusty::Option<std::tuple<std::string_view, std::string_view>>(rusty::None);
+return rusty::Option<std::tuple<std::string_view, std::string_view>>(std::make_tuple(s.substr(0, pos), s.substr(pos + delim.size())));
+}
+inline rusty::String replacen(std::string_view s, std::string_view from, std::string_view to, std::size_t count) {
+if (from.empty() || count == 0) return rusty::String::from(s);
+std::string out(s);
+std::size_t pos = 0, done = 0;
+while (done < count && (pos = out.find(from, pos)) != std::string::npos) {
+out.replace(pos, from.size(), to);
+pos += to.size();
+++done;
+}
+return rusty::String::from(out);
+}
+template<typename To>
+inline rusty::String replacen(std::string_view s, char32_t from, To&& to, std::size_t count) {
+char pat_buf[4]; size_t pat_n;
+if (from < 0x80) { pat_buf[0] = static_cast<char>(from); pat_n = 1; }
+else if (from < 0x800) { pat_buf[0] = static_cast<char>(0xC0 | (from >> 6)); pat_buf[1] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 2; }
+else if (from < 0x10000) { pat_buf[0] = static_cast<char>(0xE0 | (from >> 12)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 3; }
+else { pat_buf[0] = static_cast<char>(0xF0 | (from >> 18)); pat_buf[1] = static_cast<char>(0x80 | ((from >> 12) & 0x3F)); pat_buf[2] = static_cast<char>(0x80 | ((from >> 6) & 0x3F)); pat_buf[3] = static_cast<char>(0x80 | (from & 0x3F)); pat_n = 4; }
+return replacen(s, std::string_view(pat_buf, pat_n), std::string_view(std::forward<To>(to)), count);
+}
+template<typename S, typename To>
+inline rusty::String replacen(const S& value, char32_t from, To&& to, std::size_t count) {
+if constexpr (requires { value.as_str(); }) {
+return replacen(std::string_view(value.as_str()), from, std::forward<To>(to), count);
+} else {
+return replacen(std::string_view(value), from, std::forward<To>(to), count);
+}
+}
+template<typename S, typename From, typename To>
+inline rusty::String replacen(const S& value, From&& from, To&& to, std::size_t count) {
+if constexpr (requires { value.as_str(); }) {
+return replacen(std::string_view(value.as_str()), std::string_view(std::forward<From>(from)), std::string_view(std::forward<To>(to)), count);
+} else if constexpr (std::is_convertible_v<S, std::string_view>) {
+return replacen(std::string_view(value), std::string_view(std::forward<From>(from)), std::string_view(std::forward<To>(to)), count);
+} else {
+return rusty::String::from("");
+}
+}
+inline rusty::String to_ascii_uppercase(std::string_view s) {
+std::string out(s);
+for (auto& c : out) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+return rusty::String::from(out);
+}
+inline rusty::String to_ascii_lowercase(std::string_view s) {
+std::string out(s);
+for (auto& c : out) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+return rusty::String::from(out);
+}
+inline bool eq_ignore_ascii_case(std::string_view a, std::string_view b) {
+if (a.size() != b.size()) return false;
+for (std::size_t i = 0; i < a.size(); ++i) {
+char ca = a[i], cb = b[i];
+if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca + 32);
+if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb + 32);
+if (ca != cb) return false;
+}
+return true;
+}
 struct SplitIter {
 std::string_view remaining;
 char32_t delim;
 bool done = false;
 rusty::Option<std::string_view> next() {
 if (done) return rusty::Option<std::string_view>(rusty::None);
-auto pos = remaining.find(static_cast<char>(delim));
+const auto _pat = char_pattern_utf8(delim);
+auto pos = remaining.find(_pat);
 if (pos == std::string_view::npos) {
 done = true;
 return rusty::Option<std::string_view>(remaining);
 }
 auto piece = remaining.substr(0, pos);
-remaining = remaining.substr(pos + 1);
+remaining = remaining.substr(pos + _pat.size());
 return rusty::Option<std::string_view>(piece);
 }
 rusty::Option<std::string_view> nth(std::size_t n) {
@@ -3475,19 +2592,203 @@ return split(*value, delim);
 return SplitIter{std::string_view{}, delim, true};
 }
 }
+struct RSplitIter {
+std::string_view remaining;
+char32_t delim;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done) return rusty::Option<std::string_view>(rusty::None);
+const auto _pat = char_pattern_utf8(delim);
+auto pos = remaining.rfind(_pat);
+if (pos == std::string_view::npos) {
+done = true;
+return rusty::Option<std::string_view>(remaining);
+}
+auto piece = remaining.substr(pos + _pat.size());
+remaining = remaining.substr(0, pos);
+return rusty::Option<std::string_view>(piece);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) {
+if (next().is_none()) {
+return rusty::Option<std::string_view>(rusty::None);
+}
+}
+return next();
+}
+};
+inline RSplitIter rsplit(std::string_view s, char32_t delim) {
+return RSplitIter{s, delim};
+}
+template<typename S>
+inline RSplitIter rsplit(const S& value, char32_t delim) {
+if constexpr (std::is_convertible_v<S, std::string_view>) {
+return rsplit(std::string_view(value), delim);
+} else if constexpr (requires { value.as_str(); }) {
+return rsplit(std::string_view(value.as_str()), delim);
+} else {
+return RSplitIter{std::string_view{}, delim, true};
+}
+}
+inline bool is_ascii_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+struct WhitespaceSplitIter {
+std::string_view remaining;
+rusty::Option<std::string_view> next() {
+std::size_t i = 0;
+while (i < remaining.size() && is_ascii_ws(remaining[i])) ++i;
+remaining = remaining.substr(i);
+if (remaining.empty()) return rusty::Option<std::string_view>(rusty::None);
+std::size_t j = 0;
+while (j < remaining.size() && !is_ascii_ws(remaining[j])) ++j;
+auto word = remaining.substr(0, j);
+remaining = remaining.substr(j);
+return rusty::Option<std::string_view>(word);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline WhitespaceSplitIter split_whitespace(std::string_view s) { return WhitespaceSplitIter{s}; }
+struct SplitNIter {
+std::string_view remaining;
+char32_t delim;
+std::size_t remaining_count;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done) return rusty::Option<std::string_view>(rusty::None);
+if (remaining_count <= 1) { done = true; return rusty::Option<std::string_view>(remaining); }
+const auto _pat = char_pattern_utf8(delim);
+auto pos = remaining.find(_pat);
+if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(remaining); }
+auto piece = remaining.substr(0, pos);
+remaining = remaining.substr(pos + _pat.size());
+--remaining_count;
+return rusty::Option<std::string_view>(piece);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline SplitNIter splitn(std::string_view s, std::size_t n, char32_t delim) { return SplitNIter{s, delim, n, n == 0}; }
+struct RSplitNIter {
+std::string_view remaining;
+char32_t delim;
+std::size_t remaining_count;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done) return rusty::Option<std::string_view>(rusty::None);
+if (remaining_count <= 1) { done = true; return rusty::Option<std::string_view>(remaining); }
+const auto _pat = char_pattern_utf8(delim);
+auto pos = remaining.rfind(_pat);
+if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(remaining); }
+auto piece = remaining.substr(pos + _pat.size());
+remaining = remaining.substr(0, pos);
+--remaining_count;
+return rusty::Option<std::string_view>(piece);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline RSplitNIter rsplitn(std::string_view s, std::size_t n, char32_t delim) { return RSplitNIter{s, delim, n, n == 0}; }
+inline SplitIter split_terminator(std::string_view s, char32_t delim) {
+/* Rust str::split_terminator: like split, but a trailing delimiter does
+not produce a final empty piece. Strip one trailing delimiter, then
+plain-split; an empty input yields no pieces at all. */
+if (!s.empty() && static_cast<char32_t>(static_cast<unsigned char>(s.back())) == delim) {
+s = s.substr(0, s.size() - 1);
+return SplitIter{s, delim};
+}
+return SplitIter{s, delim, s.empty()};
+}
+struct LinesIter {
+std::string_view remaining;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done || remaining.empty()) { done = true; return rusty::Option<std::string_view>(rusty::None); }
+auto pos = remaining.find('\n');
+if (pos == std::string_view::npos) { auto line = remaining; remaining = std::string_view{}; done = true; return rusty::Option<std::string_view>(line); }
+auto line = remaining.substr(0, pos);
+if (!line.empty() && line.back() == '\r') line = line.substr(0, line.size() - 1);
+remaining = remaining.substr(pos + 1);
+return rusty::Option<std::string_view>(line);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline LinesIter lines(std::string_view s) { return LinesIter{s}; }
+struct MatchesIter {
+std::string_view remaining;
+std::string pat;
+bool done = false;
+rusty::Option<std::string_view> next() {
+if (done || pat.empty()) { done = true; return rusty::Option<std::string_view>(rusty::None); }
+auto pos = remaining.find(pat);
+if (pos == std::string_view::npos) { done = true; return rusty::Option<std::string_view>(rusty::None); }
+auto m = remaining.substr(pos, pat.size());
+remaining = remaining.substr(pos + pat.size());
+return rusty::Option<std::string_view>(m);
+}
+rusty::Option<std::string_view> nth(std::size_t n) {
+for (std::size_t i = 0; i < n; ++i) if (next().is_none()) return rusty::Option<std::string_view>(rusty::None);
+return next();
+}
+};
+inline MatchesIter matches(std::string_view s, std::string_view pat) { return MatchesIter{s, std::string(pat)}; }
+inline MatchesIter matches(std::string_view s, char32_t ch) { return MatchesIter{s, char_pattern_utf8(ch)}; }
 }
 namespace char_runtime {
+// Rust `char::REPLACEMENT_CHARACTER` (U+FFFD).
+inline constexpr char32_t REPLACEMENT_CHARACTER = static_cast<char32_t>(0xFFFD);
 inline rusty::Option<char32_t> from_u32(uint32_t value) {
 if (value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF)) {
 return rusty::Option<char32_t>(rusty::None);
 }
 return rusty::Option<char32_t>(static_cast<char32_t>(value));
 }
+/* Rust char::from_digit(num, radix): digit -> char in the given radix
+(lowercase letters for 10..). Panics in Rust when radix > 36; None when
+num is not a digit in that radix. */
+inline rusty::Option<char32_t> from_digit(uint32_t num, uint32_t radix) {
+if (radix > 36 || num >= radix) {
+return rusty::Option<char32_t>(rusty::None);
+}
+const char32_t ch = num < 10
+? static_cast<char32_t>(U'0' + num)
+: static_cast<char32_t>(U'a' + (num - 10));
+return rusty::Option<char32_t>(ch);
+}
 inline std::size_t len_utf8(char32_t ch) {
 const auto code = static_cast<uint32_t>(ch);
 if (code < 0x80) return 1;
 if (code < 0x800) return 2;
 if (code < 0x10000) return 3;
+return 4;
+}
+template<typename Dst>
+inline std::size_t encode_utf8_raw_unchecked(uint32_t code, Dst dst) {
+using B = std::remove_reference_t<decltype(dst[0])>;
+if (code < 0x80u) { dst[0] = static_cast<B>(code); return 1; }
+if (code < 0x800u) {
+dst[0] = static_cast<B>(0xC0u | (code >> 6));
+dst[1] = static_cast<B>(0x80u | (code & 0x3Fu));
+return 2;
+}
+if (code < 0x10000u) {
+dst[0] = static_cast<B>(0xE0u | (code >> 12));
+dst[1] = static_cast<B>(0x80u | ((code >> 6) & 0x3Fu));
+dst[2] = static_cast<B>(0x80u | (code & 0x3Fu));
+return 3;
+}
+dst[0] = static_cast<B>(0xF0u | (code >> 18));
+dst[1] = static_cast<B>(0x80u | ((code >> 12) & 0x3Fu));
+dst[2] = static_cast<B>(0x80u | ((code >> 6) & 0x3Fu));
+dst[3] = static_cast<B>(0x80u | (code & 0x3Fu));
 return 4;
 }
 template<typename Buffer>
@@ -3527,6 +2828,71 @@ return true;
 }
 return code >= 0x2000 && code <= 0x200A;
 }
+// Rust `char` classifiers. The ASCII range is matched EXACTLY (as Rust does);
+// non-ASCII scalar values delegate to the C wide-character predicates, which
+// in the default "C" locale classify only ASCII — deterministic, and correct
+// for the ASCII-only inputs the ports exercise. Not a full Unicode oracle.
+inline bool is_ascii(char32_t ch) { return static_cast<uint32_t>(ch) <= 0x7F; }
+inline bool is_alphabetic(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+return std::iswalpha(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_numeric(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return c >= '0' && c <= '9';
+return std::iswdigit(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_alphanumeric(char32_t ch) { return is_alphabetic(ch) || is_numeric(ch); }
+inline bool is_uppercase(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return c >= 'A' && c <= 'Z';
+return std::iswupper(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_lowercase(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+if (c <= 0x7F) return c >= 'a' && c <= 'z';
+return std::iswlower(static_cast<std::wint_t>(c)) != 0;
+}
+inline bool is_control(char32_t ch) {
+const auto c = static_cast<uint32_t>(ch);
+// Unicode general category Cc: U+0000..=U+001F, U+007F..=U+009F.
+return c <= 0x1F || (c >= 0x7F && c <= 0x9F);
+}
+inline bool is_ascii_alphabetic(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+inline bool is_ascii_digit(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= '0' && c <= '9'; }
+inline bool is_ascii_alphanumeric(char32_t ch) { return is_ascii_alphabetic(ch) || is_ascii_digit(ch); }
+inline bool is_ascii_uppercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 'A' && c <= 'Z'; }
+inline bool is_ascii_lowercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 'a' && c <= 'z'; }
+inline bool is_ascii_hexdigit(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+inline bool is_ascii_whitespace(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0C || c == 0x0D; }
+inline bool is_ascii_control(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c <= 0x1F || c == 0x7F; }
+inline bool is_ascii_graphic(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return c >= 0x21 && c <= 0x7E; }
+inline bool is_ascii_punctuation(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 0x21 && c <= 0x2F) || (c >= 0x3A && c <= 0x40) || (c >= 0x5B && c <= 0x60) || (c >= 0x7B && c <= 0x7E); }
+inline char32_t to_ascii_uppercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'a' && c <= 'z') ? static_cast<char32_t>(c - 32) : ch; }
+inline char32_t to_ascii_lowercase(char32_t ch) { const auto c = static_cast<uint32_t>(ch); return (c >= 'A' && c <= 'Z') ? static_cast<char32_t>(c + 32) : ch; }
+inline char32_t to_lowercase_first(char32_t ch) { return to_ascii_lowercase(ch); }
+inline char32_t to_uppercase_first(char32_t ch) { return to_ascii_uppercase(ch); }
+inline rusty::Option<uint32_t> to_digit(char32_t ch, uint32_t radix) {
+const auto c = static_cast<uint32_t>(ch);
+uint32_t d;
+if (c >= '0' && c <= '9') d = c - '0';
+else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
+else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+else return rusty::Option<uint32_t>(rusty::None);
+return d < radix ? rusty::Option<uint32_t>(d) : rusty::Option<uint32_t>(rusty::None);
+}
+inline bool is_digit(char32_t ch, uint32_t radix) {
+const auto c = static_cast<uint32_t>(ch);
+uint32_t d;
+if (c >= '0' && c <= '9') d = c - '0';
+else if (c >= 'a' && c <= 'z') d = c - 'a' + 10;
+else if (c >= 'A' && c <= 'Z') d = c - 'A' + 10;
+else return false;
+return d < radix;
+}
+inline std::size_t len_utf16(char32_t ch) { return static_cast<uint32_t>(ch) <= 0xFFFF ? std::size_t(1) : std::size_t(2); }
+inline bool eq_ignore_ascii_case(char32_t a, char32_t b) { return to_ascii_lowercase(a) == to_ascii_lowercase(b); }
 }
 #if !defined(RUSTY_HAS_FREE_IS_EMPTY)
 template<typename T>
@@ -3560,28 +2926,36 @@ return (value);
 }
 namespace panicking {
 enum class AssertKind { Eq, Ne };
+[[noreturn]] inline void do_panic_(std::string_view message) {
+#ifdef RUSTY_PANIC_ABORT
+std::fprintf(stderr, "thread panicked: %.*s\n", (int)message.size(), message.data());
+std::abort();
+#else
+throw std::runtime_error(std::string(message));
+#endif
+}
 template<typename... Args>
-[[noreturn]] inline void assert_failed(Args&&...) { throw std::runtime_error("assertion failed"); }
-[[noreturn]] inline void panic() { throw std::runtime_error("panic"); }
+[[noreturn]] inline void assert_failed(Args&&...) { do_panic_("assertion failed"); }
+[[noreturn]] inline void panic() { do_panic_("panic"); }
 template<typename Message, typename... Args>
 [[noreturn]] inline void panic(Message&& message, Args&&...) {
 if constexpr (std::is_convertible_v<Message, std::string_view>) {
-throw std::runtime_error(std::string(std::string_view(std::forward<Message>(message))));
+do_panic_(std::string_view(std::forward<Message>(message)));
 } else {
-throw std::runtime_error("panic");
+do_panic_("panic");
 }
 }
-[[noreturn]] inline void panic_fmt() { throw std::runtime_error("panic"); }
+[[noreturn]] inline void panic_fmt() { do_panic_("panic"); }
 template<typename Message, typename... Args>
 [[noreturn]] inline void panic_fmt(Message&& message, Args&&...) {
 if constexpr (std::is_convertible_v<Message, std::string_view>) {
-throw std::runtime_error(std::string(std::string_view(std::forward<Message>(message))));
+do_panic_(std::string_view(std::forward<Message>(message)));
 } else {
-throw std::runtime_error("panic");
+do_panic_("panic");
 }
 }
 template<typename... Args>
-[[noreturn]] inline void unreachable_display(Args&&...) { throw std::runtime_error("unreachable"); }
+[[noreturn]] inline void unreachable_display(Args&&...) { do_panic_("unreachable"); }
 }
 namespace intrinsics {
 struct Discriminant {
@@ -3646,28 +3020,44 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 
 export module arc_port;
+import vec_port.vec;
 
-import vec_port.vec;  // patcher-injected for ::Vec
 
 
-namespace rusty::port::sync {
-// Cluster A completion: __TemplateArgs primary template (specializations at file end).
-// Wrapped in `namespace rusty::port::sync` so the declaration attaches uniquely
-// to this module — `::__TemplateArgs` at file scope conflicts with the same
-// forward-decl in rc_port / btree_port when imported together (C++20
-// single-module-attachment rule).
+// Cluster A completion: __TemplateArgs primary template (specializations at file end)
+namespace rusty { namespace detail {
+RUSTY_METHOD_DISPATCH(allocate)
+RUSTY_METHOD_DISPATCH(allocate_zeroed)
+RUSTY_METHOD_DISPATCH(clone_to_uninit)
+RUSTY_METHOD_DISPATCH(deallocate)
+} } // namespace rusty::detail (issue #31 deref_call dispatch)
+
 template<typename T> struct __TemplateArgs;
+namespace rusty::port::sync {
+namespace borrow { template<class T> struct Cow; }  // patcher: Cow stub (borrow module not vendored)
 
 template<typename T>
 struct ArcInner;
 struct WeakInner;
 struct SliceArcInnerForStatic;
+namespace {
+template <class T>
+class ArcFromSlice;
+}
 export template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
 struct Arc;
+namespace {
+template <class T, class A>
+class ArcEqIdent;
+}
 export template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
 struct Weak;
+namespace {
+template <class T>
+class ToArcSlice;
+}
 template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
 struct UniqueArcUninit;
@@ -3683,14 +3073,91 @@ template<typename T>
 size_t data_offset(std::add_pointer_t<std::add_const_t<T>> ptr);
 size_t data_offset_alignment(rusty::ptr::Alignment alignment);
 
-// Extension trait free-function forward declarations
-namespace rusty_ext {
-    export template<typename T, typename I>
-    rusty::Arc<std::span<const T>> to_arc_slice(I self_);
-
+// UFCS trait migration: implementor markers (book §3.2.3) — DEFINED-false primaries + concepts
+template<class U> struct impls_ArcEqIdent : std::false_type {};
+template<class U> concept has_ArcEqIdent = impls_ArcEqIdent<std::remove_cvref_t<U>>::value;
+namespace ArcEqIdent_ {
+    namespace impl_ { struct tag {}; struct adl_enabler_; }
+    void eq(impl_::adl_enabler_);
+    template<class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto eq(S&& __self, R&&... __rest) -> decltype(eq(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...)) { return eq(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...); }
+    template<class E0, class... E, class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto eq(S&& __self, R&&... __rest) -> decltype(eq<E0, E...>(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...)) { return eq<E0, E...>(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...); }
+    void ne(impl_::adl_enabler_);
+    template<class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto ne(S&& __self, R&&... __rest) -> decltype(ne(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...)) { return ne(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...); }
+    template<class E0, class... E, class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto ne(S&& __self, R&&... __rest) -> decltype(ne<E0, E...>(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...)) { return ne<E0, E...>(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...); }
+}
+template<class U> struct impls_ArcFromSlice : std::false_type {};
+template<class U> concept has_ArcFromSlice = impls_ArcFromSlice<std::remove_cvref_t<U>>::value;
+template<class B> struct ArcFromSliceTraits;
+namespace ArcFromSlice_ {
+    namespace impl_ { struct tag {}; struct adl_enabler_; }
+    void from_slice(impl_::adl_enabler_);
+    template<class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto from_slice(S&& __self, R&&... __rest) -> decltype(from_slice(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...)) { return from_slice(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...); }
+    template<class E0, class... E, class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto from_slice(S&& __self, R&&... __rest) -> decltype(from_slice<E0, E...>(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...)) { return from_slice<E0, E...>(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...); }
+}
+template<class U> struct impls_Default : std::false_type {};
+template<class U> concept has_Default = impls_Default<std::remove_cvref_t<U>>::value;
+namespace Default_ {
+    namespace impl_ { struct tag {}; struct adl_enabler_; }
+}
+template<class U> struct impls_ToArcSlice : std::false_type {};
+template<class U> concept has_ToArcSlice = impls_ToArcSlice<std::remove_cvref_t<U>>::value;
+namespace ToArcSlice_ {
+    namespace impl_ { struct tag {}; struct adl_enabler_; }
+    void to_arc_slice(impl_::adl_enabler_);
+    template<class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto to_arc_slice(S&& __self, R&&... __rest) -> decltype(to_arc_slice(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...)) { return to_arc_slice(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...); }
+    template<class E0, class... E, class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto to_arc_slice(S&& __self, R&&... __rest) -> decltype(to_arc_slice<E0, E...>(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...)) { return to_arc_slice<E0, E...>(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...); }
 }
 
-
+namespace ArcFromSlice_::impl_ {
+    export template<typename T>
+    inline Arc<std::span<const T>, rusty::alloc::Global> from_slice(ArcFromSlice_::impl_::tag, rusty::self_tag<Arc<std::span<const T>, rusty::alloc::Global>>, std::span<const T> v, rusty::tag<T> = {});
+}
+template<class T> struct impls_ArcFromSlice<Arc<std::span<const T>, rusty::alloc::Global>> : std::true_type {};
+namespace ArcFromSlice_::impl_ {
+}
+namespace Default_::impl_ {
+    export template<typename T>
+    inline Weak<T, rusty::alloc::Global> default_(Default_::impl_::tag, rusty::self_tag<Weak<T, rusty::alloc::Global>>);
+}
+template<class T> struct impls_Default<Weak<T, rusty::alloc::Global>> : std::true_type {};
+namespace ArcEqIdent_::impl_ {
+    export template<typename T, typename A>
+    inline bool eq(ArcEqIdent_::impl_::tag, const Arc<T, A>& self_, const Arc<T, A>& other, rusty::tag<T, A> = {});
+    export template<typename T, typename A>
+    inline bool ne(ArcEqIdent_::impl_::tag, const Arc<T, A>& self_, const Arc<T, A>& other, rusty::tag<T, A> = {});
+}
+template<class T, class A> struct impls_ArcEqIdent<Arc<T, A>> : std::true_type {};
+namespace ArcEqIdent_::impl_ {
+}
+namespace Default_::impl_ {
+    export template<typename T>
+    requires (has_Default<T>) inline Arc<T, rusty::alloc::Global> default_(Default_::impl_::tag, rusty::self_tag<Arc<T, rusty::alloc::Global>>);
+}
+template<class T> requires (has_Default<T>) struct impls_Default<Arc<T, rusty::alloc::Global>> : std::true_type {};
+namespace Default_::impl_ {
+    export inline Arc<std::string_view, rusty::alloc::Global> default_(Default_::impl_::tag, rusty::self_tag<Arc<std::string_view, rusty::alloc::Global>>);
+}
+template<> struct impls_Default<Arc<std::string_view, rusty::alloc::Global>> : std::true_type {};
+namespace Default_::impl_ {
+    export inline Arc<rusty::ffi::CStr, rusty::alloc::Global> default_(Default_::impl_::tag, rusty::self_tag<Arc<rusty::ffi::CStr, rusty::alloc::Global>>);
+}
+template<> struct impls_Default<Arc<rusty::ffi::CStr, rusty::alloc::Global>> : std::true_type {};
+namespace Default_::impl_ {
+    export template<typename T>
+    inline Arc<std::span<const T>, rusty::alloc::Global> default_(Default_::impl_::tag, rusty::self_tag<Arc<std::span<const T>, rusty::alloc::Global>>);
+}
+template<class T> struct impls_Default<Arc<std::span<const T>, rusty::alloc::Global>> : std::true_type {};
+namespace Default_::impl_ {
+    export template<typename T>
+    inline rusty::pin::Pin<Arc<T, rusty::alloc::Global>> default_(Default_::impl_::tag, rusty::self_tag<rusty::pin::Pin<Arc<T, rusty::alloc::Global>>>);
+}
+template<class T> struct impls_Default<rusty::pin::Pin<Arc<T, rusty::alloc::Global>>> : std::true_type {};
+namespace ToArcSlice_::impl_ {
+    export template<typename T, typename I>
+    inline Arc<std::span<const T>, rusty::alloc::Global> to_arc_slice(ToArcSlice_::impl_::tag, I self_, rusty::tag<T> = {});
+}
+namespace ToArcSlice_::impl_ {
+}
 // Rust-only: using std::any::Any;
 
 // Rust-only: using std::cell::CloneFromCell;
@@ -3764,7 +3231,10 @@ using rusty::Box;
 // using ::rc::is_dangling; — rc module not vendored; arc_port has its own is_dangling helper if needed
 using rusty::String;
 
-// using ::Vec; — Vec comes from vec_port via include path
+using ::rusty::port::vec::Vec;
+
+
+
 // macro_rules! acquire { ... }
 
 // macro_rules! acquire { ... }
@@ -3774,6 +3244,7 @@ struct ArcInner {
     rusty::sync::atomic::detail::Atomic<size_t> strong;
     rusty::sync::atomic::detail::Atomic<size_t> weak;
     T data;
+    [[no_unique_address]] alignas(2) rusty::Unit _rusty_align_anchor_{};
 
 };
 
@@ -3793,21 +3264,26 @@ struct WeakInner {
 /// * `[u8; 1]` (to be initialized with 0) so it can be used for `Arc<CStr>`.
 struct SliceArcInnerForStatic {
     ArcInner<std::array<uint8_t, 1>> inner;
+    [[no_unique_address]] alignas(16) rusty::Unit _rusty_align_anchor_{};
 };
 
 namespace {
-class ToArcSlice {
+template <class T>
+class ArcFromSlice {
 public:
-    virtual ~ToArcSlice() noexcept(false) {}
-    ToArcSlice(const ToArcSlice&) = delete;
-    ToArcSlice& operator=(const ToArcSlice&) = delete;
-    ToArcSlice(ToArcSlice&&) = delete;
-    ToArcSlice& operator=(ToArcSlice&&) = delete;
+    virtual ~ArcFromSlice() noexcept(false) {}
 protected:
-    ToArcSlice() = default;
+    ArcFromSlice() = default;
+    ArcFromSlice(const ArcFromSlice&) = default;
+    ArcFromSlice& operator=(const ArcFromSlice&) = default;
+    ArcFromSlice(ArcFromSlice&&) = default;
+    ArcFromSlice& operator=(ArcFromSlice&&) = default;
 };
 }
 
+template <class B> struct ArcFromSliceTraits { template<class B_ = B, class... A> static decltype(auto) from_slice(A&&... a) { if constexpr (requires { B_::from_slice(std::forward<A>(a)...); }) { return B_::from_slice(std::forward<A>(a)...); } else { return ArcFromSlice_::from_slice(rusty::self_tag<B_>{}, std::forward<A>(a)...); } } };
+template <class S> struct ArcFromSliceTraits<S*> { template<class... A> static decltype(auto) from_slice(A&&... a) { return ArcFromSliceTraits<S>::from_slice(std::forward<A>(a)...); } };
+template <class S> struct ArcFromSliceTraits<S&> { template<class... A> static decltype(auto) from_slice(A&&... a) { return ArcFromSliceTraits<S>::from_slice(std::forward<A>(a)...); } };
 
 /// A thread-safe reference-counting pointer. 'Arc' stands for 'Atomically
 /// Reference Counted'.
@@ -4015,8 +3491,14 @@ struct Arc {
         new (this) Arc(std::move(other));
         return *this;
     }
-    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; rusty::detail::mark_forgotten_if_supported(this->ptr); rusty::detail::mark_forgotten_if_supported(this->phantom); rusty::detail::mark_forgotten_if_supported(this->alloc); }
 
+    std::string rusty_debug_string() const {
+        rusty::fmt::Formatter formatter{};
+        auto result = this->rusty_debug_fmt(formatter);
+        if (result.is_ok()) { return formatter.str(); }
+        return "<fmt-error>";
+    }
 
     static Arc<T, A> from_inner(rusty::ptr::NonNull<ArcInner<T>> ptr) {
         // @unsafe
@@ -4031,8 +3513,8 @@ struct Arc {
         }
     }
     static std::tuple<rusty::ptr::NonNull<ArcInner<T>>, A> into_inner_with_allocator(Arc<T, A> this_) {
-        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
-        return std::make_tuple(std::move(this_shadow1.ptr), rusty::ptr::read(&this_shadow1.alloc));
+        auto this_shadow1 = rusty::mem::ManuallyDrop<Arc<T, A>>::new_(std::move(this_));
+        return std::make_tuple(std::move(rusty::detail::deref_if_pointer((*this_shadow1)).ptr), rusty::ptr::read(&rusty::detail::deref_if_pointer((*this_shadow1)).alloc));
     }
     static Arc<T, A> from_inner_in(rusty::ptr::NonNull<ArcInner<T>> ptr, A alloc) {
         return Arc<T, A>(std::move(ptr), rusty::PhantomData<ArcInner<T>>{}, std::move(alloc));
@@ -4040,28 +3522,13 @@ struct Arc {
     static Arc<T, A> from_ptr_in(std::add_pointer_t<ArcInner<T>> ptr, A alloc) {
         // @unsafe
         {
-            return Arc<T, A>::from_inner_in(NonNull<ArcInner<T>>::new_unchecked(ptr), std::move(alloc));
+            return Arc<T, A>::from_inner_in(rusty::ptr::NonNull<ArcInner<T>>::new_unchecked(ptr), std::move(alloc));
         }
     }
     // patcher: ergonomic shims (make / operator->)
-    // `Arc::make(args...)` emplaces T directly inside the ArcInner
-    // allocation. Unlike `Arc::new_(T value)` (which requires T to be
-    // move-constructible because it does
-    // `ArcInner<T>{.data = std::move(value)}`), this path placement-
-    // news each ArcInner field individually so the T-ctor runs in-
-    // place. Critical for non-copyable / non-movable mako rrr types.
     template<typename... Args>
     static Arc<T, A> make(Args&&... args) {
-        auto layout = rusty::alloc::Layout::new_<ArcInner<T>>();
-        auto* raw = rusty::alloc::alloc(layout);
-        auto* mem = reinterpret_cast<ArcInner<T>*>(raw);
-        ::new (&mem->strong) rusty::sync::atomic::detail::Atomic<size_t>(
-            rusty::sync::atomic::AtomicUsize::new_(1));
-        ::new (&mem->weak) rusty::sync::atomic::detail::Atomic<size_t>(
-            rusty::sync::atomic::AtomicUsize::new_(1));
-        ::new (&mem->data) T(std::forward<Args>(args)...);
-        return Arc<T, A>::from_inner(
-            rusty::ptr::NonNull<ArcInner<T>>::new_unchecked(mem));
+        return Arc<T, A>::new_(T(std::forward<Args>(args)...));
     }
     const T* operator->() const { return &this->inner().data; }
 
@@ -4079,29 +3546,29 @@ struct Arc {
     static Arc<rusty::MaybeUninit<T>> new_uninit() {
         // @unsafe
         {
-            return Arc<rusty::MaybeUninit<T>>::from_ptr(Arc<rusty::MaybeUninit<T>>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate(std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); }));
+            return Arc<rusty::MaybeUninit<T>>::from_ptr(Arc<T>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate(std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); }));
         }
     }
     static Arc<rusty::MaybeUninit<T>> new_zeroed() {
         // @unsafe
         {
-            return Arc<rusty::MaybeUninit<T>>::from_ptr(Arc<rusty::MaybeUninit<T>>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate_zeroed(std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); }));
+            return Arc<rusty::MaybeUninit<T>>::from_ptr(Arc<T>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate_zeroed(std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); }));
         }
     }
     static rusty::pin::Pin<Arc<T>> pin(T data) {
         // @unsafe
         {
-            return rusty::pin::new_unchecked(Arc<std::remove_cvref_t<decltype((data))>>::new_(std::move(data)));
+            return rusty::pin::new_unchecked(Arc<T>::new_(std::move(data)));
         }
     }
     static rusty::Result<rusty::pin::Pin<Arc<T>>, rusty::alloc::AllocError> try_pin(T data) {
         // @unsafe
         {
-            return rusty::Result<rusty::pin::Pin<Arc<T>>, rusty::alloc::AllocError>::Ok(rusty::pin::new_unchecked(RUSTY_TRY_INTO((std::conditional_t<true, Arc<std::remove_cvref_t<decltype((data))>, rusty::alloc::Global>, T>::try_new(std::move(data))), rusty::Result<rusty::pin::Pin<Arc<T>>, rusty::alloc::AllocError>)));
+            return rusty::Result<rusty::pin::Pin<Arc<T>>, rusty::alloc::AllocError>::Ok(rusty::pin::new_unchecked(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_new(std::move(data))), rusty::Result<rusty::pin::Pin<Arc<T>>, rusty::alloc::AllocError>)));
         }
     }
     static rusty::Result<Arc<T>, rusty::alloc::AllocError> try_new(T data) {
-        const auto x = RUSTY_TRY_INTO(rusty::Box<ArcInner<T>>::try_new(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}), rusty::Result<Arc<T>, rusty::alloc::AllocError>);
+        auto x = RUSTY_TRY_INTO(rusty::Box<ArcInner<T>>::try_new(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}), rusty::Result<Arc<T>, rusty::alloc::AllocError>);
         // @unsafe
         {
             return rusty::Result<Arc<T>, rusty::alloc::AllocError>::Ok(Arc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>((std::move(x)).leak())));
@@ -4110,107 +3577,117 @@ struct Arc {
     static rusty::Result<Arc<rusty::MaybeUninit<T>>, rusty::alloc::AllocError> try_new_uninit() {
         // @unsafe
         {
-            return rusty::Result<Arc<rusty::MaybeUninit<T>>, rusty::alloc::AllocError>::Ok(Arc<rusty::MaybeUninit<T>>::from_ptr(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate(std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); })), rusty::Result<Arc<rusty::MaybeUninit<T>>, rusty::alloc::AllocError>)));
+            return rusty::Result<Arc<rusty::MaybeUninit<T>>, rusty::alloc::AllocError>::Ok(Arc<rusty::MaybeUninit<T>>::from_ptr(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate(std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); })), rusty::Result<Arc<rusty::MaybeUninit<T>>, rusty::alloc::AllocError>)));
         }
     }
     static rusty::Result<Arc<rusty::MaybeUninit<T>>, rusty::alloc::AllocError> try_new_zeroed() {
         // @unsafe
         {
-            return rusty::Result<Arc<rusty::MaybeUninit<T>>, rusty::alloc::AllocError>::Ok(Arc<rusty::MaybeUninit<T>>::from_ptr(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate_zeroed(std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); })), rusty::Result<Arc<rusty::MaybeUninit<T>>, rusty::alloc::AllocError>)));
+            return rusty::Result<Arc<rusty::MaybeUninit<T>>, rusty::alloc::AllocError>::Ok(Arc<rusty::MaybeUninit<T>>::from_ptr(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate_zeroed(std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); })), rusty::Result<Arc<rusty::MaybeUninit<T>>, rusty::alloc::AllocError>)));
         }
     }
     template<typename U>
-    static Arc<U> map(Arc<T, A> this_, const auto& f) {
-        if (((size_of<T>() == size_of<U>()) && (align_of<T>() == align_of<U>())) && Arc<U>::is_unique(this_)) {
+    static Arc<U> map(Arc<T, A> this_, auto&& f) {
+        if (((rusty::mem::size_of<T>() == rusty::mem::size_of<U>()) && (rusty::mem::align_of<T>() == rusty::mem::align_of<U>())) && std::remove_cvref_t<decltype(this_)>::is_unique(this_)) {
             // @unsafe
             {
-                const auto ptr_shadow1 = Arc<U>::into_raw(std::move(this_));
+                const auto ptr_shadow1 = std::remove_cvref_t<decltype(this_)>::into_raw(std::move(this_));
                 const auto value = rusty::ptr::read(ptr_shadow1);
-                auto allocation = Arc<U>::from_raw(reinterpret_cast<std::add_pointer_t<std::add_const_t<rusty::MaybeUninit<U>>>>(ptr_shadow1));
-                Arc<U>::get_mut_unchecked(allocation).write(f(value));
+                auto allocation = Arc<T>::from_raw(reinterpret_cast<std::add_pointer_t<std::add_const_t<rusty::MaybeUninit<U>>>>(ptr_shadow1));
+                ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(std::remove_cvref_t<decltype(allocation)>::get_mut_unchecked(allocation), f(value));
                 return allocation.assume_init();
             }
         } else {
             return Arc<U>::new_(f(this_));
         }
     }
+    template<typename U> static std::type_identity<std::tuple<U>> __rusty_deduce_map_1(std::type_identity<U>);
+    template<typename __RustyF1, typename __RustyD1 = decltype(__rusty_deduce_map_1(std::type_identity<std::invoke_result_t<__RustyF1&, const T&>>{}))>
+    static decltype(auto) map(Arc<T, A> this_, __RustyF1&& f) {
+        return map<std::tuple_element_t<0, typename __RustyD1::type>>(std::forward<decltype(this_)>(this_), std::forward<__RustyF1>(f));
+    }
     template<typename R>
-    static auto try_map(Arc<T, A> this_, const auto& f) {
-        if (((size_of<T>() == size_of<typename R::Output>()) && (align_of<T>() == align_of<typename R::Output>())) && Arc<T, rusty::alloc::Global>::is_unique(this_)) {
+    static auto try_map(Arc<T, A> this_, auto&& f) {
+        if (((rusty::mem::size_of<T>() == rusty::mem::size_of<typename R::Output>()) && (rusty::mem::align_of<T>() == rusty::mem::align_of<typename R::Output>())) && std::remove_cvref_t<decltype(this_)>::is_unique(this_)) {
             // @unsafe
             {
-                const auto ptr_shadow1 = Arc<T, rusty::alloc::Global>::into_raw(std::move(this_));
+                const auto ptr_shadow1 = std::remove_cvref_t<decltype(this_)>::into_raw(std::move(this_));
                 const auto value = rusty::ptr::read(ptr_shadow1);
-                auto allocation = Arc<T, rusty::alloc::Global>::from_raw(reinterpret_cast<std::add_pointer_t<std::add_const_t<rusty::MaybeUninit<typename R::Output>>>>(ptr_shadow1));
-                Arc<T, rusty::alloc::Global>::get_mut_unchecked(allocation).write(RUSTY_TRY(f(value)));
-                return rusty::intrinsics::unreachable();
+                auto allocation = Arc<T>::from_raw(reinterpret_cast<std::add_pointer_t<std::add_const_t<rusty::MaybeUninit<typename R::Output>>>>(ptr_shadow1));
+                ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(std::remove_cvref_t<decltype(allocation)>::get_mut_unchecked(allocation), RUSTY_TRY(f(value)));
+                return /* TODO transpiler: unlowered try-block expression */ rusty::intrinsics::unreachable_panic();
             }
         } else {
-            return rusty::intrinsics::unreachable();
+            return /* TODO transpiler: unlowered try-block expression */ rusty::intrinsics::unreachable_panic();
         }
+    }
+    template<typename R> static std::type_identity<std::tuple<R>> __rusty_deduce_try_map_1(std::type_identity<R>);
+    template<typename __RustyF1, typename __RustyD1 = decltype(__rusty_deduce_try_map_1(std::type_identity<std::invoke_result_t<__RustyF1&, const T&>>{}))>
+    static decltype(auto) try_map(Arc<T, A> this_, __RustyF1&& f) {
+        return try_map<std::tuple_element_t<0, typename __RustyD1::type>>(std::forward<decltype(this_)>(this_), std::forward<__RustyF1>(f));
     }
     static Arc<T, A> new_in(T data, A alloc) {
         auto x = rusty::Box<ArcInner<T>>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}, std::move(alloc));
-        auto [ptr_shadow1, alloc_shadow1] = rusty::detail::deref_if_pointer_like(rusty::Box<std::remove_cvref_t<decltype((x))>>::into_unique(std::move(x)));
+        auto [ptr_shadow1, alloc_shadow1] = rusty::detail::deref_if_pointer_like(std::remove_cvref_t<decltype(rusty::detail::deref_if_pointer(x))>::into_unique(std::move(x)));
         // @unsafe
         {
-            return Arc<T, A>::from_inner_in(std::move(ptr_shadow1), std::move(alloc_shadow1));
+            return Arc<T, A>::from_inner_in(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>(std::move(ptr_shadow1)), std::move(alloc_shadow1));
         }
     }
     static Arc<rusty::MaybeUninit<T>, A> new_uninit_in(A alloc) {
         // @unsafe
         {
-            return Arc<rusty::MaybeUninit<T>, A>::from_ptr_in(Arc<rusty::MaybeUninit<T>, A>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout)); } }(alloc)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); }), std::move(alloc));
+            return Arc<rusty::MaybeUninit<T>, A>::from_ptr_in(Arc<T, A>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::deref_call(alloc, rusty::detail::__mdisp_allocate{}, std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); }), std::move(alloc));
         }
     }
     static Arc<rusty::MaybeUninit<T>, A> new_zeroed_in(A alloc) {
         // @unsafe
         {
-            return Arc<rusty::MaybeUninit<T>, A>::from_ptr_in(Arc<rusty::MaybeUninit<T>, A>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate_zeroed(std::move(layout)); } }(alloc)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); }), std::move(alloc));
+            return Arc<rusty::MaybeUninit<T>, A>::from_ptr_in(Arc<T, A>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::deref_call(alloc, rusty::detail::__mdisp_allocate_zeroed{}, std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); }), std::move(alloc));
         }
     }
     template<typename F>
     static Arc<T, A> new_cyclic_in(F data_fn, A alloc) {
         auto [uninit_raw_ptr, alloc_shadow1] = rusty::detail::deref_if_pointer_like(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<ArcInner<T>>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(0), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = rusty::MaybeUninit<T>::uninit()}, std::move(alloc))))>>::into_raw_with_allocator(rusty::Box<ArcInner<T>>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(0), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = rusty::MaybeUninit<T>::uninit()}, std::move(alloc))));
         const auto uninit_ptr = ((uninit_raw_ptr)).into();
-        rusty::ptr::NonNull<ArcInner<T>> init_ptr = uninit_ptr.cast();
-        auto weak = rusty::port::sync::Weak<T, A>(std::move(init_ptr), std::move(alloc_shadow1));
+        rusty::ptr::NonNull<ArcInner<T>> init_ptr = rusty::ptr::cast(uninit_ptr);
+        auto weak = Weak<T, A>(std::move(init_ptr), std::move(alloc_shadow1));
         auto data = data_fn(weak);
         auto strong = [&]() { const auto inner = const_cast<std::add_pointer_t<ArcInner<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(rusty::as_ptr(init_ptr)));
-rusty::ptr::write(&(*inner).data, std::move(data));
+rusty::ptr::write_(&(*inner).data, std::move(data));
 const auto prev_value = (*inner).strong.fetch_add(1, rusty::sync::atomic::Ordering::Release);
-assert((prev_value == 0));
-auto alloc_shadow2 = std::get<1>(weak.into_raw_with_allocator());
+if (!(rusty::detail::deref_if_pointer_like((prev_value)) == (0))) { throw std::logic_error("No prior strong references should exist"); }
+A alloc_shadow2 = std::get<1>(weak.into_raw_with_allocator());
 return Arc<T, A>::from_inner_in(std::move(init_ptr), std::move(alloc_shadow2)); }();
         return std::move(strong);
     }
     static rusty::pin::Pin<Arc<T, A>> pin_in(T data, A alloc) {
         // @unsafe
         {
-            return rusty::pin::new_unchecked(Arc<std::remove_cvref_t<decltype((data))>, std::remove_cvref_t<decltype((alloc))>>::new_in(std::move(data), std::move(alloc)));
+            return rusty::pin::new_unchecked(Arc<T, A>::new_in(std::move(data), std::move(alloc)));
         }
     }
     static rusty::Result<rusty::pin::Pin<Arc<T, A>>, rusty::alloc::AllocError> try_pin_in(T data, A alloc) {
         // @unsafe
         {
-            return rusty::Result<rusty::pin::Pin<Arc<T, A>>, rusty::alloc::AllocError>::Ok(rusty::pin::new_unchecked(RUSTY_TRY_INTO((Arc<std::remove_cvref_t<decltype((data))>, std::remove_cvref_t<decltype((alloc))>>::try_new_in(std::move(data), std::move(alloc))), rusty::Result<rusty::pin::Pin<Arc<T, A>>, rusty::alloc::AllocError>)));
+            return rusty::Result<rusty::pin::Pin<Arc<T, A>>, rusty::alloc::AllocError>::Ok(rusty::pin::new_unchecked(RUSTY_TRY_INTO((Arc<T, A>::try_new_in(std::move(data), std::move(alloc))), rusty::Result<rusty::pin::Pin<Arc<T, A>>, rusty::alloc::AllocError>)));
         }
     }
     static rusty::Result<Arc<T, A>, rusty::alloc::AllocError> try_new_in(T data, A alloc) {
-        auto x = RUSTY_TRY_INTO(rusty::Box<ArcInner<T>>::try_new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}, std::move(alloc)), rusty::Result<Arc<T, A>, rusty::alloc::AllocError>);
-        auto [ptr_shadow1, alloc_shadow1] = rusty::detail::deref_if_pointer_like(rusty::Box<std::remove_cvref_t<decltype((x))>>::into_unique(std::move(x)));
-        return rusty::Result<Arc<T, A>, rusty::alloc::AllocError>::Ok(Arc<T, A>::from_inner_in(std::move(ptr_shadow1), std::move(alloc_shadow1)));
+        auto&& x = RUSTY_TRY_INTO(rusty::Box<ArcInner<T>>::try_new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}, std::move(alloc)), rusty::Result<Arc<T, A>, rusty::alloc::AllocError>);
+        auto [ptr_shadow1, alloc_shadow1] = rusty::detail::deref_if_pointer_like(std::remove_cvref_t<decltype(rusty::detail::deref_if_pointer(x))>::into_unique(std::move(x)));
+        return rusty::Result<Arc<T, A>, rusty::alloc::AllocError>::Ok(Arc<T, A>::from_inner_in(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>(std::move(ptr_shadow1)), std::move(alloc_shadow1)));
     }
     static rusty::Result<Arc<rusty::MaybeUninit<T>, A>, rusty::alloc::AllocError> try_new_uninit_in(A alloc) {
         // @unsafe
         {
-            return rusty::Result<Arc<rusty::MaybeUninit<T>, A>, rusty::alloc::AllocError>::Ok(Arc<rusty::MaybeUninit<T>, A>::from_ptr_in(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout)); } }(alloc)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); })), rusty::Result<Arc<rusty::MaybeUninit<T>, A>, rusty::alloc::AllocError>), std::move(alloc)));
+            return rusty::Result<Arc<rusty::MaybeUninit<T>, A>, rusty::alloc::AllocError>::Ok(Arc<rusty::MaybeUninit<T>, A>::from_ptr_in(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::deref_call(alloc, rusty::detail::__mdisp_allocate{}, std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); })), rusty::Result<Arc<rusty::MaybeUninit<T>, A>, rusty::alloc::AllocError>), std::move(alloc)));
         }
     }
     static rusty::Result<Arc<rusty::MaybeUninit<T>, A>, rusty::alloc::AllocError> try_new_zeroed_in(A alloc) {
         // @unsafe
         {
-            return rusty::Result<Arc<rusty::MaybeUninit<T>, A>, rusty::alloc::AllocError>::Ok(Arc<rusty::MaybeUninit<T>, A>::from_ptr_in(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate_zeroed(std::move(layout)); } }(alloc)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); })), rusty::Result<Arc<rusty::MaybeUninit<T>, A>, rusty::alloc::AllocError>), std::move(alloc)));
+            return rusty::Result<Arc<rusty::MaybeUninit<T>, A>, rusty::alloc::AllocError>::Ok(Arc<rusty::MaybeUninit<T>, A>::from_ptr_in(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::deref_call(alloc, rusty::detail::__mdisp_allocate_zeroed{}, std::move(layout)); }, [](auto&& __x) { return std::forward<decltype(__x)>(__x); })), rusty::Result<Arc<rusty::MaybeUninit<T>, A>, rusty::alloc::AllocError>), std::move(alloc)));
         }
     }
     static rusty::Result<T, Arc<T, A>> try_unwrap(Arc<T, A> this_) {
@@ -4219,41 +3696,41 @@ return Arc<T, A>::from_inner_in(std::move(init_ptr), std::move(alloc_shadow2)); 
         }
         // TODO: acquire!(...)
         auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
-        T elem = rusty::ptr::read(rusty::addr_of_temp(this_shadow1.ptr.as_ref().data));
-        A alloc = rusty::ptr::read(&this_shadow1.alloc);
-        const auto _weak = rusty::port::sync::Weak<T, A>(std::move(this_shadow1.ptr), std::move(alloc));
+        T elem = rusty::ptr::read(rusty::addr_of_temp(rusty::detail::deref_if_pointer((*this_shadow1)).ptr.as_ref().data));
+        A alloc = rusty::ptr::read(&rusty::detail::deref_if_pointer((*this_shadow1)).alloc);
+        const auto _weak = Weak<T, A>(std::move(rusty::detail::deref_if_pointer((*this_shadow1)).ptr), std::move(alloc));
         return rusty::Result<T, Arc<T, A>>::Ok(std::move(elem));
     }
     static rusty::Option<T> into_inner(Arc<T, A> this_) {
-        auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        auto this_shadow1 = rusty::mem::ManuallyDrop<Arc<T, A>>::new_(std::move(this_));
         if (this_shadow1.inner().strong.fetch_sub(1, rusty::sync::atomic::Ordering::Release) != 1) {
             return rusty::Option<T>{rusty::None};
         }
         // TODO: acquire!(...)
-        auto inner = rusty::ptr::read(this_shadow1.get_mut_unchecked());
-        auto alloc = rusty::ptr::read(&this_shadow1.alloc);
-        rusty::mem::drop(rusty::port::sync::Weak<T, A>(std::move(this_shadow1.ptr), std::move(alloc)));
+        auto inner = rusty::ptr::read(&Arc<T, A>::get_mut_unchecked(this_shadow1));
+        auto alloc = rusty::ptr::read(&rusty::detail::deref_if_pointer((*this_shadow1)).alloc);
+        rusty::mem::drop(Weak<T, A>(std::move(rusty::detail::deref_if_pointer((*this_shadow1)).ptr), std::move(alloc)));
         return rusty::Option<T>(std::move(inner));
     }
     static Arc<std::span<const rusty::MaybeUninit<T>>> new_uninit_slice(size_t len) {
         // @unsafe
         {
-            return Arc<std::span<const rusty::MaybeUninit<T>>>::from_ptr(Arc<std::span<const rusty::MaybeUninit<T>>>::allocate_for_slice(std::move(len)));
+            return Arc<std::span<const rusty::MaybeUninit<T>>>::from_ptr(Arc<std::span<const T>>::allocate_for_slice(std::move(len)));
         }
     }
     static Arc<std::span<const rusty::MaybeUninit<T>>> new_zeroed_slice(size_t len) {
         // @unsafe
         {
-            return Arc<std::span<const rusty::MaybeUninit<T>>>::from_ptr(Arc<std::span<const rusty::MaybeUninit<T>>>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate_zeroed(std::move(layout)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> {
-return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const rusty::MaybeUninit<T>>>>>(rusty::addr_of_temp(rusty::from_raw_parts_mut(reinterpret_cast<std::add_pointer_t<T>>(static_cast<std::uintptr_t>(mem_shadow1)), std::move(len))));
+            return Arc<std::span<const rusty::MaybeUninit<T>>>::from_ptr(Arc<T>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate_zeroed(std::move(layout)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> {
+return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const rusty::MaybeUninit<T>>>>>(rusty::addr_of_temp(rusty::from_raw_parts_mut(rusty::detail::ptr_cast<std::add_pointer_t<T>>(mem_shadow1), std::move(len))));
 }));
         }
     }
     template<size_t N>
     rusty::Option<Arc<std::array<T, rusty::sanitize_array_capacity<N>()>>> into_array() {
-        if (rusty::len((*this)) == rusty::detail::deref_if_pointer_like(N)) {
-            const auto ptr_shadow1 = reinterpret_cast<std::add_pointer_t<std::add_const_t<std::array<T, rusty::sanitize_array_capacity<N>()>>>>(Arc<T, A>::into_raw((*this)));
-            auto me = Arc<T, rusty::alloc::Global>::from_raw(std::move(ptr_shadow1));
+        if (rusty::len((*(*this))) == rusty::detail::deref_if_pointer_like(N)) {
+            auto ptr_shadow1 = reinterpret_cast<std::add_pointer_t<std::add_const_t<std::array<T, rusty::sanitize_array_capacity<N>()>>>>(Arc<T, A>::into_raw((*this)));
+            auto me = Arc<T>::from_raw(std::move(ptr_shadow1));
             return rusty::Option<Arc<std::array<T, rusty::sanitize_array_capacity<N>()>>>(std::move(me));
         } else {
             return rusty::Option<Arc<std::array<T, rusty::sanitize_array_capacity<N>()>>>{rusty::None};
@@ -4262,14 +3739,14 @@ return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const rusty::Maybe
     static Arc<std::span<const rusty::MaybeUninit<T>>, A> new_uninit_slice_in(size_t len, A alloc) {
         // @unsafe
         {
-            return Arc<std::span<const rusty::MaybeUninit<T>>, A>::from_ptr_in(Arc<std::span<const rusty::MaybeUninit<T>>, std::remove_cvref_t<decltype((&alloc))>>::allocate_for_slice_in(std::move(len), alloc), std::move(alloc));
+            return Arc<std::span<const rusty::MaybeUninit<T>>, A>::from_ptr_in(Arc<std::span<const T>, A>::allocate_for_slice_in(std::move(len), alloc), std::move(alloc));
         }
     }
     static Arc<std::span<const rusty::MaybeUninit<T>>, A> new_zeroed_slice_in(size_t len, A alloc) {
         // @unsafe
         {
-            return Arc<std::span<const rusty::MaybeUninit<T>>, A>::from_ptr_in(Arc<std::span<const rusty::MaybeUninit<T>>, A>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate_zeroed(std::move(layout)); } }(alloc)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> {
-return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const rusty::MaybeUninit<T>>>>>(rusty::addr_of_temp(rusty::from_raw_parts_mut(mem_shadow1.template cast<T>(), std::move(len))));
+            return Arc<std::span<const rusty::MaybeUninit<T>>, A>::from_ptr_in(Arc<T, A>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::deref_call(alloc, rusty::detail::__mdisp_allocate_zeroed{}, std::move(layout)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> {
+return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const rusty::MaybeUninit<T>>>>>(rusty::addr_of_temp(rusty::from_raw_parts_mut(reinterpret_cast<std::add_pointer_t<T>>(mem_shadow1), std::move(len))));
 }), std::move(alloc));
         }
     }
@@ -4278,53 +3755,43 @@ return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const rusty::Maybe
         return Arc<T>::clone_from_ref_in(value, rusty::alloc::Global{});
     }
     static rusty::Result<Arc<T>, rusty::alloc::AllocError> try_clone_from_ref(const T& value) {
-        return std::conditional_t<true, Arc<std::remove_cvref_t<decltype((value))>, std::remove_cvref_t<decltype((rusty::alloc::Global{}))>>, T>::try_clone_from_ref_in(value, rusty::alloc::Global{});
+        return Arc<T, A>::try_clone_from_ref_in(value, rusty::alloc::Global{});
     }
-    static Arc<T, A> clone_from_ref_in(const T& value, A alloc) {
-        UniqueArcUninit<T, A> in_progress = UniqueArcUninit<T, A>::new_(value, std::move(alloc));
-        auto initialized_clone = [&]() { ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).clone_to_uninit(in_progress.data_ptr()->cast()); }) { return std::forward<decltype(__recv)>(__recv).clone_to_uninit(in_progress.data_ptr()->cast()); } else { return std::forward<decltype(__recv)>(__recv)->clone_to_uninit(in_progress.data_ptr()->cast()); } }(value));
-return in_progress.into_arc(); }();
-        return std::move(initialized_clone);
-    }
-    static rusty::Result<Arc<T, A>, rusty::alloc::AllocError> try_clone_from_ref_in(const T& value, A alloc) {
-        UniqueArcUninit<T, A> in_progress = RUSTY_TRY_INTO((UniqueArcUninit<std::remove_cvref_t<decltype((value))>, std::remove_cvref_t<decltype((alloc))>>::try_new(value, std::move(alloc))), rusty::Result<Arc<T, A>, rusty::alloc::AllocError>);
-        auto initialized_clone = [&]() { ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).clone_to_uninit(in_progress.data_ptr()->cast()); }) { return std::forward<decltype(__recv)>(__recv).clone_to_uninit(in_progress.data_ptr()->cast()); } else { return std::forward<decltype(__recv)>(__recv)->clone_to_uninit(in_progress.data_ptr()->cast()); } }(value));
-return in_progress.into_arc(); }();
-        return rusty::Result<Arc<T, A>, rusty::alloc::AllocError>::Ok(std::move(initialized_clone));
-    }
+    static Arc<T, A> clone_from_ref_in(const T& value, A alloc);
+    static rusty::Result<Arc<T, A>, rusty::alloc::AllocError> try_clone_from_ref_in(const T& value, A alloc);
     static Arc<T, A> from_raw(std::add_pointer_t<std::add_const_t<T>> ptr) {
         // @unsafe
         {
-            return Arc<T, std::remove_cvref_t<decltype((rusty::alloc::Global{}))>>::from_raw_in(ptr, rusty::alloc::Global{});
+            return Arc<T>::from_raw_in(ptr, rusty::alloc::Global{});
         }
     }
     static std::add_pointer_t<std::add_const_t<T>> into_raw(Arc<T, A> this_) {
-        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
-        return this_shadow1.as_ptr();
+        auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        return Arc<T, A>::as_ptr(*this_shadow1);
     }
     static void increment_strong_count(std::add_pointer_t<std::add_const_t<T>> ptr) {
         // @unsafe
         {
-            Arc<T, std::remove_cvref_t<decltype((rusty::alloc::Global{}))>>::increment_strong_count_in(ptr, rusty::alloc::Global{});
+            Arc<T, A>::increment_strong_count_in(ptr, rusty::alloc::Global{});
         }
     }
     static void decrement_strong_count(std::add_pointer_t<std::add_const_t<T>> ptr) {
         // @unsafe
         {
-            Arc<T, std::remove_cvref_t<decltype((rusty::alloc::Global{}))>>::decrement_strong_count_in(ptr, rusty::alloc::Global{});
+            Arc<T, A>::decrement_strong_count_in(ptr, rusty::alloc::Global{});
         }
     }
     static const A& allocator(const Arc<T, A>& this_) {
         return this_.alloc;
     }
     static std::tuple<std::add_pointer_t<std::add_const_t<T>>, A> into_raw_with_allocator(Arc<T, A> this_) {
-        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
-        auto ptr_shadow1 = this_shadow1.as_ptr();
-        auto alloc = rusty::ptr::read(&this_shadow1.alloc);
-        return std::make_tuple(std::move(ptr_shadow1), std::move(alloc));
+        auto this_shadow1 = rusty::mem::ManuallyDrop<Arc<T, A>>::new_(std::move(this_));
+        auto ptr_shadow1 = Arc<T, A>::as_ptr(this_shadow1);
+        auto alloc = rusty::ptr::read(&rusty::detail::deref_if_pointer((*this_shadow1)).alloc);
+        return std::make_tuple(ptr_shadow1, std::move(alloc));
     }
     static std::add_pointer_t<std::add_const_t<T>> as_ptr(const Arc<T, A>& this_) {
-        const std::add_pointer_t<ArcInner<T>> ptr_shadow1 = NonNull<std::remove_cvref_t<decltype((this_.ptr))>>::as_ptr(this_.ptr);
+        const std::add_pointer_t<ArcInner<T>> ptr_shadow1 = std::remove_cvref_t<decltype((this_.ptr))>::as_ptr(this_.ptr);
         // @unsafe
         {
             return &(*ptr_shadow1).data;
@@ -4333,26 +3800,39 @@ return in_progress.into_arc(); }();
     static Arc<T, A> from_raw_in(std::add_pointer_t<std::add_const_t<T>> ptr, A alloc) {
         // @unsafe
         {
-            const auto offset = data_offset<std::remove_pointer_t<std::remove_cvref_t<decltype((ptr))>>>(ptr);
-            const auto arc_ptr = reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintptr_t>(ptr->byte_sub(std::move(offset))));
+            const auto offset = ::rusty::port::sync::data_offset<std::remove_pointer_t<std::remove_cvref_t<decltype((ptr))>>>(ptr);
+            auto arc_ptr = rusty::detail::ptr_cast<std::add_pointer_t<ArcInner<T>>>(ptr->byte_sub(std::move(offset)));
             return Arc<T, A>::from_ptr_in(std::move(arc_ptr), std::move(alloc));
         }
     }
-    static rusty::port::sync::Weak<T, A> downgrade(const Arc<T, A>& this_) {
+    static Weak<T, A> downgrade(const Arc<T, A>& this_) {
         auto cur = this_.inner().weak.load(rusty::sync::atomic::Ordering::Relaxed);
         while (true) {
-            if (cur == std::numeric_limits<size_t>::max()) {
+            if (rusty::detail::deref_if_pointer_like(cur) == rusty::detail::deref_if_pointer_like(std::numeric_limits<size_t>::max())) {
+                rusty::hint::spin_loop();
                 cur = this_.inner().weak.load(rusty::sync::atomic::Ordering::Relaxed);
                 continue;
             }
-            auto __res = this_.inner().weak.compare_exchange_weak(
-                std::move(cur), cur + 1,
-                rusty::sync::atomic::Ordering::Acquire,
-                rusty::sync::atomic::Ordering::Relaxed);
-            if (__res.is_ok()) {
-                return rusty::port::sync::Weak<T, A>(this_.ptr, A{});
+            if (!(rusty::detail::deref_if_pointer_like(cur) <= rusty::detail::deref_if_pointer_like(MAX_REFCOUNT))) { throw std::logic_error(std::format("{}", INTERNAL_OVERFLOW_ERROR)); }
+            {
+                auto&& _m = this_.inner().weak.compare_exchange_weak(std::move(cur), rusty::detail::deref_if_pointer_like(cur) + 1, rusty::sync::atomic::Ordering::Acquire, rusty::sync::atomic::Ordering::Relaxed);
+                bool _m_matched = false;
+                if (!_m_matched) {
+                    if (rusty::detail::deref_if_pointer(_m).is_ok()) {
+                        if (!(rusty::detail::rust_not(false /* patcher: is_dangling stubbed */))) { rusty::panic::do_panic("assertion failed: ! is_dangling (this . ptr . as_ptr ())"); }
+                        return Weak<T, A>(this_.ptr, A{});
+                        _m_matched = true;
+                    }
+                }
+                if (!_m_matched) {
+                    if (rusty::detail::deref_if_pointer(_m).is_err()) {
+                        auto&& _mv1 = rusty::detail::deref_if_pointer(_m).unwrap_err();
+                        auto&& old = rusty::detail::deref_if_pointer(_mv1);
+                        cur = std::move(old);
+                        _m_matched = true;
+                    }
+                }
             }
-            cur = __res.unwrap_err();
         }
     }
     static size_t weak_count(const Arc<T, A>& this_) {
@@ -4367,13 +3847,13 @@ return in_progress.into_arc(); }();
         return this_.inner().strong.load(rusty::sync::atomic::Ordering::Relaxed);
     }
     static void increment_strong_count_in(std::add_pointer_t<std::add_const_t<T>> ptr, A alloc) {
-        const auto arc = rusty::mem::manually_drop_new(Arc<T, std::remove_cvref_t<decltype((alloc))>>::from_raw_in(ptr, std::move(alloc)));
+        const auto arc = rusty::mem::ManuallyDrop<Arc<T, A>>::new_(Arc<T, A>::from_raw_in(ptr, std::move(alloc)));
         const auto _arc_clone = rusty::clone(arc);
     }
     static void decrement_strong_count_in(std::add_pointer_t<std::add_const_t<T>> ptr, A alloc) {
         // @unsafe
         {
-            rusty::mem::drop(Arc<T, std::remove_cvref_t<decltype((alloc))>>::from_raw_in(ptr, std::move(alloc)));
+            rusty::mem::drop(Arc<T, A>::from_raw_in(ptr, std::move(alloc)));
         }
     }
     const ArcInner<T>& inner() const {
@@ -4383,7 +3863,7 @@ return in_progress.into_arc(); }();
         }
     }
     void drop_slow() {
-        const auto _weak = rusty::port::sync::Weak<T, A>(this->ptr, A{});
+        const auto _weak = Weak<T, A>(this->ptr, A{});
         // @unsafe
         {
             rusty::ptr::drop_in_place(&(*rusty::as_ptr(this->ptr)).data);
@@ -4392,23 +3872,23 @@ return in_progress.into_arc(); }();
     static bool ptr_eq(const Arc<T, A>& this_, const Arc<T, A>& other) {
         return (reinterpret_cast<std::uintptr_t>(rusty::as_ptr(this_.ptr)) == reinterpret_cast<std::uintptr_t>(rusty::as_ptr(other.ptr)));
     }
-    static std::add_pointer_t<ArcInner<T>> allocate_for_layout(rusty::alloc::Layout value_layout, const auto& allocate, const auto& mem_to_arcinner) {
-        auto layout = arcinner_layout_for_value_layout(std::move(value_layout));
-        auto ptr_shadow1 = allocate(std::move(layout)).unwrap_or_else([&](auto _closure_wild0) { return handle_alloc_error(std::move(layout)); });
+    static std::add_pointer_t<ArcInner<T>> allocate_for_layout(rusty::alloc::Layout value_layout, auto&& allocate, auto&& mem_to_arcinner) {
+        auto layout = ::rusty::port::sync::arcinner_layout_for_value_layout(std::move(value_layout));
+        auto ptr_shadow1 = allocate(std::move(layout)).unwrap_or_else([&](auto _closure_wild0) { handle_alloc_error(std::move(layout)); });
         // @unsafe
         {
             return Arc<T, A>::initialize_arcinner(std::move(ptr_shadow1), std::move(layout), mem_to_arcinner);
         }
     }
-    static rusty::Result<std::add_pointer_t<ArcInner<T>>, rusty::alloc::AllocError> try_allocate_for_layout(rusty::alloc::Layout value_layout, const auto& allocate, const auto& mem_to_arcinner) {
-        auto layout = arcinner_layout_for_value_layout(std::move(value_layout));
-        auto ptr_shadow1 = RUSTY_TRY_INTO(allocate(std::move(layout)), rusty::Result<std::add_pointer_t<ArcInner<T>>, rusty::alloc::AllocError>);
+    static rusty::Result<std::add_pointer_t<ArcInner<T>>, rusty::alloc::AllocError> try_allocate_for_layout(rusty::alloc::Layout value_layout, auto&& allocate, auto&& mem_to_arcinner) {
+        auto layout = ::rusty::port::sync::arcinner_layout_for_value_layout(std::move(value_layout));
+        auto&& ptr_shadow1 = RUSTY_TRY_INTO(allocate(std::move(layout)), rusty::Result<std::add_pointer_t<ArcInner<T>>, rusty::alloc::AllocError>);
         auto inner = Arc<T, A>::initialize_arcinner(std::move(ptr_shadow1), std::move(layout), mem_to_arcinner);
-        return rusty::Result<std::add_pointer_t<ArcInner<T>>, rusty::alloc::AllocError>::Ok(std::move(inner));
+        return rusty::Result<std::add_pointer_t<ArcInner<T>>, rusty::alloc::AllocError>::Ok(inner);
     }
-    static std::add_pointer_t<ArcInner<T>> initialize_arcinner(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout layout, const auto& mem_to_arcinner) {
+    static std::add_pointer_t<ArcInner<T>> initialize_arcinner(rusty::ptr::NonNullSlice<uint8_t> ptr, rusty::alloc::Layout layout, auto&& mem_to_arcinner) {
         auto inner = mem_to_arcinner(rusty::as_ptr(ptr.as_ptr()  /* patcher: as_non_null_ptr → as_ptr */));
-        assert((Layout::for_value(*(inner)) == layout));
+        if (!((Layout::for_value<std::remove_cvref_t<decltype(*(std::move(inner)))>>()) == rusty::detail::deref_if_pointer_like((layout)))) { rusty::panic::do_panic("assertion failed: (Layout::for_value(*(inner))) == (layout)"); }
         // @unsafe
         {
             rusty::ptr::write((&(rusty::detail::deref_if_pointer_like(inner)).strong), std::move(rusty::sync::atomic::AtomicUsize::new_(1)));
@@ -4419,33 +3899,33 @@ return in_progress.into_arc(); }();
     static std::add_pointer_t<ArcInner<T>> allocate_for_ptr_in(std::add_pointer_t<std::add_const_t<T>> ptr, const A& alloc) {
         // @unsafe
         {
-            return Arc<T, rusty::alloc::Global>::allocate_for_layout(Layout::for_value<std::remove_cvref_t<decltype(*(ptr))>>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout)); } }(alloc)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return mem_shadow1.with_metadata_of(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(ptr)); });
+            return Arc<T, rusty::alloc::Global>::allocate_for_layout(Layout::for_value<std::remove_cvref_t<decltype(*(ptr))>>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::deref_call(alloc, rusty::detail::__mdisp_allocate{}, std::move(layout)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return mem_shadow1.with_metadata_of(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(ptr)); });
         }
     }
     static Arc<T, A> from_box_in(rusty::Box<T, A> src) {
         // @unsafe
         {
             auto value_size = size_of_val(rusty::detail::deref_if_pointer_like(src));
-            const auto ptr_shadow1 = rusty::detail::deref_if_pointer_like(src).allocate_for_ptr_in(rusty::Box<std::remove_cvref_t<decltype((&src))>>::allocator(src));
-            rusty::ptr::copy_nonoverlapping(reinterpret_cast<const uint8_t*>((&rusty::detail::deref_if_pointer_like(src))), const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>((&(rusty::detail::deref_if_pointer_like(ptr_shadow1)).data))), std::move(value_size));
-            auto [bptr, alloc] = rusty::detail::deref_if_pointer_like(rusty::Box<std::remove_cvref_t<decltype((src))>>::into_raw_with_allocator(std::move(src)));
-            auto src_shadow1 = rusty::Box<std::remove_cvref_t<decltype((reinterpret_cast<std::add_pointer_t<mem::ManuallyDrop<T>>>(static_cast<std::uintptr_t>(bptr))))>>::from_raw_in(reinterpret_cast<std::add_pointer_t<mem::ManuallyDrop<T>>>(static_cast<std::uintptr_t>(bptr)), alloc.by_ref());
+            auto ptr_shadow1 = Arc<T, A>::allocate_for_ptr_in([&]() -> std::add_pointer_t<std::add_const_t<T>> { auto _rusty_ref_ptr_value = (rusty::detail::deref_if_pointer_like(src)); thread_local std::optional<std::remove_cvref_t<decltype(_rusty_ref_ptr_value)>> _rusty_ref_ptr_tmp; _rusty_ref_ptr_tmp.reset(); _rusty_ref_ptr_tmp.emplace(std::move(_rusty_ref_ptr_value)); return &*_rusty_ref_ptr_tmp; }(), rusty::Box<T>::allocator(src));
+            rusty::ptr::copy_nonoverlapping(reinterpret_cast<const uint8_t*>((&rusty::detail::deref_if_pointer_like(src))), const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>((&(*ptr_shadow1).data))), std::move(value_size));
+            auto [bptr, alloc] = rusty::detail::deref_if_pointer_like(rusty::Box<T>::into_raw_with_allocator(std::move(src)));
+            auto src_shadow1 = rusty::Box<std::remove_cvref_t<decltype((rusty::detail::ptr_cast<std::add_pointer_t<rusty::mem::ManuallyDrop<T>>>(bptr)))>>::from_raw_in(rusty::detail::ptr_cast<std::add_pointer_t<rusty::mem::ManuallyDrop<T>>>(bptr), alloc.by_ref());
             rusty::mem::drop(std::move(src_shadow1));
-            return Arc<T, A>::from_ptr_in(std::move(ptr_shadow1), std::move(alloc));
+            return Arc<T, A>::from_ptr_in(ptr_shadow1, std::move(alloc));
         }
     }
     static std::add_pointer_t<ArcInner<std::span<const T>>> allocate_for_slice(size_t len) {
         // @unsafe
         {
-            return Arc<T, A>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate(std::move(layout)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const T>>>>(rusty::addr_of_temp(rusty::from_raw_parts_mut(mem_shadow1.template cast<T>(), std::move(len)))); });
+            return Arc<T, A>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global{}.allocate(std::move(layout)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const T>>>>(rusty::addr_of_temp(rusty::from_raw_parts_mut(reinterpret_cast<std::add_pointer_t<T>>(mem_shadow1), std::move(len)))); });
         }
     }
     static Arc<std::span<const T>> copy_from_slice(std::span<const T> v) {
         // @unsafe
         {
-            const auto ptr_shadow1 = Arc<T, A>::allocate_for_slice(rusty::len(v));
-            rusty::ptr::copy_nonoverlapping(rusty::as_ptr(v), const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>((&(rusty::detail::deref_if_pointer_like(ptr_shadow1)).data))), rusty::len(v));
-            return Arc<T, A>::from_ptr(std::move(ptr_shadow1));
+            auto ptr_shadow1 = Arc<T, A>::allocate_for_slice(rusty::len(v));
+            rusty::ptr::copy_nonoverlapping(rusty::as_ptr(v), const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>((&(*ptr_shadow1).data))), rusty::len(v));
+            return Arc<T, A>::from_ptr(ptr_shadow1);
         }
     }
     struct Guard {
@@ -4455,12 +3935,12 @@ return in_progress.into_arc(); }();
         size_t n_elems;
         mutable bool _rusty_forgotten = false;
         Guard(rusty::ptr::NonNull<uint8_t> mem_init, std::add_pointer_t<T> elems_init, rusty::alloc::Layout layout_init, size_t n_elems_init) : mem(std::move(mem_init)), elems(std::move(elems_init)), layout(std::move(layout_init)), n_elems(std::move(n_elems_init)) {}
-        Guard(const Guard&) = default;
+        Guard(const Guard&) = delete;
         Guard(Guard&& other) noexcept : mem(std::move(other.mem)), elems(std::move(other.elems)), layout(std::move(other.layout)), n_elems(std::move(other.n_elems)) {
             this->_rusty_forgotten = other._rusty_forgotten;
             other._rusty_forgotten = true;
         }
-        Guard& operator=(const Guard&) = default;
+        Guard& operator=(const Guard&) = delete;
         Guard& operator=(Guard&& other) noexcept {
             if (this == &other) {
                 return *this;
@@ -4469,7 +3949,7 @@ return in_progress.into_arc(); }();
             new (this) Guard(std::move(other));
             return *this;
         }
-        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; rusty::detail::mark_forgotten_if_supported(this->mem); rusty::detail::mark_forgotten_if_supported(this->elems); rusty::detail::mark_forgotten_if_supported(this->layout); rusty::detail::mark_forgotten_if_supported(this->n_elems); }
 
 
         ~Guard() noexcept(false) {
@@ -4485,31 +3965,37 @@ return in_progress.into_arc(); }();
     static Arc<std::span<const T>> from_iter_exact(const auto& iter, size_t len) {
         // @unsafe
         {
-            const auto ptr_shadow1 = Arc<T, A>::allocate_for_slice(std::move(len));
-            const auto mem_shadow1 = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(ptr_shadow1));
-            auto layout = Layout::for_value<std::remove_cvref_t<decltype(*(std::move(ptr_shadow1)))>>();
-            auto elems = const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>((&(rusty::detail::deref_if_pointer_like(ptr_shadow1)).data)));
+            auto ptr_shadow1 = Arc<T, A>::allocate_for_slice(std::move(len));
+            auto mem_shadow1 = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(const_cast<std::remove_const_t<std::remove_pointer_t<std::remove_cvref_t<decltype((ptr_shadow1))>>>*>(ptr_shadow1)));
+            auto layout = Layout::for_value<std::remove_cvref_t<decltype(*(ptr_shadow1))>>();
+            auto elems = const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>((&(*ptr_shadow1).data)));
             auto guard = Guard(rusty::ptr::NonNull<uint8_t>::new_unchecked(std::move(mem_shadow1)), std::move(elems), std::move(layout), static_cast<size_t>(0));
             for (auto&& _for_item : rusty::for_in(rusty::enumerate(iter))) {
                 auto&& i = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_for_item)));
                 auto&& item = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_for_item)));
-                rusty::ptr::write(elems.add(std::move(i)), std::move(item));
+                rusty::ptr::write_(elems.add(std::move(i)), std::move(item));
                 guard.n_elems += 1;
             }
             rusty::mem::forget(std::move(guard));
-            return Arc<T, A>::from_ptr(std::move(ptr_shadow1));
+            return Arc<T, A>::from_ptr(ptr_shadow1);
         }
     }
     static std::add_pointer_t<ArcInner<std::span<const T>>> allocate_for_slice_in(size_t len, const A& alloc) {
         // @unsafe
         {
-            return Arc<T, rusty::alloc::Global>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout)); } }(alloc)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const T>>>>(rusty::addr_of_temp(rusty::from_raw_parts_mut(mem_shadow1.template cast<T>(), std::move(len)))); });
+            return Arc<T, rusty::alloc::Global>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::deref_call(alloc, rusty::detail::__mdisp_allocate{}, std::move(layout)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const T>>>>(rusty::addr_of_temp(rusty::from_raw_parts_mut(reinterpret_cast<std::add_pointer_t<T>>(mem_shadow1), std::move(len)))); });
         }
     }
-    static Arc<T, A> from_slice(std::span<const T> v) {
+    static inline Arc<T, A> from_slice(std::span<const T> v) {
         // @unsafe
         {
-            return Arc<T, A>::from_iter_exact(rusty::iter(v).cloned(), rusty::len(v));
+            return Arc<T, A>::from_iter_exact(rusty::cloned(rusty::iter(v)), rusty::len(v));
+        }
+    }
+    static Arc<T, A> rusty_ArcFromSlice_from_slice(std::span<const T> v) {
+        // @unsafe
+        {
+            return Arc<std::span<const T>, rusty::alloc::Global>::copy_from_slice(std::span<const T>(rusty::as_slice(v)));
         }
     }
     Arc<T, A> clone() const {
@@ -4525,55 +4011,15 @@ return in_progress.into_arc(); }();
     const T& operator*() const {
         return this->inner().data;
     }
-    // Hand-written-Arc-compatibility extensions (manual patcher addition).
-    // The hand-written legacy `rusty::Arc<T>` exposed `arc->member` and
-    // `arc.get()` returning `T*` (mutable). Mako rrr and ported
-    // transaction protocols call these freely. The existing patcher at
-    // line 4041 above only provides `const T* operator->() const`; add
-    // the mutable counterparts plus get() here.
-    // @unsafe: this breaks Rust's aliasing invariants if multiple Arc
-    // holders coexist with mutators — same caveat as the hand-written
-    // Arc had.
-    T& operator*() {
-        return const_cast<T&>(this->inner().data);
-    }
-    T* operator->() {
-        return const_cast<T*>(&this->inner().data);
-    }
-    T* get() {
-        return const_cast<T*>(&this->inner().data);
-    }
-    const T* get() const {
-        return &this->inner().data;
-    }
-    static T& make_mut(Arc<T, A>& this_) {
-        auto __size_of_val_v = size_of_val(rusty::detail::deref_if_pointer_like(this_));
-        if (this_.inner().strong.compare_exchange(1, 0, rusty::sync::atomic::Ordering::Acquire, rusty::sync::atomic::Ordering::Relaxed).is_err()) {
-            this_ = Arc<std::remove_cvref_t<decltype((rusty::detail::deref_if_pointer_like(this_)))>, std::remove_cvref_t<decltype((A{}))>>::clone_from_ref_in(rusty::detail::deref_if_pointer_like(this_), A{});
-        } else if (this_.inner().weak.load(rusty::sync::atomic::Ordering::Relaxed) != 1) {
-            const auto _weak = rusty::port::sync::Weak<T, A>(this_.ptr, A{});
-            UniqueArcUninit<T, A> in_progress = UniqueArcUninit<T, A>::new_(rusty::detail::deref_if_pointer_like(this_), A{});
-            // @unsafe
-            {
-                rusty::ptr::copy_nonoverlapping((&rusty::detail::deref_if_pointer_like(this_)).template cast<uint8_t>(), reinterpret_cast<uint8_t*>(in_progress.data_ptr()), std::move(__size_of_val_v));
-                rusty::ptr::write(&this_, std::move(in_progress.into_arc()));
-            }
-        } else {
-            this_.inner().strong.store(1, rusty::sync::atomic::Ordering::Release);
-        }
-        // @unsafe
-        {
-            return Arc<T, A>::get_mut_unchecked(this_);
-        }
-    }
+    static T& make_mut(Arc<T, A>& this_);
     static T unwrap_or_clone(Arc<T, A> this_) {
-        return Arc<T, rusty::alloc::Global>::try_unwrap(std::move(this_)).unwrap_or_else([&](auto&& arc) { return rusty::clone(((rusty::deref_mut(arc)))); });
+        return std::remove_cvref_t<decltype(this_)>::try_unwrap(std::move(this_)).unwrap_or_else([&](auto&& arc) { return rusty::clone(((rusty::deref_mut(arc)))); });
     }
     static rusty::Option<T&> get_mut(Arc<T, A>& this_) {
         if (Arc<T, A>::is_unique(this_)) {
             // @unsafe
             {
-                return rusty::Option<T&>(Arc<T, rusty::alloc::Global>::get_mut_unchecked(this_));
+                return rusty::Option<T&>(std::remove_cvref_t<decltype(this_)>::get_mut_unchecked(this_));
             }
         } else {
             return rusty::Option<T&>{rusty::None};
@@ -4600,7 +4046,7 @@ return in_progress.into_arc(); }();
             return;
         }
         // TODO: acquire!(...)
-        if (!(!(reinterpret_cast<std::uintptr_t>(rusty::as_ptr(this->ptr)) == reinterpret_cast<std::uintptr_t>(&STATIC_INNER_SLICE.inner)))) { throw std::logic_error("Arcs backed by a static should never reach a strong count of 0. Likely decrement_strong_count or from_raw were called too many times."); }
+        if (!(rusty::detail::rust_not((reinterpret_cast<std::uintptr_t>(rusty::as_ptr(this->ptr)) == reinterpret_cast<std::uintptr_t>(&STATIC_INNER_SLICE.inner))))) { throw std::logic_error("Arcs backed by a static should never reach a strong count of 0. Likely decrement_strong_count or from_raw were called too many times."); }
         // @unsafe
         {
             this->drop_slow();
@@ -4610,8 +4056,8 @@ return in_progress.into_arc(); }();
         if (false /* patcher: Arc::is<T>() stubbed */) {
             // @unsafe
             {
-                auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(Arc<T, rusty::alloc::Global>::into_inner_with_allocator(std::move((*this))));
-                return rusty::Result<Arc<T, A>, Arc<T, A>>::Ok(Arc<T, A>::from_inner_in(ptr_shadow1.cast(), std::move(alloc)));
+                auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(std::remove_cvref_t<decltype((*this))>::into_inner_with_allocator(std::move((*this))));
+                return rusty::Result<Arc<T, A>, Arc<T, A>>::Ok(Arc<T, A>::from_inner_in(rusty::ptr::cast(ptr_shadow1), std::move(alloc)));
             }
         } else {
             return rusty::Result<Arc<T, A>, Arc<T, A>>::Err(std::move((*this)));
@@ -4620,15 +4066,18 @@ return in_progress.into_arc(); }();
     Arc<T, A> downcast_unchecked() {
         // @unsafe
         {
-            auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(Arc<T, A>::into_inner_with_allocator(std::move((*this))));
-            return Arc<T, A>::from_inner_in(ptr_shadow1.cast(), std::move(alloc));
+            auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(std::remove_cvref_t<decltype((*this))>::into_inner_with_allocator(std::move((*this))));
+            return Arc<T, A>::from_inner_in(rusty::ptr::cast(ptr_shadow1), std::move(alloc));
         }
     }
-    bool eq(const Arc<T, A>& other) const {
+    bool operator==(const Arc<T, A>& other) const {
         return rusty::detail::deref_if_pointer_like((*this)) == rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(other));
     }
-    bool ne(const Arc<T, A>& other) const {
-        return rusty::detail::deref_if_pointer_like((*this)) != rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(other));
+    bool rusty_ArcEqIdent_eq(const Arc<T, A>& other) const {
+        return std::remove_cvref_t<decltype((*this))>::ptr_eq((*this), rusty::detail::deref_if_pointer_like(other)) || (rusty::detail::deref_if_pointer_like((*this)) == rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(other)));
+    }
+    bool rusty_ArcEqIdent_ne(const Arc<T, A>& other) const {
+        return !std::remove_cvref_t<decltype((*this))>::ptr_eq((*this), rusty::detail::deref_if_pointer_like(other)) && (rusty::detail::deref_if_pointer_like((*this)) != rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(other)));
     }
     std::partial_ordering operator<=>(const Arc<T, A>& other) const {
         return rusty::to_partial_ordering([&]() -> rusty::Option<rusty::cmp::Ordering> {
@@ -4641,10 +4090,16 @@ return in_progress.into_arc(); }();
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return rusty::write_fmt(f, rusty::to_string(rusty::detail::deref_if_pointer_like((*this))));
     }
+    rusty::fmt::Result rusty_debug_fmt(rusty::fmt::Formatter& f) const {
+        return rusty::write_fmt(f, rusty::to_debug_string(rusty::detail::deref_if_pointer_like((*this))));
+    }
+    rusty::fmt::Result rusty_Pointer_fmt(rusty::fmt::Formatter& f) const {
+        return (rusty::addr_of_temp((&rusty::detail::deref_if_pointer_like((*this)))))->fmt(f);
+    }
     static Arc<T> default_() {
         // @unsafe
         {
-            return Arc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>((rusty::Box<rusty::MaybeUninit<ArcInner<T>>>::write_(rusty::Box<rusty::MaybeUninit<ArcInner<T>>>::new_uninit(), ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = T::default_()})).leak()));
+            return Arc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>((rusty::Box<ArcInner<T>>::write_(rusty::Box<ArcInner<T>>::new_uninit(), ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = rusty::default_like<T>()})).leak()));
         }
     }
     template<typename H>
@@ -4652,10 +4107,10 @@ return in_progress.into_arc(); }();
         rusty::hash::hash(((rusty::detail::deref_if_pointer_like((*this)))), state);
     }
     static Arc<T, A> from(T t) {
-        return Arc<std::remove_cvref_t<decltype((t))>>::new_(std::move(t));
+        return Arc<T>::new_(std::move(t));
     }
     template<size_t N>
-    static Arc<std::span<const T>> from(std::array<T, rusty::sanitize_array_capacity<N>()> v) {
+    static Arc<std::span<const T>> from(std::array<T, N> v) {
         return Arc<std::span<const T>>::from(v);
     }
     static Arc<std::span<const T>> from(std::span<const T> v) {
@@ -4665,33 +4120,43 @@ return in_progress.into_arc(); }();
         return Arc<std::span<const T>>::from(v);
     }
     // patcher: from(std::string_view) overload stubbed (signature collides)
-    // patcher: from(rusty::String) overload stubbed (depends on from(string_view))
+    static Arc<std::string_view> from(rusty::String v) {
+        return Arc<std::string_view>::from(rusty::to_string_view(v.as_str()));
+    }
     static Arc<T, A> from(rusty::Box<T, A> v) {
         return Arc<T, A>::from_box_in(std::move(v));
     }
-    // patcher: from(::Vec<T,A>) overload stubbed (Arc<[T]> ← Vec path unused)
-    template<typename B>
-    static Arc<B> from(rusty::Cow cow) {
-        return [&]() -> Arc<B> { auto&& _m = cow; if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& s = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return Arc<B>::from(s); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& s = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return Arc<B>::from(s); } return [&]() -> Arc<B> { rusty::intrinsics::unreachable(); }(); }();
+    static Arc<std::span<const T>, A> from(::rusty::port::vec::Vec<T, A> v) {
+        // @unsafe
+        {
+            auto [vec_ptr, len, cap, alloc] = rusty::detail::deref_if_pointer_like(v.into_raw_parts_with_alloc());
+            auto rc_ptr = Arc<T, A>::allocate_for_slice_in(std::move(len), alloc);
+            rusty::ptr::copy_nonoverlapping(std::move(vec_ptr), const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>((&(*rc_ptr).data))), std::move(len));
+            static_cast<void>(::rusty::port::vec::Vec<std::remove_pointer_t<std::remove_reference_t<decltype((vec_ptr))>>>::from_raw_parts_in(std::move(vec_ptr), 0, std::move(cap), alloc));
+            return Arc<T, A>::from_ptr_in(rc_ptr, std::move(alloc));
+        }
+    }
+    static Arc<T> from(borrow::Cow<T> cow) {
+        return [&]() -> Arc<T> { auto&& _m = cow; if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0) { auto&& s = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return Arc<T>::from(s); } if (rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1) { auto&& s = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return Arc<T>::from(s); } return [&]() -> Arc<T> { rusty::intrinsics::unreachable_panic(); }(); }();
     }
     static Arc<T, A> from(Arc<std::string_view> rc) {
         // @unsafe
         {
-            return Arc<T, rusty::alloc::Global>::from_raw(reinterpret_cast<const std::span<const uint8_t>*>(Arc<T, rusty::alloc::Global>::into_raw(std::move(rc))));
+            return Arc<T, rusty::alloc::Global>::from_raw(reinterpret_cast<const std::span<const uint8_t>*>(std::remove_cvref_t<decltype(rc)>::into_raw(std::move(rc))));
         }
     }
     template<size_t N>
     static rusty::Result<Arc<T, A>, Error> try_from(Arc<std::span<const T>, A> boxed_slice) {
-        if (rusty::len(boxed_slice) == rusty::detail::deref_if_pointer_like(N)) {
-            auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(Arc<T, rusty::alloc::Global>::into_inner_with_allocator(std::move(boxed_slice)));
-            return rusty::Result<Arc<T, A>, Error>::Ok(Arc<T, std::remove_cvref_t<decltype((alloc))>>::from_inner_in(ptr_shadow1.cast(), std::move(alloc)));
+        if (rusty::len((*boxed_slice)) == rusty::detail::deref_if_pointer_like(N)) {
+            auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(std::remove_cvref_t<decltype(boxed_slice)>::into_inner_with_allocator(std::move(boxed_slice)));
+            return rusty::Result<Arc<T, A>, Error>::Ok(Arc<T, A>::from_inner_in(rusty::ptr::cast(ptr_shadow1), std::move(alloc)));
         } else {
             return rusty::Result<Arc<T, A>, Error>::Err(std::move(boxed_slice));
         }
     }
     template<typename I>
     static Arc<T, A> from_iter(I iter) {
-        return rusty::iter(std::move(iter)).to_arc_slice();
+        return rusty::detail::into_iter_value(std::move(iter)).to_arc_slice();
     }
     const T& borrow() const {
         return rusty::detail::deref_if_pointer_like((*this));
@@ -4706,10 +4171,10 @@ return in_progress.into_arc(); }();
         return (rusty::detail::deref_if_pointer_like((*this))).source();
     }
     void provide(const auto&) const {}  // patcher: Error::provide stubbed
-    auto allocate(rusty::alloc::Layout layout) const -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> {
+    auto allocate(rusty::alloc::Layout layout) const -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> {
         return ((rusty::detail::deref_if_pointer_like((*this)))).allocate(std::move(layout));
     }
-    auto allocate_zeroed(rusty::alloc::Layout layout) const -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> {
+    auto allocate_zeroed(rusty::alloc::Layout layout) const -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> {
         return ((rusty::detail::deref_if_pointer_like((*this)))).allocate_zeroed(std::move(layout));
     }
     void deallocate(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout layout) const {
@@ -4718,19 +4183,19 @@ return in_progress.into_arc(); }();
             ((rusty::detail::deref_if_pointer_like((*this)))).deallocate(std::move(ptr), std::move(layout));
         }
     }
-    auto grow(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout old_layout, rusty::alloc::Layout new_layout) const -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> {
+    auto grow(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout old_layout, rusty::alloc::Layout new_layout) const -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> {
         // @unsafe
         {
             return ((rusty::detail::deref_if_pointer_like((*this)))).grow(std::move(ptr), std::move(old_layout), std::move(new_layout));
         }
     }
-    auto grow_zeroed(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout old_layout, rusty::alloc::Layout new_layout) const -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> {
+    auto grow_zeroed(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout old_layout, rusty::alloc::Layout new_layout) const -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> {
         // @unsafe
         {
             return ((rusty::detail::deref_if_pointer_like((*this)))).grow_zeroed(std::move(ptr), std::move(old_layout), std::move(new_layout));
         }
     }
-    auto shrink(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout old_layout, rusty::alloc::Layout new_layout) const -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> {
+    auto shrink(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout old_layout, rusty::alloc::Layout new_layout) const -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> {
         // @unsafe
         {
             return ((rusty::detail::deref_if_pointer_like((*this)))).shrink(std::move(ptr), std::move(old_layout), std::move(new_layout));
@@ -4739,24 +4204,51 @@ return in_progress.into_arc(); }();
 };
 
 namespace {
+template <class T, class A, class U> class ArcEqIdentAdapter;
+template <class T, class A, class U> class ArcEqIdentAdapterRef;
+template <class T, class A, class U> class ArcEqIdentAdapterRefMut;
+}
+namespace {
 template <class T, class A>
 class ArcEqIdent {
 public:
     virtual ~ArcEqIdent() noexcept(false) {}
-    virtual bool eq(const rusty::port::sync::Arc<T, A>& other) const = 0;
-    virtual bool ne(const rusty::port::sync::Arc<T, A>& other) const = 0;
-    ArcEqIdent(const ArcEqIdent&) = delete;
-    ArcEqIdent& operator=(const ArcEqIdent&) = delete;
-    ArcEqIdent(ArcEqIdent&&) = delete;
-    ArcEqIdent& operator=(ArcEqIdent&&) = delete;
+    template <class U> using rusty_dyn_adapter = ArcEqIdentAdapter<T, A, U>;
+    virtual bool eq(const Arc<T, A>& other) const = 0;
+    virtual bool ne(const Arc<T, A>& other) const = 0;
 protected:
     ArcEqIdent() = default;
+    ArcEqIdent(const ArcEqIdent&) = default;
+    ArcEqIdent& operator=(const ArcEqIdent&) = default;
+    ArcEqIdent(ArcEqIdent&&) = default;
+    ArcEqIdent& operator=(ArcEqIdent&&) = default;
 };
 }
 
-template <class T, class A, class U> class ArcEqIdentAdapter;
-template <class T, class A, class U> class ArcEqIdentAdapterRef;
-template <class T, class A, class U> class ArcEqIdentAdapterRefMut;
+namespace {
+template <class T, class A, class U> class ArcEqIdentAdapter final : public ArcEqIdent<T, A> {
+    U value_;
+public:
+    ArcEqIdentAdapter(U v) : value_(std::move(v)) {}
+    ArcEqIdentAdapter(ArcEqIdentAdapter&& other) : value_(std::move(other.value_)) {}
+    bool eq(const Arc<T, A>& other) const override { if constexpr (requires { ArcEqIdent_::eq(value_, other, rusty::tag<T, A>{}); }) { return ArcEqIdent_::eq(value_, other, rusty::tag<T, A>{}); } else if constexpr (requires { value_.rusty_ArcEqIdent_eq(other); }) { return value_.rusty_ArcEqIdent_eq(other); } else { return value_.eq(other); } }
+    bool ne(const Arc<T, A>& other) const override { if constexpr (requires { ArcEqIdent_::ne(value_, other, rusty::tag<T, A>{}); }) { return ArcEqIdent_::ne(value_, other, rusty::tag<T, A>{}); } else if constexpr (requires { value_.rusty_ArcEqIdent_ne(other); }) { return value_.rusty_ArcEqIdent_ne(other); } else { return value_.ne(other); } }
+};
+template <class T, class A, class U> class ArcEqIdentAdapterRef final : public ArcEqIdent<T, A> {
+    const U& value_;
+public:
+    explicit ArcEqIdentAdapterRef(const U& u) : value_(u) {}
+    bool eq(const Arc<T, A>& other) const override { if constexpr (requires { ArcEqIdent_::eq(value_, other, rusty::tag<T, A>{}); }) { return ArcEqIdent_::eq(value_, other, rusty::tag<T, A>{}); } else if constexpr (requires { value_.rusty_ArcEqIdent_eq(other); }) { return value_.rusty_ArcEqIdent_eq(other); } else { return value_.eq(other); } }
+    bool ne(const Arc<T, A>& other) const override { if constexpr (requires { ArcEqIdent_::ne(value_, other, rusty::tag<T, A>{}); }) { return ArcEqIdent_::ne(value_, other, rusty::tag<T, A>{}); } else if constexpr (requires { value_.rusty_ArcEqIdent_ne(other); }) { return value_.rusty_ArcEqIdent_ne(other); } else { return value_.ne(other); } }
+};
+template <class T, class A, class U> class ArcEqIdentAdapterRefMut final : public ArcEqIdent<T, A> {
+    U& value_;
+public:
+    explicit ArcEqIdentAdapterRefMut(U& u) : value_(u) {}
+    bool eq(const Arc<T, A>& other) const override { if constexpr (requires { ArcEqIdent_::eq(value_, other, rusty::tag<T, A>{}); }) { return ArcEqIdent_::eq(value_, other, rusty::tag<T, A>{}); } else if constexpr (requires { value_.rusty_ArcEqIdent_eq(other); }) { return value_.rusty_ArcEqIdent_eq(other); } else { return value_.eq(other); } }
+    bool ne(const Arc<T, A>& other) const override { if constexpr (requires { ArcEqIdent_::ne(value_, other, rusty::tag<T, A>{}); }) { return ArcEqIdent_::ne(value_, other, rusty::tag<T, A>{}); } else if constexpr (requires { value_.rusty_ArcEqIdent_ne(other); }) { return value_.rusty_ArcEqIdent_ne(other); } else { return value_.ne(other); } }
+};
+}
 
 /// `Weak` is a version of [`Arc`] that holds a non-owning reference to the
 /// managed allocation.
@@ -4787,10 +4279,6 @@ struct Weak {
     A alloc;
     mutable bool _rusty_forgotten = false;
     Weak(rusty::ptr::NonNull<ArcInner<T>> ptr_init, A alloc_init) : ptr(std::move(ptr_init)), alloc(std::move(alloc_init)) {}
-    // Hand-written-Weak-compatibility default ctor — delegates to
-    // `Weak::new_()` (which creates a never-upgrading Weak, matching
-    // std::sync::Weak::new()). Mirror of the same shim in rc_port.
-    Weak() : Weak(Weak<T, A>::new_()) {}
     Weak(const Weak& other) : Weak(other.clone()) {}
     Weak(Weak&& other) noexcept : ptr(std::move(other.ptr)), alloc(std::move(other.alloc)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -4805,13 +4293,13 @@ struct Weak {
         new (this) Weak(std::move(other));
         return *this;
     }
-    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; rusty::detail::mark_forgotten_if_supported(this->ptr); rusty::detail::mark_forgotten_if_supported(this->alloc); }
 
 
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return rusty::fmt::Result::Ok({});
+        return rusty::write_fmt(f, std::string("(Weak)"));
     }
-    static Weak<T> new_() {
+    static constexpr Weak<T> new_() {
         return Weak<T>(rusty::ptr::NonNull<ArcInner<T>>::without_provenance(rusty::num::NonZero<size_t>(std::numeric_limits<size_t>::max())), rusty::alloc::Global{});
     }
     static Weak<T, A> new_in(A alloc) {
@@ -4820,7 +4308,7 @@ struct Weak {
     static Weak<T, A> from_raw(std::add_pointer_t<std::add_const_t<T>> ptr) {
         // @unsafe
         {
-            return Weak<T, std::remove_cvref_t<decltype((rusty::alloc::Global{}))>>::from_raw_in(ptr, rusty::alloc::Global{});
+            return Weak<T>::from_raw_in(ptr, rusty::alloc::Global{});
         }
     }
     std::add_pointer_t<std::add_const_t<T>> into_raw() {
@@ -4830,7 +4318,7 @@ struct Weak {
         return this->alloc;
     }
     std::add_pointer_t<std::add_const_t<T>> as_ptr() const {
-        const std::add_pointer_t<ArcInner<T>> ptr_shadow1 = NonNull<std::remove_cvref_t<decltype((this->ptr))>>::as_ptr(this->ptr);
+        const std::add_pointer_t<ArcInner<T>> ptr_shadow1 = std::remove_cvref_t<decltype((this->ptr))>::as_ptr(this->ptr);
         if (false /* patcher: is_dangling stubbed */) {
             return reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(ptr_shadow1);
         } else {
@@ -4841,23 +4329,23 @@ struct Weak {
         }
     }
     std::tuple<std::add_pointer_t<std::add_const_t<T>>, A> into_raw_with_allocator() {
-        const auto this_ = rusty::mem::manually_drop_new(std::move((*this)));
+        const auto this_ = rusty::mem::ManuallyDrop<Weak<T, A>>::new_(std::move((*this)));
         auto result = (*this_).as_ptr();
-        auto alloc = rusty::ptr::read(&this_.alloc);
+        auto alloc = rusty::ptr::read(&rusty::detail::deref_if_pointer((*this_)).alloc);
         return std::make_tuple(result, std::move(alloc));
     }
     static Weak<T, A> from_raw_in(std::add_pointer_t<std::add_const_t<T>> ptr, A alloc) {
-        const auto ptr_shadow1 = [&]() {
+        auto ptr_shadow1 = [&]() {
 if (false /* patcher: is_dangling stubbed */) {
 return const_cast<std::add_pointer_t<ArcInner<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(ptr));
 } else {
-const auto offset = data_offset<std::remove_pointer_t<std::remove_cvref_t<decltype((ptr))>>>(ptr);
-return reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintptr_t>(ptr->byte_sub(std::move(offset))));
+const auto offset = ::rusty::port::sync::data_offset<std::remove_pointer_t<std::remove_cvref_t<decltype((ptr))>>>(ptr);
+return rusty::detail::ptr_cast<std::add_pointer_t<ArcInner<T>>>(ptr->byte_sub(std::move(offset)));
 }
 }();
         return Weak<T, A>(rusty::ptr::NonNull<ArcInner<T>>::new_unchecked(std::move(ptr_shadow1)), std::move(alloc));
     }
-    rusty::Option<rusty::port::sync::Arc<T, A>> upgrade() const {
+    rusty::Option<Arc<T, A>> upgrade() const {
         const rusty::SafeFn<rusty::Option<size_t>(size_t)> checked_increment = +[](size_t n) -> rusty::Option<size_t> {
             if (rusty::detail::deref_if_pointer_like(n) == static_cast<size_t>(0)) {
                 return rusty::Option<size_t>{rusty::None};
@@ -4868,16 +4356,16 @@ return reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintpt
         if (RUSTY_TRY_OPT(this->inner()).strong.try_update(rusty::sync::atomic::Ordering::Acquire, rusty::sync::atomic::Ordering::Relaxed, std::move(checked_increment)).is_ok()) {
             // @unsafe
             {
-                return rusty::Option<rusty::port::sync::Arc<T, A>>(rusty::port::sync::Arc<T, A>::from_inner_in(this->ptr, A{}));
+                return rusty::Option<Arc<T, A>>(Arc<T, A>::from_inner_in(this->ptr, A{}));
             }
         } else {
-            return rusty::Option<rusty::port::sync::Arc<T, A>>{rusty::None};
+            return rusty::Option<Arc<T, A>>{rusty::None};
         }
     }
     size_t strong_count() const {
         if (auto&& _iflet_scrutinee = this->inner(); _iflet_scrutinee.is_some()) {
             decltype(auto) inner = _iflet_scrutinee.unwrap();
-            return inner.strong.load(rusty::sync::atomic::Ordering::Relaxed);
+            return [&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.strong); }) { return (__r.strong); } else if constexpr (requires { (__r.strong_field); }) { return (__r.strong_field); } else if constexpr (requires { ((*__r).strong); }) { return ((*__r).strong); } else { return ((*__r).strong_field); } }(inner).load(rusty::sync::atomic::Ordering::Relaxed);
         } else {
             return static_cast<size_t>(0);
         }
@@ -4885,8 +4373,8 @@ return reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintpt
     size_t weak_count() const {
         if (auto&& _iflet_scrutinee = this->inner(); _iflet_scrutinee.is_some()) {
             decltype(auto) inner = _iflet_scrutinee.unwrap();
-            const auto weak = inner.weak.load(rusty::sync::atomic::Ordering::Acquire);
-            const auto strong = inner.strong.load(rusty::sync::atomic::Ordering::Relaxed);
+            const auto weak = [&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.weak); }) { return (__r.weak); } else if constexpr (requires { (__r.weak_field); }) { return (__r.weak_field); } else if constexpr (requires { ((*__r).weak); }) { return ((*__r).weak); } else { return ((*__r).weak_field); } }(inner).load(rusty::sync::atomic::Ordering::Acquire);
+            const auto strong = [&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.strong); }) { return (__r.strong); } else if constexpr (requires { (__r.strong_field); }) { return (__r.strong_field); } else if constexpr (requires { ((*__r).strong); }) { return ((*__r).strong); } else { return ((*__r).strong_field); } }(inner).load(rusty::sync::atomic::Ordering::Relaxed);
             if (rusty::detail::deref_if_pointer_like(strong) == 0) {
                 return static_cast<size_t>(0);
             } else {
@@ -4910,7 +4398,7 @@ return reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintpt
     Weak<T, A> clone() const {
         if (auto&& _iflet_scrutinee = this->inner(); _iflet_scrutinee.is_some()) {
             decltype(auto) inner = _iflet_scrutinee.unwrap();
-            const auto old_size = inner.weak.fetch_add(1, rusty::sync::atomic::Ordering::Relaxed);
+            const auto old_size = [&](auto&& __r) -> decltype(auto) { if constexpr (requires { (__r.weak); }) { return (__r.weak); } else if constexpr (requires { (__r.weak_field); }) { return (__r.weak_field); } else if constexpr (requires { ((*__r).weak); }) { return ((*__r).weak); } else { return ((*__r).weak_field); } }(inner).fetch_add(1, rusty::sync::atomic::Ordering::Relaxed);
             if (rusty::detail::deref_if_pointer_like(old_size) > rusty::detail::deref_if_pointer_like(MAX_REFCOUNT)) {
                 abort();
             }
@@ -4939,15 +4427,16 @@ return reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintpt
 inline SliceArcInnerForStatic STATIC_INNER_SLICE = SliceArcInnerForStatic{.inner = ArcInner<std::array<uint8_t, 1>>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::array<uint8_t, 1>{static_cast<uint8_t>(0)}}};
 
 namespace {
-class ArcFromSlice {
+template <class T>
+class ToArcSlice {
 public:
-    virtual ~ArcFromSlice() noexcept(false) {}
-    ArcFromSlice(const ArcFromSlice&) = delete;
-    ArcFromSlice& operator=(const ArcFromSlice&) = delete;
-    ArcFromSlice(ArcFromSlice&&) = delete;
-    ArcFromSlice& operator=(ArcFromSlice&&) = delete;
+    virtual ~ToArcSlice() noexcept(false) {}
 protected:
-    ArcFromSlice() = default;
+    ToArcSlice() = default;
+    ToArcSlice(const ToArcSlice&) = default;
+    ToArcSlice& operator=(const ToArcSlice&) = default;
+    ToArcSlice(ToArcSlice&&) = default;
+    ToArcSlice& operator=(ToArcSlice&&) = default;
 };
 }
 
@@ -4964,12 +4453,12 @@ struct UniqueArcUninit {
     rusty::Option<A> alloc;
     mutable bool _rusty_forgotten = false;
     UniqueArcUninit(rusty::ptr::NonNull<ArcInner<T>> ptr_init, rusty::alloc::Layout layout_for_value_init, rusty::Option<A> alloc_init) : ptr(std::move(ptr_init)), layout_for_value(std::move(layout_for_value_init)), alloc(std::move(alloc_init)) {}
-    UniqueArcUninit(const UniqueArcUninit&) = default;
+    UniqueArcUninit(const UniqueArcUninit&) = delete;
     UniqueArcUninit(UniqueArcUninit&& other) noexcept : ptr(std::move(other.ptr)), layout_for_value(std::move(other.layout_for_value)), alloc(std::move(other.alloc)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    UniqueArcUninit& operator=(const UniqueArcUninit&) = default;
+    UniqueArcUninit& operator=(const UniqueArcUninit&) = delete;
     UniqueArcUninit& operator=(UniqueArcUninit&& other) noexcept {
         if (this == &other) {
             return *this;
@@ -4978,40 +4467,40 @@ struct UniqueArcUninit {
         new (this) UniqueArcUninit(std::move(other));
         return *this;
     }
-    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; rusty::detail::mark_forgotten_if_supported(this->ptr); rusty::detail::mark_forgotten_if_supported(this->layout_for_value); rusty::detail::mark_forgotten_if_supported(this->alloc); }
 
 
     static UniqueArcUninit<T, A> new_(const T& for_value, A alloc) {
         auto layout = Layout::for_value(for_value);
-        const auto ptr_shadow1 = Arc<T, rusty::alloc::Global>::allocate_for_layout(std::move(layout), [&](auto&& layout_for_arcinner) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout_for_arcinner)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout_for_arcinner)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout_for_arcinner)); } }(alloc)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return mem_shadow1.with_metadata_of(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(static_cast<std::uintptr_t>((&for_value)))); });
+        auto ptr_shadow1 = Arc<T, rusty::alloc::Global>::allocate_for_layout(std::move(layout), [&](auto&& layout_for_arcinner) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::deref_call(alloc, rusty::detail::__mdisp_allocate{}, std::move(layout_for_arcinner)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return mem_shadow1.with_metadata_of(rusty::detail::ptr_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(rusty::ptr::from_ref(for_value))); });
         return UniqueArcUninit<T, A>(rusty::ptr::NonNull<ArcInner<T>>::new_(ptr_shadow1).unwrap(), std::move(layout), rusty::Option<A>(std::move(alloc)));
     }
     static rusty::Result<UniqueArcUninit<T, A>, rusty::alloc::AllocError> try_new(const T& for_value, A alloc) {
         auto layout = Layout::for_value(for_value);
-        const auto ptr_shadow1 = RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(std::move(layout), [&](auto&& layout_for_arcinner) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout_for_arcinner)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout_for_arcinner)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout_for_arcinner)); } }(alloc)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return mem_shadow1.with_metadata_of(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(static_cast<std::uintptr_t>((&for_value)))); })), rusty::Result<UniqueArcUninit<T, A>, rusty::alloc::AllocError>);
+        auto&& ptr_shadow1 = RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(std::move(layout), [&](auto&& layout_for_arcinner) -> rusty::Result<rusty::ptr::NonNullSlice<uint8_t>, rusty::alloc::AllocError> { return rusty::deref_call(alloc, rusty::detail::__mdisp_allocate{}, std::move(layout_for_arcinner)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return mem_shadow1.with_metadata_of(rusty::detail::ptr_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(rusty::ptr::from_ref(for_value))); })), rusty::Result<UniqueArcUninit<T, A>, rusty::alloc::AllocError>);
         return rusty::Result<UniqueArcUninit<T, A>, rusty::alloc::AllocError>::Ok(UniqueArcUninit<T, A>(rusty::ptr::NonNull<ArcInner<T>>::new_(ptr_shadow1).unwrap(), std::move(layout), rusty::Option<A>(std::move(alloc))));
     }
     std::add_pointer_t<T> data_ptr() {
-        const auto offset = data_offset_alignment(this->layout_for_value.alignment());
+        const auto offset = ::rusty::port::sync::data_offset_alignment(this->layout_for_value.alignment());
         // @unsafe
         {
-            return reinterpret_cast<std::add_pointer_t<T>>(static_cast<std::uintptr_t>(rusty::as_ptr(this->ptr)->byte_add(std::move(offset))));
+            return rusty::detail::ptr_cast<std::add_pointer_t<T>>(rusty::as_ptr(this->ptr)->byte_add(std::move(offset)));
         }
     }
-    rusty::port::sync::Arc<T, A> into_arc() {
+    Arc<T, A> into_arc() {
         auto this_ = rusty::mem::manually_drop_new(std::move((*this)));
-        const auto ptr_shadow1 = const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this_.ptr)));
-        auto alloc = this_.alloc.take().unwrap();
+        auto ptr_shadow1 = const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(rusty::detail::deref_if_pointer((*this_)).ptr)));
+        auto alloc = rusty::detail::deref_if_pointer((*this_)).alloc.take().unwrap();
         // @unsafe
         {
-            return rusty::port::sync::Arc<T, A>::from_ptr_in(ptr_shadow1, std::move(alloc));
+            return Arc<T, A>::from_ptr_in(ptr_shadow1, std::move(alloc));
         }
     }
     ~UniqueArcUninit() noexcept(false) {
         if (_rusty_forgotten) { return; }
         // @unsafe
         {
-            ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).deallocate(this->ptr.cast(), arcinner_layout_for_value_layout(this->layout_for_value)); }) { return std::forward<decltype(__recv)>(__recv).deallocate(this->ptr.cast(), arcinner_layout_for_value_layout(this->layout_for_value)); } else { return std::forward<decltype(__recv)>(__recv)->deallocate(this->ptr.cast(), arcinner_layout_for_value_layout(this->layout_for_value)); } }(this->alloc.take().unwrap()));
+            rusty::deref_call(this->alloc.take().unwrap(), rusty::detail::__mdisp_deallocate{}, rusty::ptr::cast(this->ptr), ::rusty::port::sync::arcinner_layout_for_value_layout(this->layout_for_value));
         }
     }
 };
@@ -5061,12 +4550,12 @@ struct UniqueArc {
     A alloc;
     mutable bool _rusty_forgotten = false;
     UniqueArc(rusty::ptr::NonNull<ArcInner<T>> ptr_init, rusty::PhantomData<ArcInner<T>> _marker_init, rusty::PhantomData<std::add_pointer_t<T>> _marker2_init, A alloc_init) : ptr(std::move(ptr_init)), _marker(std::move(_marker_init)), _marker2(std::move(_marker2_init)), alloc(std::move(alloc_init)) {}
-    UniqueArc(const UniqueArc&) = default;
+    UniqueArc(const UniqueArc&) = delete;
     UniqueArc(UniqueArc&& other) noexcept : ptr(std::move(other.ptr)), _marker(std::move(other._marker)), _marker2(std::move(other._marker2)), alloc(std::move(other.alloc)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    UniqueArc& operator=(const UniqueArc&) = default;
+    UniqueArc& operator=(const UniqueArc&) = delete;
     UniqueArc& operator=(UniqueArc&& other) noexcept {
         if (this == &other) {
             return *this;
@@ -5075,11 +4564,23 @@ struct UniqueArc {
         new (this) UniqueArc(std::move(other));
         return *this;
     }
-    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; rusty::detail::mark_forgotten_if_supported(this->ptr); rusty::detail::mark_forgotten_if_supported(this->_marker); rusty::detail::mark_forgotten_if_supported(this->_marker2); rusty::detail::mark_forgotten_if_supported(this->alloc); }
 
+    std::string rusty_debug_string() const {
+        rusty::fmt::Formatter formatter{};
+        auto result = this->rusty_debug_fmt(formatter);
+        if (result.is_ok()) { return formatter.str(); }
+        return "<fmt-error>";
+    }
 
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return rusty::write_fmt(f, rusty::to_string(rusty::detail::deref_if_pointer_like((*this))));
+    }
+    rusty::fmt::Result rusty_debug_fmt(rusty::fmt::Formatter& f) const {
+        return rusty::write_fmt(f, rusty::to_debug_string(rusty::detail::deref_if_pointer_like((*this))));
+    }
+    rusty::fmt::Result rusty_Pointer_fmt(rusty::fmt::Formatter& f) const {
+        return (rusty::addr_of_temp((&rusty::detail::deref_if_pointer_like((*this)))))->fmt(f);
     }
     const T& borrow() const {
         return rusty::detail::deref_if_pointer_like((*this));
@@ -5094,7 +4595,7 @@ struct UniqueArc {
         return rusty::detail::deref_if_pointer_like((*this));
     }
     bool operator==(const UniqueArc<T, A>& other) const {
-        return (rusty::detail::deref_if_pointer_like((*this))).eq(rusty::detail::deref_if_pointer_like(other));
+        return rusty::cmp::eq(rusty::detail::deref_if_pointer_like((*this)), rusty::detail::deref_if_pointer_like(other));
     }
     std::partial_ordering operator<=>(const UniqueArc<T, A>& other) const {
         return rusty::to_partial_ordering([&]() -> rusty::Option<rusty::cmp::Ordering> {
@@ -5112,61 +4613,71 @@ struct UniqueArc {
         return UniqueArc<T, A>::new_in(std::move(value), rusty::alloc::Global{});
     }
     template<typename U>
-    static UniqueArc<U> map(UniqueArc<T, A> this_, const auto& f) {
-        if (((size_of<T>() == size_of<U>()) && (align_of<T>() == align_of<U>())) && (UniqueArc<U>::weak_count(this_) == static_cast<size_t>(0))) {
+    static UniqueArc<U> map(UniqueArc<T, A> this_, auto&& f) {
+        if (((rusty::mem::size_of<T>() == rusty::mem::size_of<U>()) && (rusty::mem::align_of<T>() == rusty::mem::align_of<U>())) && (std::remove_cvref_t<decltype(this_)>::weak_count(this_) == static_cast<size_t>(0))) {
             // @unsafe
             {
-                const auto ptr_shadow1 = UniqueArc<U>::into_raw(std::move(this_));
+                const auto ptr_shadow1 = std::remove_cvref_t<decltype(this_)>::into_raw(std::move(this_));
                 const auto value = rusty::ptr::read(ptr_shadow1);
-                auto allocation = UniqueArc<U>::from_raw(reinterpret_cast<std::add_pointer_t<std::add_const_t<rusty::MaybeUninit<U>>>>(ptr_shadow1));
-                allocation.write(f(std::move(value)));
+                auto allocation = UniqueArc<T, rusty::alloc::Global>::from_raw(reinterpret_cast<std::add_pointer_t<std::add_const_t<rusty::MaybeUninit<U>>>>(ptr_shadow1));
+                ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(allocation, f(std::move(value)));
                 return allocation.assume_init();
             }
         } else {
-            return UniqueArc<U>::new_(f(UniqueArc<U>::unwrap(std::move(this_))));
+            return UniqueArc<U>::new_(f(std::remove_cvref_t<decltype(this_)>::unwrap(std::move(this_))));
         }
+    }
+    template<typename U> static std::type_identity<std::tuple<U>> __rusty_deduce_map_1(std::type_identity<U>);
+    template<typename __RustyF1, typename __RustyD1 = decltype(__rusty_deduce_map_1(std::type_identity<std::invoke_result_t<__RustyF1&, T>>{}))>
+    static decltype(auto) map(UniqueArc<T, A> this_, __RustyF1&& f) {
+        return map<std::tuple_element_t<0, typename __RustyD1::type>>(std::forward<decltype(this_)>(this_), std::forward<__RustyF1>(f));
     }
     template<typename R>
-    static auto try_map(UniqueArc<T, A> this_, const auto& f) {
-        if (((size_of<T>() == size_of<typename R::Output>()) && (align_of<T>() == align_of<typename R::Output>())) && (UniqueArc<T, rusty::alloc::Global>::weak_count(this_) == static_cast<size_t>(0))) {
+    static auto try_map(UniqueArc<T, A> this_, auto&& f) {
+        if (((rusty::mem::size_of<T>() == rusty::mem::size_of<typename R::Output>()) && (rusty::mem::align_of<T>() == rusty::mem::align_of<typename R::Output>())) && (std::remove_cvref_t<decltype(this_)>::weak_count(this_) == static_cast<size_t>(0))) {
             // @unsafe
             {
-                const auto ptr_shadow1 = UniqueArc<T, rusty::alloc::Global>::into_raw(std::move(this_));
+                const auto ptr_shadow1 = std::remove_cvref_t<decltype(this_)>::into_raw(std::move(this_));
                 const auto value = rusty::ptr::read(ptr_shadow1);
                 auto allocation = UniqueArc<T, rusty::alloc::Global>::from_raw(reinterpret_cast<std::add_pointer_t<std::add_const_t<rusty::MaybeUninit<typename R::Output>>>>(ptr_shadow1));
-                allocation.write(RUSTY_TRY(f(std::move(value))));
-                return rusty::intrinsics::unreachable();
+                ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }) { return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); } else { return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); } })(allocation, RUSTY_TRY(f(std::move(value))));
+                return /* TODO transpiler: unlowered try-block expression */ rusty::intrinsics::unreachable_panic();
             }
         } else {
-            return rusty::intrinsics::unreachable();
+            return /* TODO transpiler: unlowered try-block expression */ rusty::intrinsics::unreachable_panic();
         }
     }
+    template<typename R> static std::type_identity<std::tuple<R>> __rusty_deduce_try_map_1(std::type_identity<R>);
+    template<typename __RustyF1, typename __RustyD1 = decltype(__rusty_deduce_try_map_1(std::type_identity<std::invoke_result_t<__RustyF1&, T>>{}))>
+    static decltype(auto) try_map(UniqueArc<T, A> this_, __RustyF1&& f) {
+        return try_map<std::tuple_element_t<0, typename __RustyD1::type>>(std::forward<decltype(this_)>(this_), std::forward<__RustyF1>(f));
+    }
     static T unwrap(UniqueArc<T, A> this_) {
-        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
-        T val = rusty::ptr::read(rusty::detail::deref_if_pointer_like(this_shadow1));
-        const auto _weak = rusty::port::sync::Weak<T, A>(std::move(this_shadow1.ptr), rusty::alloc::Global{});
+        auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        T val = rusty::ptr::read(rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(this_shadow1)));
+        const auto _weak = Weak<T, A>(std::move(rusty::detail::deref_if_pointer((*this_shadow1)).ptr), rusty::alloc::Global{});
         return std::move(val);
     }
     static UniqueArc<T, A> from_raw(std::add_pointer_t<std::add_const_t<T>> ptr) {
-        const auto offset = data_offset<std::remove_pointer_t<std::remove_cvref_t<decltype((ptr))>>>(ptr);
-        const auto rc_ptr = reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintptr_t>(ptr->byte_sub(std::move(offset))));
-        return UniqueArc<T, A>(rusty::ptr::NonNull<ArcInner<T>>::new_unchecked(std::move(rc_ptr)), rusty::PhantomData<ArcInner<T>>{}, rusty::PhantomData<std::add_pointer_t<T>>{}, rusty::alloc::Global{});
+        const auto offset = ::rusty::port::sync::data_offset<std::remove_pointer_t<std::remove_cvref_t<decltype((ptr))>>>(ptr);
+        auto rc_ptr = rusty::detail::ptr_cast<std::add_pointer_t<ArcInner<T>>>(ptr->byte_sub(std::move(offset)));
+        return UniqueArc<T, A>(rusty::ptr::NonNull<ArcInner<T>>::new_unchecked(rc_ptr), rusty::PhantomData<ArcInner<T>>{}, rusty::PhantomData<std::add_pointer_t<T>>{}, rusty::alloc::Global{});
     }
     static std::add_pointer_t<std::add_const_t<T>> into_raw(UniqueArc<T, A> this_) {
-        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
-        return this_shadow1.as_ptr();
+        auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        return UniqueArc<T, A>::as_ptr(*this_shadow1);
     }
     static UniqueArc<T, A> new_in(T data, A alloc) {
         auto [ptr_shadow1, alloc_shadow1] = rusty::detail::deref_if_pointer_like(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<ArcInner<T>>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(0), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}, std::move(alloc))))>>::into_unique(rusty::Box<ArcInner<T>>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(0), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}, std::move(alloc))));
         return UniqueArc<T, A>(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>(std::move(ptr_shadow1)), rusty::PhantomData<ArcInner<T>>{}, rusty::PhantomData<std::add_pointer_t<T>>{}, std::move(alloc_shadow1));
     }
-    static rusty::port::sync::Arc<T, A> into_arc(UniqueArc<T, A> this_) {
-        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
-        A alloc = rusty::ptr::read(&this_shadow1.alloc);
+    static Arc<T, A> into_arc(UniqueArc<T, A> this_) {
+        auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        A alloc = rusty::ptr::read(&rusty::detail::deref_if_pointer((*this_shadow1)).alloc);
         // @unsafe
         {
-            (*rusty::as_ptr(this_shadow1.ptr)).strong.store(1, rusty::sync::atomic::Ordering::Release);
-            return rusty::port::sync::Arc<T, A>::from_inner_in(std::move(this_shadow1.ptr), std::move(alloc));
+            (*rusty::as_ptr(rusty::detail::deref_if_pointer((*this_shadow1)).ptr)).strong.store(1, rusty::sync::atomic::Ordering::Release);
+            return Arc<T, A>::from_inner_in(std::move(rusty::detail::deref_if_pointer((*this_shadow1)).ptr), std::move(alloc));
         }
     }
     static size_t weak_count(const UniqueArc<T, A>& this_) {
@@ -5179,25 +4690,25 @@ struct UniqueArc {
         }
     }
     static std::add_pointer_t<std::add_const_t<T>> as_ptr(const UniqueArc<T, A>& this_) {
-        const std::add_pointer_t<ArcInner<T>> ptr_shadow1 = NonNull<std::remove_cvref_t<decltype((this_.ptr))>>::as_ptr(this_.ptr);
+        const std::add_pointer_t<ArcInner<T>> ptr_shadow1 = std::remove_cvref_t<decltype((this_.ptr))>::as_ptr(this_.ptr);
         // @unsafe
         {
             return &(*ptr_shadow1).data;
         }
     }
     static std::tuple<rusty::ptr::NonNull<ArcInner<T>>, A> into_inner_with_allocator(UniqueArc<T, A> this_) {
-        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
-        return std::make_tuple(std::move(this_shadow1.ptr), rusty::ptr::read(&this_shadow1.alloc));
+        auto this_shadow1 = rusty::mem::ManuallyDrop<UniqueArc<T, A>>::new_(std::move(this_));
+        return std::make_tuple(std::move(rusty::detail::deref_if_pointer((*this_shadow1)).ptr), rusty::ptr::read(&rusty::detail::deref_if_pointer((*this_shadow1)).alloc));
     }
     static UniqueArc<T, A> from_inner_in(rusty::ptr::NonNull<ArcInner<T>> ptr, A alloc) {
         return UniqueArc<T, A>(std::move(ptr), rusty::PhantomData<ArcInner<T>>{}, rusty::PhantomData<std::add_pointer_t<T>>{}, std::move(alloc));
     }
-    static rusty::port::sync::Weak<T, A> downgrade(const UniqueArc<T, A>& this_) {
+    static Weak<T, A> downgrade(const UniqueArc<T, A>& this_) {
         const auto old_size = (*rusty::as_ptr(this_.ptr)).weak.fetch_add(1, rusty::sync::atomic::Ordering::Relaxed);
         if (rusty::detail::deref_if_pointer_like(old_size) > rusty::detail::deref_if_pointer_like(MAX_REFCOUNT)) {
             abort();
         }
-        return rusty::port::sync::Weak<T, A>(this_.ptr, A{});
+        return Weak<T, A>(this_.ptr, A{});
     }
     /* patcher: assume_init method deleted (Cluster A SFINAE) */
     const T& operator*() const {
@@ -5209,12 +4720,12 @@ struct UniqueArc {
     T& operator*() {
         // @unsafe
         {
-            return (rusty::deref_mut(rusty::as_ptr(this->ptr))).data;
+            return (*rusty::as_ptr(this->ptr)).data;
         }
     }
     ~UniqueArc() noexcept(false) {
         if (_rusty_forgotten) { return; }
-        const auto _weak = rusty::port::sync::Weak<T, A>(this->ptr, A{});
+        const auto _weak = Weak<T, A>(this->ptr, A{});
         // @unsafe
         {
             rusty::ptr::drop_in_place(&(*rusty::as_ptr(this->ptr)).data);
@@ -5224,71 +4735,14 @@ struct UniqueArc {
 
 /// Calculate layout for `ArcInner<T>` using the inner value's layout
 rusty::alloc::Layout arcinner_layout_for_value_layout(rusty::alloc::Layout layout) {
-    return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(Layout::new_<ArcInner<rusty::Unit>>().extend(std::move(layout)).unwrap()).pad_to_align();
+    return rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else if constexpr (requires { std::get<0>(std::forward<decltype(__t)>(__t)); }) return std::get<0>(std::forward<decltype(__t)>(__t)); else if constexpr (requires { (*__t)._0; }) return ((*std::forward<decltype(__t)>(__t))._0); else return std::get<0>(*std::forward<decltype(__t)>(__t)); })(Layout::new_<ArcInner<rusty::Unit>>().extend(std::move(layout)).unwrap())).pad_to_align();
 }
 
-#if 0  // patcher: orphan-impl block stubbed
-#if 0  // patcher: orphan-impl block stubbed
-#if 0  // patcher: orphan-impl block stubbed
-// TODO orphan impl: methods for `Pin` were declared in this file but the
-// host type lives in another module / TU. These methods are emitted as
-// free-standing template functions that reference `this`/`(*this)`,
-// which is not valid C++ outside a member function. Move them into the
-// host type's struct body, or rewrite `this`/`(*this)` to an explicit
-// `self_` parameter and qualify all call sites accordingly.
-// Methods for Pin
-static auto default_() {
-    // @unsafe
-    {
-        return rusty::pin::new_unchecked(Arc<T>::default_());
-    }
-}
+// trait impl for `Pin` lowered via the Default_ free functions above
 
-#endif  // patcher: orphan-impl block end
-#if 0  // patcher: orphan-impl block stubbed
-#endif  // patcher: orphan-impl block end
-#if 0  // patcher: orphan-impl block stubbed
-#endif  // patcher: orphan-impl block end
-#if 0  // patcher: orphan-impl block stubbed
-// TODO orphan impl: methods for `I` were declared in this file but the
-// host type lives in another module / TU. These methods are emitted as
-// free-standing template functions that reference `this`/`(*this)`,
-// which is not valid C++ outside a member function. Move them into the
-// host type's struct body, or rewrite `this`/`(*this)` to an explicit
-// `self_` parameter and qualify all call sites accordingly.
-// Methods for I
-rusty::Arc<std::span<const T>> to_arc_slice() {
-    return rusty::from_into<rusty::Arc<std::span<const T>>>(::rusty::port::vec::Vec<T>::from_iter((*this)));
-}
+// trait impl for `I` lowered via the ToArcSlice_ free functions above
 
-#endif  // patcher: orphan-impl block end
-#if 0  // patcher: orphan-impl block stubbed
-#endif  // patcher: orphan-impl block end
-#if 0  // patcher: orphan-impl block stubbed
-#endif  // patcher: orphan-impl block end
-#if 0  // patcher: orphan-impl block stubbed
-// TODO orphan impl: methods for `I` were declared in this file but the
-// host type lives in another module / TU. These methods are emitted as
-// free-standing template functions that reference `this`/`(*this)`,
-// which is not valid C++ outside a member function. Move them into the
-// host type's struct body, or rewrite `this`/`(*this)` to an explicit
-// `self_` parameter and qualify all call sites accordingly.
-// Methods for I
-rusty::Arc<std::span<const T>> to_arc_slice() {
-    auto [low, high] = rusty::detail::deref_if_pointer_like(this->size_hint());
-    if (high.is_some()) {
-        auto&& _iflet_bound_scrutinee = high;
-        decltype(auto) high = _iflet_bound_scrutinee.unwrap();
-        assert((low == high));
-        // @unsafe
-        {
-            return rusty::Arc<std::span<const T>>::from_iter_exact((*this), std::move(low));
-        }
-    } else {
-        std::println(stderr, "capacity overflow");
-        std::abort();
-    }
-}
+// trait impl for `I` lowered via the ToArcSlice_ free functions above
 
 /// Gets the offset within an `ArcInner` for the payload behind a pointer.
 ///
@@ -5301,29 +4755,168 @@ template<typename T>
 size_t data_offset(std::add_pointer_t<std::add_const_t<T>> ptr) {
     // @unsafe
     {
-        return data_offset_alignment(rusty::ptr::Alignment::of_val_raw(ptr));
+        return ::rusty::port::sync::data_offset_alignment(rusty::ptr::Alignment::of_val_raw(ptr));
     }
 }
 
 size_t data_offset_alignment(rusty::ptr::Alignment alignment) {
     const auto layout = Layout::new_<ArcInner<rusty::Unit>>();
-    return layout.size() + layout.padding_needed_for(std::move(alignment));
+    return layout.size + layout.padding_needed_for(std::move(alignment));
 }
 
-// Extension trait ToArcSlice lowered to rusty_ext:: free functions
-#endif  // patcher: orphan-impl block end
-#endif  // patcher: orphan-impl block end
-#endif  // patcher: orphan-impl block end
-namespace rusty_ext {
-    export template<typename T, typename I>
-    rusty::Arc<std::span<const T>> to_arc_slice(I self_) {
-        using Self = std::remove_reference_t<decltype(self_)>;
-        return rusty::from_into<rusty::Arc<std::span<const T>>>(::rusty::port::vec::Vec<T>::from_iter(self_));
+
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+Arc<T, A> Arc<T, A>::clone_from_ref_in(const T& value, A alloc) {
+    using Error = typename Arc<T, A>::Error;
+    using Target = typename Arc<T, A>::Target;
+    UniqueArcUninit<T, A> in_progress = UniqueArcUninit<T, A>::new_(value, std::move(alloc));
+    auto initialized_clone = [&]() { rusty::deref_call(value, rusty::detail::__mdisp_clone_to_uninit{}, rusty::ptr::cast(in_progress.data_ptr()));
+return in_progress.into_arc(); }();
+    return std::move(initialized_clone);
+}
+
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+rusty::Result<Arc<T, A>, rusty::alloc::AllocError> Arc<T, A>::try_clone_from_ref_in(const T& value, A alloc) {
+    using Error = typename Arc<T, A>::Error;
+    using Target = typename Arc<T, A>::Target;
+    UniqueArcUninit<T, A> in_progress = RUSTY_TRY_INTO((UniqueArcUninit<T, A>::try_new(value, std::move(alloc))), rusty::Result<Arc<T, A>, rusty::alloc::AllocError>);
+    auto initialized_clone = [&]() { rusty::deref_call(value, rusty::detail::__mdisp_clone_to_uninit{}, rusty::ptr::cast(in_progress.data_ptr()));
+return in_progress.into_arc(); }();
+    return rusty::Result<Arc<T, A>, rusty::alloc::AllocError>::Ok(std::move(initialized_clone));
+}
+
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+T& Arc<T, A>::make_mut(Arc<T, A>& this_) {
+    using Error = typename Arc<T, A>::Error;
+    using Target = typename Arc<T, A>::Target;
+    Arc<T, A>* this_shadow1 = &this_;
+    auto __size_of_val_v = size_of_val(rusty::detail::deref_if_pointer_like(*this_shadow1));
+    if (((*this_shadow1)).inner().strong.compare_exchange(1, 0, rusty::sync::atomic::Ordering::Acquire, rusty::sync::atomic::Ordering::Relaxed).is_err()) {
+        *this_shadow1 = Arc<T, A>::clone_from_ref_in(rusty::detail::deref_if_pointer_like(*this_shadow1), rusty::clone((*this_shadow1).alloc));
+    } else if (((*this_shadow1)).inner().weak.load(rusty::sync::atomic::Ordering::Relaxed) != 1) {
+        const auto _weak = Weak<T, A>((*this_shadow1).ptr, rusty::clone((*this_shadow1).alloc));
+        UniqueArcUninit<T, A> in_progress = UniqueArcUninit<T, A>::new_(rusty::detail::deref_if_pointer_like(*this_shadow1), rusty::clone((*this_shadow1).alloc));
+        // @unsafe
+        {
+            rusty::ptr::copy_nonoverlapping(reinterpret_cast<uint8_t*>(rusty::ptr::from_ref(rusty::detail::deref_if_pointer_like(*this_shadow1))), reinterpret_cast<uint8_t*>(in_progress.data_ptr()), std::move(__size_of_val_v));
+            rusty::ptr::write_(*this_shadow1, in_progress.into_arc());
+        }
+    } else {
+        ((*this_shadow1)).inner().strong.store(1, rusty::sync::atomic::Ordering::Release);
+    }
+    // @unsafe
+    {
+        return Arc<T, A>::get_mut_unchecked((*this_shadow1));
+    }
+}
+
+
+// UFCS trait migration: free functions for `impl ArcFromSlice for ...`
+namespace ArcFromSlice_::impl_ {
+    export template<typename T>
+    inline Arc<std::span<const T>> from_slice(ArcFromSlice_::impl_::tag, rusty::self_tag<Arc<std::span<const T>>>, std::span<const T> v, rusty::tag<T>) {
+        using Self = Arc<std::span<const T>>;
+        // @unsafe
+        {
+            return Self::from_iter_exact(rusty::cloned(rusty::iter(v)), rusty::len(v));
+        }
     }
 
 }
+// UFCS trait migration: free functions for `impl ArcFromSlice for ...`
+namespace ArcFromSlice_::impl_ {
+}
+// UFCS trait migration: free functions for `impl Default for ...`
+namespace Default_::impl_ {
+    export template<typename T>
+    inline Weak<T> default_(Default_::impl_::tag, rusty::self_tag<Weak<T>>) {
+        using Self = Weak<T>;
+        return Weak<T>::new_();
+    }
 
+}
+// UFCS trait migration: free functions for `impl ArcEqIdent for ...`
+namespace ArcEqIdent_::impl_ {
+    export template<typename T, typename A>
+    inline bool eq(ArcEqIdent_::impl_::tag, const Arc<T, A>& self_, const Arc<T, A>& other, rusty::tag<T, A>) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        return rusty::detail::deref_if_pointer_like(self_) == rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(other));
+    }
 
+    export template<typename T, typename A>
+    inline bool ne(ArcEqIdent_::impl_::tag, const Arc<T, A>& self_, const Arc<T, A>& other, rusty::tag<T, A>) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        return rusty::detail::deref_if_pointer_like(self_) != rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(other));
+    }
+
+}
+// UFCS trait migration: free functions for `impl ArcEqIdent for ...`
+namespace ArcEqIdent_::impl_ {
+}
+// UFCS trait migration: free functions for `impl Default for ...`
+namespace Default_::impl_ {
+    export template<typename T>
+    requires (has_Default<T>) inline Arc<T> default_(Default_::impl_::tag, rusty::self_tag<Arc<T>>) {
+        using Self = Arc<T>;
+        // @unsafe
+        {
+            return Self::from_inner(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>((rusty::Box<rusty::MaybeUninit<ArcInner<T>>>::write_(rusty::Box<rusty::MaybeUninit<ArcInner<T>>>::new_uninit(), ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = rusty::default_like<T>()})).leak()));
+        }
+    }
+
+}
+// UFCS trait migration: free functions for `impl Default for ...`
+namespace Default_::impl_ {
+    export inline Arc<std::string_view> default_(Default_::impl_::tag, rusty::self_tag<Arc<std::string_view>>) {
+        // patcher: static-slice Default (STATIC_INNER_SLICE raw-pointer casts) not ported
+        rusty::panic::do_panic("Arc<std::string_view>::default() is not ported");
+    }
+
+}
+// UFCS trait migration: free functions for `impl Default for ...`
+namespace Default_::impl_ {
+    export inline Arc<rusty::ffi::CStr> default_(Default_::impl_::tag, rusty::self_tag<Arc<rusty::ffi::CStr>>) {
+        // patcher: static-slice Default (STATIC_INNER_SLICE raw-pointer casts) not ported
+        rusty::panic::do_panic("Arc<rusty::ffi::CStr>::default() is not ported");
+    }
+
+}
+// UFCS trait migration: free functions for `impl Default for ...`
+namespace Default_::impl_ {
+    export template<typename T>
+    inline Arc<std::span<const T>> default_(Default_::impl_::tag, rusty::self_tag<Arc<std::span<const T>>>) {
+        // patcher: static-slice Default (STATIC_INNER_SLICE raw-pointer casts) not ported
+        rusty::panic::do_panic("Arc<std::span<const T>>::default() is not ported");
+    }
+
+}
+// UFCS trait migration: free functions for `impl Default for ...`
+namespace Default_::impl_ {
+    export template<typename T>
+    inline rusty::pin::Pin<Arc<T>> default_(Default_::impl_::tag, rusty::self_tag<rusty::pin::Pin<Arc<T>>>) {
+        using Self = rusty::pin::Pin<Arc<T>>;
+        // @unsafe
+        {
+            return rusty::pin::new_unchecked(Arc<T>::default_());
+        }
+    }
+
+}
+// UFCS trait migration: free functions for `impl ToArcSlice for ...`
+namespace ToArcSlice_::impl_ {
+    export template<typename T, typename I>
+    inline Arc<std::span<const T>> to_arc_slice(ToArcSlice_::impl_::tag, I self_, rusty::tag<T>) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        return rusty::from_into<Arc<std::span<const T>>>(::rusty::port::vec::Vec<T>::from_iter(self_));
+    }
+
+}
+// UFCS trait migration: free functions for `impl ToArcSlice for ...`
+namespace ToArcSlice_::impl_ {
+}
 
 // Cluster A completion: __TemplateArgs partial specializations
 // for inner structs that participated in structural decomposition
@@ -5346,9 +4939,3 @@ namespace rusty {
         : std::bool_constant<is_send<T>::value && is_sync<T>::value> {};
 } // namespace rusty
 
-
-// User-facing alias deferred. `rusty::Arc<T>` and `rusty::sync::Weak<T>`
-// are currently taken by the hand-written `include/rusty/arc.hpp`,
-// which is the canonical surface today. Surface the full
-// `rusty::sync::*` alias once the hand-written Arc retires in favor of
-// arc_port (the trajectory rc_port took). Tracked in task #240.
