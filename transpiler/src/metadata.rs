@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -488,6 +488,164 @@ struct ResolvedPackage {
     manifest_path: PathBuf,
     source: Option<String>,
     targets: Vec<Target>,
+}
+
+/// `--crate-graph-git <URL>`: the git repositories whose packages join
+/// `--crate-graph` as graph crates, exactly like local path packages.
+///
+/// The effective graph holds only packages without a Cargo source by default;
+/// a registry or git package is an external crate the graph neither descends
+/// into nor emits. A package whose source is `git+<URL>[?<reference>]#<commit>`
+/// joins when `<URL>` names one of these repositories, and is read from the
+/// checkout `cargo metadata` reports for it. Naming a repository rather than
+/// packages means every package Cargo selects from it joins, so a consumer
+/// cannot name part of a crate family; a dependency from another repository
+/// (Lion's `vstd`, from Verus's) stays external unless that one is named too.
+///
+/// Repository URLs compare as Cargo identifies a git source (its
+/// `CanonicalUrl`): scheme and host ignore case, one trailing `/` and then a
+/// trailing `.git` are dropped, and a `github.com` URL compares as `https`
+/// with its path lowercased. The reference and the commit play no part;
+/// `Cargo.lock` pins the commit.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CrateGraphGitRepositories {
+    /// Canonical repository URL -> the URL as the caller spelled it.
+    named: BTreeMap<String, String>,
+}
+
+impl CrateGraphGitRepositories {
+    /// Validate and canonicalize the `--crate-graph-git` values.
+    pub fn from_urls(urls: &[String]) -> Result<Self, String> {
+        let mut named = BTreeMap::new();
+        for url in urls {
+            if url.is_empty() {
+                return Err("--crate-graph-git: empty repository URL".to_string());
+            }
+            if url.starts_with("git+") {
+                return Err(format!(
+                    "--crate-graph-git {url}: name the repository as Cargo.toml's `git = \"...\"` spells it, without Cargo's `git+` source prefix"
+                ));
+            }
+            if url.contains(['?', '#']) {
+                return Err(format!(
+                    "--crate-graph-git {url}: name a repository, not a reference or a commit; Cargo.lock pins the commit"
+                ));
+            }
+            if !url.contains("://") {
+                return Err(format!(
+                    "--crate-graph-git {url}: not a `scheme://` URL, the only form Cargo accepts for a git dependency"
+                ));
+            }
+            named
+                .entry(canonical_git_repository_url(url))
+                .or_insert_with(|| url.clone());
+        }
+        Ok(Self { named })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.named.is_empty()
+    }
+
+    /// The canonical URL of the named repository a Cargo source comes from.
+    fn repository_of(&self, source: &str) -> Option<&str> {
+        let canonical = canonical_git_repository_url(git_source_repository(source)?);
+        self.named
+            .get_key_value(&canonical)
+            .map(|(canonical, _)| canonical.as_str())
+    }
+
+    /// Whether a package with this Cargo source is a graph crate: a local
+    /// path package, or a package from a named git repository.
+    fn admits(&self, source: Option<&str>) -> bool {
+        match source {
+            None => true,
+            Some(_) if self.named.is_empty() => false,
+            Some(source) => self.repository_of(source).is_some(),
+        }
+    }
+}
+
+/// The repository URL of a `git+<URL>[?<reference>][#<commit>]` Cargo source
+/// as `cargo metadata` spells it; `None` for any other source.
+fn git_source_repository(source: &str) -> Option<&str> {
+    let url = source.strip_prefix("git+")?;
+    Some(&url[..url.find(['?', '#']).unwrap_or(url.len())])
+}
+
+/// Cargo's identity of a git repository URL (`CanonicalUrl::new`), on the
+/// URL's text: scheme and host lowercased, one trailing `/` dropped, a
+/// `github.com` URL turned to `https` with its path lowercased, and then a
+/// trailing `.git` dropped.
+fn canonical_git_repository_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    // The host ignores case; user information does not.
+    let (user, host) = match authority.rsplit_once('@') {
+        Some((user, host)) => (Some(user), host.to_ascii_lowercase()),
+        None => (None, authority.to_ascii_lowercase()),
+    };
+    let host_name = host.split(':').next().unwrap_or_default();
+    let mut path = path.strip_suffix('/').unwrap_or(path).to_string();
+    let scheme = if host_name == "github.com" {
+        path = path.to_lowercase();
+        "https".to_string()
+    } else {
+        scheme.to_ascii_lowercase()
+    };
+    if let Some(stripped) = path.strip_suffix(".git") {
+        path.truncate(stripped.len());
+    }
+    match user {
+        Some(user) => format!("{scheme}://{user}@{host}{path}"),
+        None => format!("{scheme}://{host}{path}"),
+    }
+}
+
+/// `cargo tree`'s `{p}` spelling of a git source (Cargo's `SourceId`
+/// Display): the URL as written, `?branch=`/`?tag=`/`?rev=` with the value
+/// form-urlencoded, then `#` and the locked commit cut to 8 characters.
+/// `cargo metadata` spells the same source with the raw value and the full
+/// commit. Measured with Cargo 1.91, 1.95, 1.97 and 1.99:
+/// `git+file:///r/?branch=feat/x+y#419d705b73fb…` prints as
+/// `file:///r/?branch=feat%2Fx%2By#419d705b`.
+fn cargo_tree_git_source(source: &str) -> Option<String> {
+    let url = source.strip_prefix("git+")?;
+    let (url, commit) = match url.rsplit_once('#') {
+        Some((url, commit)) => (url, Some(commit)),
+        None => (url, None),
+    };
+    let (url, reference) = match url.split_once('?') {
+        Some((url, reference)) => (url, Some(reference)),
+        None => (url, None),
+    };
+    let mut rendered = url.to_string();
+    if let Some(reference) = reference {
+        let (kind, value) = reference.split_once('=')?;
+        if !matches!(kind, "branch" | "tag" | "rev") {
+            return None;
+        }
+        rendered.push('?');
+        rendered.push_str(kind);
+        rendered.push('=');
+        for byte in value.bytes() {
+            // The `url` crate's form_urlencoded::byte_serialize.
+            match byte {
+                b'*' | b'-' | b'.' | b'_' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => {
+                    rendered.push(char::from(byte))
+                }
+                b' ' => rendered.push('+'),
+                _ => rendered.push_str(&format!("%{byte:02X}")),
+            }
+        }
+    }
+    if let Some(commit) = commit {
+        rendered.push('#');
+        rendered.push_str(commit.get(..8).unwrap_or(commit));
+    }
+    Some(rendered)
 }
 
 #[derive(Deserialize)]
@@ -1752,6 +1910,7 @@ fn resolve_normal_target_package_edges(
     cargo_flags: &[String],
     metadata: &CargoMetadataResolved,
     expected_root_package_id: &str,
+    git_repositories: &CrateGraphGitRepositories,
 ) -> Result<NormalTargetPackageSelection, String> {
     let mut command = std::process::Command::new("cargo");
     command
@@ -1820,29 +1979,52 @@ fn resolve_normal_target_package_edges(
     }
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("cargo tree returned non-UTF-8 output: {error}"))?;
+    select_normal_target_packages(&stdout, metadata, expected_root_package_id, git_repositories)
+}
 
+/// Read the `cargo tree --prefix depth --format '{p}|{f}'` output of the
+/// probe against the probe's own metadata: the edges between graph crates
+/// and each graph crate's target-normal feature set.
+fn select_normal_target_packages(
+    stdout: &str,
+    metadata: &CargoMetadataResolved,
+    expected_root_package_id: &str,
+    git_repositories: &CrateGraphGitRepositories,
+) -> Result<NormalTargetPackageSelection, String> {
     // Cargo's documented `{p}` rendering for local path packages includes
     // the exact package name/version and package directory. Construct every
     // accepted rendering from the same metadata invocation, require it to be
-    // unique, and fail closed if a local-looking line differs. Registry/git
-    // nodes may remain opaque because local traversal stops at them.
+    // unique, and fail closed if a local-looking line differs. A package from
+    // a `--crate-graph-git` repository is a graph crate too, rendered as its
+    // git source. Other registry/git nodes may remain opaque because local
+    // traversal stops at them.
     let mut local_by_render = HashMap::<String, String>::new();
     let mut local_prefixes = Vec::<String>::new();
     for package in metadata
         .packages
         .iter()
-        .filter(|package| package.source.is_none())
+        .filter(|package| git_repositories.admits(package.source.as_deref()))
     {
-        let package_dir = package.manifest_path.parent().ok_or_else(|| {
-            format!(
-                "Cargo metadata reported a local manifest without a parent: {}",
-                package.manifest_path.display()
-            )
-        })?;
+        let location = match package.source.as_deref() {
+            None => package
+                .manifest_path
+                .parent()
+                .ok_or_else(|| {
+                    format!(
+                        "Cargo metadata reported a local manifest without a parent: {}",
+                        package.manifest_path.display()
+                    )
+                })?
+                .display()
+                .to_string(),
+            Some(source) => cargo_tree_git_source(source).ok_or_else(|| {
+                format!("Cargo metadata reported a git source `cargo tree` cannot render: {source}")
+            })?,
+        };
         let prefix = format!("{} v{} ", package.name, package.version);
         let renderings = [
-            format!("{prefix}({})", package_dir.display()),
-            format!("{prefix}(proc-macro) ({})", package_dir.display()),
+            format!("{prefix}({location})"),
+            format!("{prefix}(proc-macro) ({location})"),
         ];
         for rendered in renderings {
             if let Some(previous) = local_by_render.insert(rendered.clone(), package.id.clone())
@@ -2008,16 +2190,26 @@ fn reject_ambiguous_selected_local_aliases(
 /// contexts. The normal, non-proc-macro Cargo tree below selects the exact
 /// target-context edges from that superset. Callers that own a source-level C++
 /// contract must treat any error as a pre-output failure.
+///
+/// The graph's crates are the local path packages, plus every package from a
+/// git repository in `git_repositories` (`--crate-graph-git`); a named
+/// repository that contributes none is an error.
 pub fn resolve_effective_local_normal_dependency_graph(
     manifest_path: &Path,
 ) -> Result<EffectiveLocalNormalDependencyGraph, String> {
-    resolve_effective_local_normal_dependency_graph_with_context(manifest_path, None, &[])
+    resolve_effective_local_normal_dependency_graph_with_context(
+        manifest_path,
+        None,
+        &[],
+        &CrateGraphGitRepositories::default(),
+    )
 }
 
 pub fn resolve_effective_local_normal_dependency_graph_with_context(
     manifest_path: &Path,
     package_filter: Option<&str>,
     cargo_flags: &[String],
+    git_repositories: &CrateGraphGitRepositories,
 ) -> Result<EffectiveLocalNormalDependencyGraph, String> {
     // Normalize before deriving the Cargo working directory. A one-component
     // relative spelling such as `Cargo.toml` has an empty parent, which cannot
@@ -2082,15 +2274,58 @@ pub fn resolve_effective_local_normal_dependency_graph_with_context(
         &probe_non_feature_flags,
         &metadata,
         &probe_package.id,
+        git_repositories,
     )?;
     let selected = select_resolved_package(&metadata, &requested_manifest, package_filter)?;
     let root_manifest = canonicalized_path(&selected.manifest_path);
     let resolve = metadata.resolve.as_ref().ok_or_else(|| {
         "effective-graph cargo metadata did not report a resolved dependency graph".to_string()
     })?;
+    if !resolve.nodes.iter().any(|node| node.id == selected.id) {
+        return Err(format!(
+            "effective-graph cargo metadata omitted the root resolve node for {}",
+            manifest_path.display()
+        ));
+    }
+    let walk = walk_effective_local_graph(
+        &metadata.packages,
+        resolve,
+        &normal_selection,
+        selected,
+        git_repositories,
+    )?;
 
-    let packages_by_id = metadata
-        .packages
+    let root_features = normal_selection
+        .selected_features_by_id
+        .get(&selected.id)
+        .cloned();
+    Ok(EffectiveLocalNormalDependencyGraph {
+        target_triple,
+        root_manifest,
+        direct_dependencies: walk.direct_dependencies,
+        root_features,
+        extern_dependencies: walk.extern_dependencies,
+    })
+}
+
+/// The graph crates reachable from the selected root and their edges.
+struct EffectiveGraphWalk {
+    direct_dependencies: HashMap<PathBuf, Vec<EffectiveLocalNormalDependency>>,
+    extern_dependencies: HashMap<PathBuf, Vec<ResolvedExternDependency>>,
+}
+
+/// Walk Cargo's resolve graph from the selected root along the target-normal
+/// edges the tree selected, descending into every graph crate: a local path
+/// package, or a package from a `--crate-graph-git` repository. Every named
+/// repository must contribute at least one graph crate.
+fn walk_effective_local_graph(
+    packages: &[ResolvedPackage],
+    resolve: &ResolveGraph,
+    normal_selection: &NormalTargetPackageSelection,
+    selected: &ResolvedPackage,
+    git_repositories: &CrateGraphGitRepositories,
+) -> Result<EffectiveGraphWalk, String> {
+    let packages_by_id = packages
         .iter()
         .map(|package| (package.id.as_str(), package))
         .collect::<HashMap<_, _>>();
@@ -2099,15 +2334,13 @@ pub fn resolve_effective_local_normal_dependency_graph_with_context(
         .iter()
         .map(|node| (node.id.as_str(), node))
         .collect::<HashMap<_, _>>();
-    if !nodes_by_id.contains_key(selected.id.as_str()) {
-        return Err(format!(
-            "effective-graph cargo metadata omitted the root resolve node for {}",
-            manifest_path.display()
-        ));
-    }
 
     let mut direct_dependencies = HashMap::new();
     let mut extern_dependencies = HashMap::<PathBuf, Vec<ResolvedExternDependency>>::new();
+    // `--crate-graph-git`: the named repositories a graph crate came from, and
+    // every git repository a graph crate depends on (for the error below).
+    let mut joined_repositories = BTreeSet::<&str>::new();
+    let mut reached_repositories = BTreeSet::<&str>::new();
     let mut pending = vec![selected.id.as_str()];
     let mut visited = HashSet::new();
     while let Some(package_id) = pending.pop() {
@@ -2117,7 +2350,7 @@ pub fn resolve_effective_local_normal_dependency_graph_with_context(
         let package = packages_by_id.get(package_id).ok_or_else(|| {
             format!("effective Cargo resolve graph references unknown package id '{package_id}'")
         })?;
-        if package.source.is_some() && package_id != selected.id {
+        if !git_repositories.admits(package.source.as_deref()) && package_id != selected.id {
             continue;
         }
         let node = nodes_by_id.get(package_id).ok_or_else(|| {
@@ -2141,6 +2374,12 @@ pub fn resolve_effective_local_normal_dependency_graph_with_context(
             if !has_normal_kind {
                 continue;
             }
+            reached_repositories.extend(
+                packages_by_id
+                    .get(dependency.pkg.as_str())
+                    .and_then(|dependency_package| dependency_package.source.as_deref())
+                    .and_then(git_source_repository),
+            );
             if !normal_selection
                 .edges
                 .contains(&(package.id.clone(), dependency.pkg.clone()))
@@ -2163,8 +2402,13 @@ pub fn resolve_effective_local_normal_dependency_graph_with_context(
                     extern_crate_root: dependency.name.replace('-', "_"),
                     package_name: dependency_package.name.clone(),
                 });
-            if dependency_package.source.is_some() {
-                continue;
+            if let Some(source) = dependency_package.source.as_deref() {
+                match git_repositories.repository_of(source) {
+                    Some(repository) => {
+                        joined_repositories.insert(repository);
+                    }
+                    None => continue,
+                }
             }
             if dependency.name.trim().is_empty() {
                 return Err(format!(
@@ -2201,15 +2445,45 @@ pub fn resolve_effective_local_normal_dependency_graph_with_context(
         direct_dependencies.insert(canonicalized_path(&package.manifest_path), edges);
     }
 
-    let root_features = normal_selection
-        .selected_features_by_id
-        .get(&selected.id)
-        .cloned();
-    Ok(EffectiveLocalNormalDependencyGraph {
-        target_triple,
-        root_manifest,
+    for (canonical, named) in &git_repositories.named {
+        if !joined_repositories.contains(canonical.as_str()) {
+            let reached = if reached_repositories.is_empty() {
+                "none".to_string()
+            } else {
+                reached_repositories
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(format!(
+                "--crate-graph-git {named}: no package of Cargo's target-normal graph comes from this repository; the git repositories its graph crates depend on: {reached}"
+            ));
+        }
+    }
+    if !git_repositories.is_empty() {
+        // Each graph crate is emitted into `<output-dir>/<package>/`, so two
+        // must not share a package name. One repository depended on at two
+        // references would give two; checked only when a repository is
+        // named, which leaves the default graph exactly as it was.
+        let mut members = visited
+            .iter()
+            .filter(|package_id| **package_id != selected.id)
+            .filter_map(|package_id| packages_by_id.get(package_id.as_str()))
+            .map(|package| (package.name.as_str(), package.id.as_str()))
+            .collect::<Vec<_>>();
+        members.sort_unstable();
+        for pair in members.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                return Err(format!(
+                    "--crate-graph-git: graph crates '{}' and '{}' share the package name '{}' and so its output directory",
+                    pair[0].1, pair[1].1, pair[0].0
+                ));
+            }
+        }
+    }
+    Ok(EffectiveGraphWalk {
         direct_dependencies,
-        root_features,
         extern_dependencies,
     })
 }
@@ -3302,6 +3576,7 @@ mod tests {
             &root.join("Cargo.toml"),
             None,
             &[],
+            &CrateGraphGitRepositories::default(),
         )
         .unwrap();
         let root_dependencies = graph
@@ -3345,6 +3620,7 @@ mod tests {
                 &root.join("Cargo.toml"),
                 None,
                 &flags,
+                &CrateGraphGitRepositories::default(),
             )
             .unwrap_or_else(|error| panic!("{label} effective graph failed: {error}"));
             assert_eq!(
@@ -3358,5 +3634,288 @@ mod tests {
                 "{label} changed the selected normal graph"
             );
         }
+    }
+
+    #[test]
+    fn crate_graph_git_urls_compare_like_cargo_canonical_urls() {
+        let canonical = |url: &str| canonical_git_repository_url(url);
+        let lion = canonical("https://github.com/stonysystems/lion");
+        assert_eq!(lion, "https://github.com/stonysystems/lion");
+        for spelling in [
+            "https://github.com/stonysystems/lion/",
+            "https://github.com/stonysystems/lion.git",
+            "https://github.com/stonysystems/lion.git/",
+            "https://github.com/StonySystems/Lion",
+            "HTTPS://GitHub.COM/stonysystems/lion",
+            "http://github.com/stonysystems/lion",
+        ] {
+            assert_eq!(canonical(spelling), lion, "{spelling}");
+        }
+        assert_eq!(canonical("ssh://git@github.com/A/B.git"), "https://git@github.com/a/b");
+        // Only github.com paths ignore case; other hosts keep scheme and path.
+        assert_eq!(canonical("https://gitlab.com/A/B.git/"), "https://gitlab.com/A/B");
+        assert_eq!(canonical("http://Example.com/A"), "http://example.com/A");
+        assert_eq!(canonical("FILE:///tmp/Repo/"), "file:///tmp/Repo");
+        assert_ne!(canonical("https://github.com/stonysystems/lion2"), lion);
+    }
+
+    #[test]
+    fn crate_graph_git_names_repositories_only() {
+        for rejected in [
+            "",
+            "git+https://github.com/stonysystems/lion",
+            "https://github.com/stonysystems/lion?rev=d697b77",
+            "https://github.com/stonysystems/lion#d697b77",
+            "git@github.com:stonysystems/lion.git",
+        ] {
+            assert!(
+                CrateGraphGitRepositories::from_urls(&[rejected.to_string()]).is_err(),
+                "accepted {rejected:?}"
+            );
+        }
+        let repositories = CrateGraphGitRepositories::from_urls(&[
+            "https://github.com/stonysystems/lion".to_string(),
+            "https://github.com/StonySystems/lion.git".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(repositories.named.len(), 1);
+        assert!(CrateGraphGitRepositories::from_urls(&[]).unwrap().is_empty());
+
+        let lion = "git+https://github.com/stonysystems/lion?rev=d697b779bb05314e7425b1746b5f89441e8e6712#d697b779bb05314e7425b1746b5f89441e8e6712";
+        let vstd = "git+https://github.com/verus-lang/verus?rev=db81a74#db81a749e8d50000000000000000000000000000";
+        assert_eq!(git_source_repository(lion), Some("https://github.com/stonysystems/lion"));
+        assert_eq!(
+            git_source_repository("registry+https://github.com/rust-lang/crates.io-index"),
+            None
+        );
+        assert_eq!(git_source_repository("sparse+https://index.crates.io/"), None);
+        assert!(repositories.admits(None));
+        assert!(repositories.admits(Some(lion)));
+        assert!(!repositories.admits(Some(vstd)));
+        assert!(!repositories.admits(Some("registry+https://github.com/rust-lang/crates.io-index")));
+        let default = CrateGraphGitRepositories::default();
+        assert!(default.admits(None));
+        assert!(!default.admits(Some(lion)));
+    }
+
+    #[test]
+    fn crate_graph_git_sources_render_as_cargo_tree_prints_them() {
+        // Each pair is `cargo metadata`'s source and `cargo tree`'s `{p}`
+        // spelling of it, as Cargo 1.91-1.99 printed them.
+        for (source, rendered) in [
+            (
+                "git+https://github.com/stonysystems/lion?rev=d697b779bb05314e7425b1746b5f89441e8e6712#d697b779bb05314e7425b1746b5f89441e8e6712",
+                "https://github.com/stonysystems/lion?rev=d697b779bb05314e7425b1746b5f89441e8e6712#d697b779",
+            ),
+            (
+                "git+https://github.com/verus-lang/verus?rev=db81a74#db81a749e8d50000000000000000000000000000",
+                "https://github.com/verus-lang/verus?rev=db81a74#db81a749",
+            ),
+            (
+                "git+file:///r/?branch=feat/x+y#419d705b73fb6b469b6a20159c83991dd093e5b2",
+                "file:///r/?branch=feat%2Fx%2By#419d705b",
+            ),
+            (
+                "git+file:///r?tag=v1.0#419d705b73fb6b469b6a20159c83991dd093e5b2",
+                "file:///r?tag=v1.0#419d705b",
+            ),
+            (
+                "git+file:///r#419d705b73fb6b469b6a20159c83991dd093e5b2",
+                "file:///r#419d705b",
+            ),
+            (
+                "git+file:///r.git?rev=419d705#419d705b73fb6b469b6a20159c83991dd093e5b2",
+                "file:///r.git?rev=419d705#419d705b",
+            ),
+        ] {
+            assert_eq!(cargo_tree_git_source(source).as_deref(), Some(rendered), "{source}");
+        }
+        assert_eq!(cargo_tree_git_source("git+file:///r?depth=1#419d705b"), None);
+        assert_eq!(cargo_tree_git_source("registry+https://example.com/index"), None);
+    }
+
+    /// A probe metadata and tree for: root -> gcore (git, family repository)
+    /// -> gbase (same repository) -> vstd (git, verus repository), and
+    /// root -> lbase (path). The family repository's URL carries `.git`
+    /// and the tree prints its branch form-urlencoded.
+    const FAMILY: &str =
+        "git+https://github.com/Example/Family.git?branch=feat/x+y#0123456789abcdef0123456789abcdef01234567";
+    const VERUS: &str =
+        "git+https://github.com/verus-lang/verus?rev=db81a74#db81a749e8d50000000000000000000000000000";
+
+    fn synthetic_probe(extra_tree: &str) -> (CargoMetadataResolved, String) {
+        let package = |id: &str, name: &str, version: &str, manifest: &str, source: Option<&str>| {
+            serde_json::json!({
+                "id": id, "name": name, "version": version, "manifest_path": manifest,
+                "source": source, "targets": [],
+            })
+        };
+        let node = |id: &str, deps: &[(&str, &str)]| {
+            serde_json::json!({
+                "id": id,
+                "deps": deps.iter().map(|(name, pkg)| serde_json::json!({
+                    "name": name, "pkg": pkg,
+                    "dep_kinds": [{"kind": null, "target": null}],
+                })).collect::<Vec<_>>(),
+            })
+        };
+        let metadata = serde_json::json!({
+            "packages": [
+                package("probe", "rusty-cpp-effective-graph-probe", "0.0.0", "/probe/Cargo.toml", None),
+                package("root", "graph-root", "0.1.0", "/w/root/Cargo.toml", None),
+                package("lbase", "lbase", "0.1.0", "/w/lbase/Cargo.toml", None),
+                package("gcore", "gcore", "0.2.0", "/checkouts/family/0123456/gcore/Cargo.toml", Some(FAMILY)),
+                package("gbase", "gbase", "0.1.0", "/checkouts/family/0123456/gbase/Cargo.toml", Some(FAMILY)),
+                package("vstd", "vstd", "0.0.0", "/checkouts/verus/db81a74/source/vstd/Cargo.toml", Some(VERUS)),
+            ],
+            "resolve": {"nodes": [
+                node("probe", &[("__rusty_cpp_requested_root", "root")]),
+                node("root", &[("gcore", "gcore"), ("lbase", "lbase")]),
+                node("lbase", &[]),
+                node("gcore", &[("gbase", "gbase")]),
+                node("gbase", &[("vstd", "vstd")]),
+                node("vstd", &[]),
+            ]},
+        });
+        let family = "https://github.com/Example/Family.git?branch=feat%2Fx%2By#01234567";
+        let tree = format!(
+            "0rusty-cpp-effective-graph-probe v0.0.0 (/probe)|\n\
+             1graph-root v0.1.0 (/w/root)|\n\
+             2gcore v0.2.0 ({family})|default,fast\n\
+             3gbase v0.1.0 ({family})|\n\
+             4vstd v0.0.0 (https://github.com/verus-lang/verus?rev=db81a74#db81a749)|\n\
+             2lbase v0.1.0 (/w/lbase)|\n{extra_tree}"
+        );
+        (serde_json::from_value(metadata).unwrap(), tree)
+    }
+
+    fn walk_synthetic(
+        metadata: &CargoMetadataResolved,
+        tree: &str,
+        urls: &[&str],
+    ) -> Result<EffectiveGraphWalk, String> {
+        let repositories = CrateGraphGitRepositories::from_urls(
+            &urls.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        )?;
+        let selection = select_normal_target_packages(tree, metadata, "probe", &repositories)?;
+        let root = metadata.packages.iter().find(|package| package.id == "root").unwrap();
+        walk_effective_local_graph(
+            &metadata.packages,
+            metadata.resolve.as_ref().unwrap(),
+            &selection,
+            root,
+            &repositories,
+        )
+    }
+
+    fn graph_edges(walk: &EffectiveGraphWalk, manifest: &str) -> Vec<(String, Vec<String>)> {
+        walk.direct_dependencies
+            .get(Path::new(manifest))
+            .unwrap_or_else(|| panic!("{manifest} is not a graph crate"))
+            .iter()
+            .map(|edge| (edge.package_name.clone(), edge.resolved_features.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn crate_graph_git_repository_joins_the_effective_graph_only_when_named() {
+        let (metadata, tree) = synthetic_probe("");
+        let root = "/w/root/Cargo.toml";
+        let gcore = "/checkouts/family/0123456/gcore/Cargo.toml";
+        let gbase = "/checkouts/family/0123456/gbase/Cargo.toml";
+
+        // Default: the git packages are opaque external nodes, exactly as
+        // before (the tree witnesses no edge to an opaque node).
+        let default = walk_synthetic(&metadata, &tree, &[]).unwrap();
+        assert_eq!(graph_edges(&default, root), [("lbase".to_string(), vec![])]);
+        assert_eq!(default.direct_dependencies.len(), 2, "only root and lbase");
+
+        // Naming the repository (another spelling of it) brings in both of
+        // its packages, with the tree's features; vstd stays external.
+        let named = walk_synthetic(&metadata, &tree, &["https://github.com/example/family/"]).unwrap();
+        assert_eq!(
+            graph_edges(&named, root),
+            [
+                ("gcore".to_string(), vec!["default".to_string(), "fast".to_string()]),
+                ("lbase".to_string(), vec![]),
+            ]
+        );
+        assert_eq!(graph_edges(&named, gcore), [("gbase".to_string(), vec![])]);
+        assert_eq!(graph_edges(&named, gbase), []);
+        assert_eq!(named.direct_dependencies.len(), 4, "root, lbase, gcore, gbase");
+
+        // vstd joins only when its own repository is named.
+        let both = walk_synthetic(
+            &metadata,
+            &tree,
+            &["https://github.com/example/family", "https://github.com/verus-lang/verus"],
+        )
+        .unwrap();
+        assert_eq!(graph_edges(&both, gbase), [("vstd".to_string(), vec![])]);
+    }
+
+    #[test]
+    fn crate_graph_git_rejects_a_repository_the_graph_does_not_reach() {
+        let (metadata, tree) = synthetic_probe("");
+        let error = match walk_synthetic(
+            &metadata,
+            &tree,
+            &["https://github.com/example/family", "https://github.com/example/famliy"],
+        ) {
+            Ok(_) => panic!("an unreached repository was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("--crate-graph-git https://github.com/example/famliy:"), "{error}");
+        assert!(
+            error.contains(
+                "the git repositories its graph crates depend on: https://github.com/Example/Family.git, https://github.com/verus-lang/verus"
+            ),
+            "{error}"
+        );
+        // Unreached even though Cargo resolved it: vstd sits behind gbase,
+        // which is not a graph crate unless the family repository is named.
+        let error = walk_synthetic(&metadata, &tree, &["https://github.com/verus-lang/verus"])
+            .err()
+            .expect("verus is not reached without the family repository");
+        assert!(error.ends_with("depend on: https://github.com/Example/Family.git"), "{error}");
+    }
+
+    #[test]
+    fn crate_graph_git_fails_closed_on_an_unrecognized_tree_line() {
+        // A line that names a graph crate but not in Cargo's spelling (a
+        // 10-digit commit) must not silently become an opaque node.
+        let (metadata, tree) = synthetic_probe("");
+        let tree = tree.replace("#01234567)|default", "#0123456789)|default");
+        let error = walk_synthetic(&metadata, &tree, &["https://github.com/example/family"])
+            .err()
+            .expect("an inexact git rendering was accepted");
+        assert!(error.contains("inexact local package identity"), "{error}");
+        // Without the opt-in the same line is an opaque external node.
+        assert!(walk_synthetic(&metadata, &tree, &[]).is_ok());
+    }
+
+    #[test]
+    fn crate_graph_git_rejects_two_graph_crates_of_one_name() {
+        // The repository at a second reference brings a second `gbase`.
+        let (mut metadata, _) = synthetic_probe("");
+        let other = FAMILY.replace("?branch=feat/x+y#0123456789", "?rev=fedcba9#fedcba9876");
+        metadata.packages.push(serde_json::from_value(serde_json::json!({
+            "id": "gbase-2", "name": "gbase", "version": "0.1.0",
+            "manifest_path": "/checkouts/family/fedcba9/gbase/Cargo.toml",
+            "source": other, "targets": [],
+        })).unwrap());
+        let resolve = metadata.resolve.as_mut().unwrap();
+        resolve.nodes.push(serde_json::from_value(serde_json::json!({"id": "gbase-2"})).unwrap());
+        let root = resolve.nodes.iter_mut().find(|node| node.id == "root").unwrap();
+        root.deps.push(serde_json::from_value(serde_json::json!({
+            "name": "gbase2", "pkg": "gbase-2", "dep_kinds": [{"kind": null, "target": null}],
+        })).unwrap());
+        let (_, tree) = synthetic_probe(
+            "2gbase v0.1.0 (https://github.com/Example/Family.git?rev=fedcba9#fedcba98)|\n",
+        );
+        let error = walk_synthetic(&metadata, &tree, &["https://github.com/example/family"])
+            .err()
+            .expect("two graph crates named gbase were accepted");
+        assert!(error.contains("share the package name 'gbase'"), "{error}");
     }
 }

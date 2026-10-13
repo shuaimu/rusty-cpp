@@ -1080,6 +1080,11 @@ pub struct TranspileOptions {
     /// surfaces (see `crate::crate_graph`). `None` outside graph mode, which
     /// leaves every crate-mode path exactly as before.
     pub crate_graph: Option<crate::crate_graph::GraphCrateContext>,
+    /// `--crate-graph-git`: git repositories whose packages are graph crates
+    /// like local path packages, in every resolution of Cargo's effective
+    /// graph (see `crate::metadata::CrateGraphGitRepositories`). Empty unless
+    /// named, which leaves the graph exactly as before.
+    pub crate_graph_git: crate::metadata::CrateGraphGitRepositories,
 }
 
 /// Classification of a method *name* across the whole crate, used by the UFCS
@@ -2525,6 +2530,7 @@ impl Default for TranspileOptions {
             auto_namespace: false,
             verus_exec: crate::verus_exec::VerusExecConfig::default(),
             crate_graph: None,
+            crate_graph_git: crate::metadata::CrateGraphGitRepositories::default(),
         }
     }
 }
