@@ -14,6 +14,11 @@
 // Test name convention: `<rust_test_name>_unstubbed` so registration
 // doesn't collide with the corresponding stub in btree_tests_port.cppm.
 
+// libc++'s vector declarations are also exported through the imported map
+// module. Load the textual header first so Clang does not redeclare its ABI
+// tags after the module import.
+#include <vector>
+
 import btree_port.btree.map;
 import btree_port.btree.set;
 
@@ -22,7 +27,6 @@ import btree_port.btree.set;
 #include <stdexcept>
 #include <tuple>
 #include <utility>
-#include <vector>
 #include <cstring>
 #include <rusty/alloc.hpp>
 #include <rusty/move.hpp>  // rusty::clone
@@ -54,6 +58,52 @@ template<typename T> auto make_set() {
     return BTreeSet<T>::new_in(::rusty::alloc::Global{});
 }
 
+struct SplitOwnedValueState {
+    int live = 0;
+};
+
+// Copyable on purpose: this exercises MaybeUninit::assume_init_read's copy
+// overload, which used to strand the median value whenever a leaf split.
+struct SplitOwnedValue {
+    SplitOwnedValueState* state;
+
+    explicit SplitOwnedValue(SplitOwnedValueState& state_in)
+        : state(&state_in) {
+        ++state->live;
+    }
+    SplitOwnedValue(const SplitOwnedValue& other) : state(other.state) {
+        ++state->live;
+    }
+    SplitOwnedValue(SplitOwnedValue&& other) noexcept : state(other.state) {
+        other.state = nullptr;
+    }
+    SplitOwnedValue& operator=(const SplitOwnedValue& other) {
+        if (this != &other) {
+            if (state != nullptr) {
+                --state->live;
+            }
+            state = other.state;
+            ++state->live;
+        }
+        return *this;
+    }
+    SplitOwnedValue& operator=(SplitOwnedValue&& other) noexcept {
+        if (this != &other) {
+            if (state != nullptr) {
+                --state->live;
+            }
+            state = other.state;
+            other.state = nullptr;
+        }
+        return *this;
+    }
+    ~SplitOwnedValue() {
+        if (state != nullptr) {
+            --state->live;
+        }
+    }
+};
+
 // `.check()` shim. The original rustc tests define an `impl<K,V> BTreeMap`
 // block in tests.rs adding a private `check()` method that walks the
 // navigation internals and asserts invariants (back-pointers, calc_length,
@@ -64,6 +114,50 @@ template<typename T> auto make_set() {
 template<typename M> inline void check(const M&) {}
 
 } // anonymous
+
+TEST_CASE("split_leaf_relocates_copyable_owned_value_unstubbed") {
+    SplitOwnedValueState state;
+    {
+        auto map = make_map<int, SplitOwnedValue>();
+        // A leaf holds 11 entries. The twelfth insertion forces median
+        // extraction before the source node is shortened.
+        for (int i = 0; i < 12; ++i) {
+            map.insert(i, SplitOwnedValue(state));
+        }
+        assert(map.len() == 12u);
+        assert(state.live == 12);
+    }
+    assert(state.live == 0);
+}
+
+TEST_CASE("slice_remove_relocates_copyable_owned_value_unstubbed") {
+    SplitOwnedValueState state;
+    {
+        auto map = make_map<int, SplitOwnedValue>();
+        for (int i = 0; i < 8; ++i) {
+            map.insert(i, SplitOwnedValue(state));
+        }
+        assert(map.len() == 8u);
+        assert(state.live == 8);
+
+        {
+            auto removed = map.remove(3);
+            assert(removed.is_some());
+            assert(map.len() == 7u);
+            assert(state.live == 8);
+        }
+        assert(state.live == 7);
+
+        {
+            auto removed = map.remove(7);
+            assert(removed.is_some());
+            assert(map.len() == 6u);
+            assert(state.live == 7);
+        }
+        assert(state.live == 6);
+    }
+    assert(state.live == 0);
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_get_key_value (trimmed)
