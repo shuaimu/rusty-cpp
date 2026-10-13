@@ -11,6 +11,11 @@
 //!
 //! Under `--crate-graph`:
 //!
+//! - The graph's crates are the local path packages Cargo selects for the
+//!   target. A git package is an external crate, like a registry one, unless
+//!   `--crate-graph-git <URL>` names its repository; then every package Cargo
+//!   selects from that repository is a graph crate, read from Cargo's checkout
+//!   (`metadata::CrateGraphGitRepositories`).
 //! - Every dependency crate of Cargo's target-normal local graph is emitted
 //!   exactly once, leaves first, into `<output-dir>/<package>/`, as ONE named
 //!   C++ module per crate. The module is named after the crate's extern root

@@ -386,3 +386,298 @@ fn crate_graph_audits_an_adapter_root_after_verus_erasure_and_per_crate() {
     assert!(stderr.contains("vstd :: prelude :: *"), "{stderr}");
     assert!(!raw_out.join("graph_root.cppm").exists());
 }
+
+// ---------------------------------------------------------------------------
+// --crate-graph-git: the same crates from a git repository
+
+/// The fixture with `dep-base`, `dep-core` and `dep-spec` committed to a git
+/// repository (`family`) and the root depending on `dep-core` from it, on a
+/// branch whose name `cargo tree` prints form-urlencoded (`feat%2Fx%2By`);
+/// `dep-unused` stays a path dependency. With `other`, `dep-base` also depends
+/// on `dep-other` from a second repository and never names it. `edit_family`
+/// may change the family's packages before they are committed. Cargo runs
+/// with the fixture's own CARGO_HOME, so it reads the repositories through
+/// `file://` URLs, needs no network and leaves `~/.cargo` alone.
+struct GitFixture {
+    directory: tempfile::TempDir,
+    cargo_home: PathBuf,
+    family: PathBuf,
+    other: PathBuf,
+}
+
+impl GitFixture {
+    fn root(&self) -> PathBuf {
+        self.directory.path().join("root")
+    }
+}
+
+fn git_commit(repository: &Path) {
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["add", "-A"],
+        &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "fixture"],
+        &["branch", "feat/x+y"],
+    ] {
+        let ran = Command::new("git")
+            .current_dir(repository)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_success(&ran, &format!("git {args:?}"));
+    }
+}
+
+fn git_fixture(features_default: bool, other: bool, edit_family: fn(&Path)) -> GitFixture {
+    let directory = tempfile::tempdir().unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/crate_graph");
+    copy_tree(&fixtures.join("root"), &directory.path().join("root"));
+    copy_tree(&fixtures.join("dep-unused"), &directory.path().join("dep-unused"));
+    let family = directory.path().join("family");
+    for package in ["dep-base", "dep-core", "dep-spec"] {
+        copy_tree(&fixtures.join(package), &family.join(package));
+    }
+    let other_repository = directory.path().join("other");
+    if other {
+        std::fs::create_dir_all(other_repository.join("src")).unwrap();
+        std::fs::write(
+            other_repository.join("Cargo.toml"),
+            "[package]\nname = \"dep-other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(other_repository.join("src/lib.rs"), "pub fn other() -> u32 {\n    1\n}\n")
+            .unwrap();
+        git_commit(&other_repository);
+        let manifest = family.join("dep-base/Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            format!(
+                "{text}\n[dependencies]\ndep-other = {{ git = \"file://{}\" }}\n",
+                other_repository.display()
+            ),
+        )
+        .unwrap();
+    }
+    edit_family(&family);
+    git_commit(&family);
+    let manifest = directory.path().join("root/Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    let path_dependency = "dep-core = { path = \"../dep-core\", default-features = false }";
+    assert!(text.contains(path_dependency), "{text}");
+    let git_dependency = format!(
+        "dep-core = {{ git = \"file://{}\", branch = \"feat/x+y\"{} }}",
+        family.display(),
+        if features_default { "" } else { ", default-features = false" }
+    );
+    std::fs::write(&manifest, text.replace(path_dependency, &git_dependency)).unwrap();
+    let cargo_home = directory.path().join("cargo-home");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    // Not --offline: Cargo has to fetch the file:// repositories into this
+    // CARGO_HOME once; the transpiler then resolves --locked --offline.
+    let locked = Command::new(cargo)
+        .current_dir(directory.path().join("root"))
+        .env("CARGO_HOME", &cargo_home)
+        .arg("generate-lockfile")
+        .output()
+        .unwrap();
+    assert_success(&locked, "cargo generate-lockfile with git dependencies");
+    GitFixture {
+        directory,
+        cargo_home,
+        family,
+        other: other_repository,
+    }
+}
+
+fn transpile_git(fixture: &GitFixture, out: &Path, extra: &[String]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"))
+        .env("CARGO_HOME", &fixture.cargo_home)
+        .arg("--crate")
+        .arg(fixture.root().join("Cargo.toml"))
+        .arg("--crate-graph")
+        .arg("--verus-exec")
+        .arg("--verus-erase-helper")
+        .arg(helper())
+        .args(extra)
+        .args(["--locked", "--offline", "--output-dir"])
+        .arg(out)
+        .output()
+        .unwrap()
+}
+
+/// Every file under `dir`, relative to it, with its bytes.
+fn tree_files(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(base: &Path, dir: &Path, files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                walk(base, &entry.path(), files);
+            } else {
+                files.insert(
+                    entry.path().strip_prefix(base).unwrap().to_path_buf(),
+                    std::fs::read(entry.path()).unwrap(),
+                );
+            }
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    walk(dir, dir, &mut files);
+    files
+}
+
+#[test]
+fn crate_graph_git_repository_emits_exactly_what_path_dependencies_do() {
+    // Both feature settings, so Cargo's per-crate features reach the git
+    // crates exactly as they reach path crates. The two spellings of the
+    // repository URL exercise Cargo's URL comparison.
+    for (features_default, spelling) in [(false, "/"), (true, ".git")] {
+        let path_fixture = fixture(features_default);
+        let path_out = path_fixture.path().join("cpp");
+        assert_success(
+            &transpile(&path_fixture.path().join("root"), &path_out),
+            "--crate-graph over path dependencies",
+        );
+        let git = git_fixture(features_default, false, |_| {});
+        let git_out = git.directory.path().join("cpp");
+        let url = format!("file://{}{spelling}", git.family.display());
+        let transpiled = transpile_git(&git, &git_out, &["--crate-graph-git".to_string(), url]);
+        assert_success(&transpiled, "--crate-graph --crate-graph-git");
+        assert!(git_out.join("dep-core/dep_core.cppm").is_file());
+        let path_files = tree_files(&path_out);
+        let git_files = tree_files(&git_out);
+        assert_eq!(
+            path_files.keys().collect::<Vec<_>>(),
+            git_files.keys().collect::<Vec<_>>(),
+            "features_default = {features_default}"
+        );
+        for (file, bytes) in &path_files {
+            assert!(
+                &git_files[file] == bytes,
+                "{} differs between the path and git graphs (features_default = {features_default})",
+                file.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn crate_graph_git_repository_stays_external_unless_named() {
+    // Without --crate-graph-git the git crates are external, as before: the
+    // graph holds only the path dependency `dep-unused`.
+    let git = git_fixture(false, true, |_| {});
+    let out = git.directory.path().join("cpp");
+    let transpiled = transpile_git(&git, &out, &[]);
+    let stdout = String::from_utf8_lossy(&transpiled.stdout);
+    assert!(stdout.contains("Crate graph (1 dependency crate(s)):\n  dep-unused "), "{stdout}");
+    for package in ["dep-base", "dep-core", "dep-spec", "dep-other"] {
+        assert!(!stdout.contains(package) && !out.join(package).exists(), "{stdout}");
+    }
+
+    // Naming the family brings its three crates; `dep-other`, from another
+    // repository, stays external.
+    let family = format!("file://{}", git.family.display());
+    let out = git.directory.path().join("cpp-family");
+    let transpiled = transpile_git(&git, &out, &["--crate-graph-git".to_string(), family.clone()]);
+    assert_success(&transpiled, "--crate-graph-git naming the family");
+    let manifest = std::fs::read_to_string(out.join("crate-graph.json")).unwrap();
+    assert!(!manifest.contains("dep-other") && !out.join("dep-other").exists(), "{manifest}");
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    assert_eq!(manifest["crates"][0]["package"], "dep-base");
+    assert_eq!(manifest["crates"][1]["package"], "dep-core");
+    assert_eq!(manifest["ghost_only"], serde_json::json!(["dep-spec"]));
+
+    // Naming the other repository too makes dep-other a graph crate, one the
+    // root never needs.
+    let out = git.directory.path().join("cpp-both");
+    let other = format!("file://{}", git.other.display());
+    let transpiled = transpile_git(
+        &git,
+        &out,
+        &["--crate-graph-git".to_string(), family, "--crate-graph-git".to_string(), other],
+    );
+    assert_success(&transpiled, "--crate-graph-git naming both repositories");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("crate-graph.json")).unwrap()).unwrap();
+    assert_eq!(manifest["unused"], serde_json::json!(["dep-other", "dep-unused"]));
+}
+
+#[test]
+fn crate_graph_git_rejects_a_repository_outside_the_graph_before_output() {
+    let git = git_fixture(false, false, |_| {});
+    let out = git.directory.path().join("cpp");
+    let typo = format!("file://{}-typo", git.family.display());
+    let transpiled = transpile_git(&git, &out, &["--crate-graph-git".to_string(), typo.clone()]);
+    assert!(!transpiled.status.success(), "an unreached repository was accepted");
+    let stderr = String::from_utf8_lossy(&transpiled.stderr);
+    assert!(stderr.contains(&format!("--crate-graph-git {typo}: no package")), "{stderr}");
+    assert!(
+        stderr.contains(&format!("depend on: file://{}", git.family.display())),
+        "{stderr}"
+    );
+    assert!(!out.exists(), "output was written before the error");
+
+    // A Cargo source id or a pinned reference is not a repository URL.
+    for value in [
+        format!("git+file://{}", git.family.display()),
+        format!("file://{}?branch=main", git.family.display()),
+    ] {
+        let transpiled = transpile_git(&git, &out, &["--crate-graph-git".to_string(), value]);
+        assert!(!transpiled.status.success());
+        assert!(!out.exists(), "output was written before the error");
+    }
+
+    // The option belongs to --crate-graph.
+    let transpiled = Command::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"))
+        .env("CARGO_HOME", &git.cargo_home)
+        .arg("--crate")
+        .arg(git.root().join("Cargo.toml"))
+        .arg("--crate-graph-git")
+        .arg(format!("file://{}", git.family.display()))
+        .arg("--output-dir")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(transpiled.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&transpiled.stderr);
+    assert!(stderr.contains("--crate-graph"), "{stderr}");
+    assert!(!out.exists(), "output was written before the error");
+}
+
+/// A `cpp_abi` marker in a declared binary target of `dep-base`, which crate
+/// mode rejects.
+fn add_marked_binary(dep_base: &Path) {
+    std::fs::create_dir_all(dep_base.join("src/bin")).unwrap();
+    std::fs::write(
+        dep_base.join("src/bin/tool.rs"),
+        "#[cfg_attr(any(), cpp_abi(param(bytes, std_string_bytes), returns(std_string_bytes)))]\n\
+         pub fn adapted(bytes: Vec<u8>) -> Vec<u8> {\n    bytes\n}\n\nfn main() {}\n",
+    )
+    .unwrap();
+    let manifest = dep_base.join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, format!("{text}\n[[bin]]\nname = \"tool\"\npath = \"src/bin/tool.rs\"\n"))
+        .unwrap();
+}
+
+#[test]
+fn crate_graph_git_member_source_contracts_are_preflighted_like_path_ones() {
+    // The root has no source contract, so crate mode first scans declared
+    // `path` dependencies for one; that scan cannot follow a git dependency.
+    // A named repository must still get the exact-graph preflight a path
+    // dependency gets.
+    let expected = "contains source-owned C++ contracts; cross-crate adapter calls are unsupported";
+    let path_fixture = fixture(false);
+    add_marked_binary(&path_fixture.path().join("dep-base"));
+    let transpiled = transpile(&path_fixture.path().join("root"), &path_fixture.path().join("cpp"));
+    assert!(!transpiled.status.success(), "the path graph accepted the marker");
+    let stderr = String::from_utf8_lossy(&transpiled.stderr);
+    assert!(stderr.contains(expected), "{stderr}");
+
+    let git = git_fixture(false, false, |family| add_marked_binary(&family.join("dep-base")));
+    let out = git.directory.path().join("cpp");
+    let family = format!("file://{}", git.family.display());
+    let transpiled = transpile_git(&git, &out, &["--crate-graph-git".to_string(), family]);
+    assert!(!transpiled.status.success(), "the git graph accepted the marker");
+    let stderr = String::from_utf8_lossy(&transpiled.stderr);
+    assert!(stderr.contains(expected), "{stderr}");
+}

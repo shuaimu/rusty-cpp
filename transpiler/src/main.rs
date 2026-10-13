@@ -220,6 +220,21 @@ struct Cli {
     #[arg(long = "crate-graph", requires = "crate_")]
     crate_graph: bool,
 
+    /// With --crate-graph: also make every package Cargo resolves from the git
+    /// repository <URL> a graph crate, exactly as if it were a local path
+    /// dependency (its source is read from Cargo's checkout). Repeatable.
+    /// Without it a git package, like a registry one, is an external crate the
+    /// graph neither descends into nor emits. Naming the repository rather
+    /// than its packages brings in every package Cargo selects from it; a
+    /// package from another repository (Verus's `vstd` under Lion) stays
+    /// external unless that repository is named too. <URL> is the `git = "..."`
+    /// URL with no reference or commit, matched as Cargo compares git URLs: a
+    /// trailing `/` or `.git`, the case of the scheme and host, and the path
+    /// case of a github.com URL do not matter. A URL that contributes no
+    /// package to the target-normal graph is an error before any output.
+    #[arg(long = "crate-graph-git", value_name = "URL", requires = "crate_graph")]
+    crate_graph_git: Vec<String>,
+
     /// With --verus-exec: write every crate source unit, exactly as handed to
     /// the transpiler after the pre-pass, to <DIR>/<crate name>/<source path>
     /// (single-file mode: <DIR>/<file name>).
@@ -2703,6 +2718,7 @@ fn transpile_crate_with_context(
             cargo_toml_path,
             package_filter,
             cargo_flags,
+            &transpile_options.crate_graph_git,
         )?;
     if effective_dependencies.root_manifest() != cargo_toml_path {
         return Err(format!(
@@ -4233,6 +4249,7 @@ fn transpile_crate_graph(
         &manifest,
         package_filter,
         cargo_flags,
+        &transpile_options.crate_graph_git,
     )
     .map_err(|error| {
         format!("--crate-graph requires Cargo's target-selected normal local-dependency graph: {error}")
@@ -4707,8 +4724,13 @@ fn transpile_crate_impl(
     // must finish before any output path is created.
     let may_have_cpp_name = dependency_closure_may_have_cpp_name(cargo_toml_path);
     let may_have_source_contract = dependency_closure_may_have_source_contract(cargo_toml_path);
+    // Both scans follow declared `path` dependencies only, so they cannot see
+    // into a `--crate-graph-git` repository's checkout. With one named, always
+    // take the exact Cargo graph, which holds its packages, as the scans
+    // themselves do when a `[patch]` may redirect a dependency to a local one.
+    let git_graph_crates = !transpile_options.crate_graph_git.is_empty();
     let owned_effective_dependencies = if inherited_atomic_dependency_errors
-        || !(may_have_cpp_name || may_have_source_contract)
+        || !(may_have_cpp_name || may_have_source_contract || git_graph_crates)
     {
         None
     } else {
@@ -4717,6 +4739,7 @@ fn transpile_crate_impl(
                 cargo_toml_path,
                 package_filter,
                 cargo_flags,
+                &transpile_options.crate_graph_git,
             )
             .map_err(|error| {
                     format!(
@@ -12121,6 +12144,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         // already expanded by rustc; the --verus-exec pre-pass does not apply.
         verus_exec: verus_exec::VerusExecConfig::default(),
         crate_graph: None,
+        crate_graph_git: metadata::CrateGraphGitRepositories::default(),
     };
 
     let mut generated_cppm_files: Vec<GeneratedCppmArtifact> = Vec::new();
@@ -12738,6 +12762,14 @@ fn main() {
         cli.offline,
         cli.frozen,
     );
+    let crate_graph_git =
+        match metadata::CrateGraphGitRepositories::from_urls(&cli.crate_graph_git) {
+            Ok(repositories) => repositories,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        };
 
     // Load user type map if provided
     let type_map = if let Some(ref type_map_path) = cli.type_map {
@@ -12847,6 +12879,7 @@ fn main() {
             helper: cli.verus_erase_helper.clone(),
         },
         crate_graph: None,
+        crate_graph_git,
     };
 
     // Handle --crate: transpile entire crate
