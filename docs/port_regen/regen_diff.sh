@@ -83,10 +83,12 @@ case "$PORT" in
     PATCHER="$REPO_ROOT/docs/btreemap_port/post_transpile_patch.py"
     mods=$'pub mod btree;'
     ;;
-  vec_tests_port|rc_tests_port|arc_tests_port|string_tests_port|vec_deque_tests_port|eq_diff_len_tests_port|btree_set_hash_tests_port|linked_list_tests_port)
+  vec_tests_port|rc_tests_port|arc_tests_port|string_tests_port|vec_deque_tests_port|eq_diff_len_tests_port|btree_set_hash_tests_port|linked_list_tests_port|binary_heap_tests_port)
     # rustc's library/alloctests/tests/<name>.rs becomes src/lib.rs; the
     # port's prep.sh rewrites it in place.
     tname="${PORT%_tests_port}"
+    # rust-src names the BinaryHeap test file `heap.rs`.
+    [[ $tname == binary_heap ]] && tname=heap
     cp "$SRC_ROOT/alloctests/tests/$tname.rs" "$WORK/crate/src/lib.rs"
     [[ -f "$PREP" ]] && bash "$PREP" "$WORK/crate/src/lib.rs" >/dev/null
     mods=""
@@ -138,6 +140,7 @@ case "$PORT" in
   hashbrown_port)    CXX_NS=rusty::port::collections::hashbrown ;;
   borrow_port)       CXX_NS=borrow_port ;;
   ascii_port)        CXX_NS=ascii_port ;;
+  *_tests_port)      CXX_NS="$PORT" ;;   # the test ports' patchers anchor on `namespace <port> {`
   *)                 CXX_NS= ;;
 esac
 ns_flag=()

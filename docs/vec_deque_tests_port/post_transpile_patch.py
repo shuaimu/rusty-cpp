@@ -247,6 +247,13 @@ def apply_patches(path: Path) -> None:
     text = inject_module_imports(text, "vec_deque_tests_port", ["alloc"])
 
     # Route every deque through the port type.
+    # 2026-10: the ports are named by their deep paths; the rules below are
+    # keyed on the historical `rusty::Vec` / `rusty::VecDeque` spellings.
+    text = text.replace("::rusty::port::vec::Vec", "rusty::Vec")
+    text = text.replace("::rusty::port::collections::vec_deque::VecDeque", "rusty::VecDeque")
+    text = text.replace("using ::testing::macros::struct_with_counted_drop;",
+                        "using std::testing::macros::struct_with_counted_drop;")
+    text = text.replace("::vec_deque_tests_port::test_parameterized<", "test_parameterized<")
     text = text.replace("rusty::VecDeque<", "VecDequeT<")
     text = re.sub(r"(?<![:\w])VecDeque::from\(", "vd_from(", text)
     text = re.sub(r"(?<![:\w])VecDeque::with_capacity\(",
@@ -405,6 +412,8 @@ def apply_patches(path: Path) -> None:
                       "CloneTracker assoc-const/Cell-static-map/array_repeat emission gaps")
     text = stub_tests(text, MISC_SHAPE_TESTS,
                       "const-bound moved iterator + generic check-lambda shapes")
+    # Whatever still says `rusty::Vec` (helpers included) must name the port.
+    text = re.sub(r"(?<![A-Za-z0-9_:])rusty::Vec(?=[<{(])", "::rusty::port::vec::Vec", text)
     path.write_text(text)
 
 

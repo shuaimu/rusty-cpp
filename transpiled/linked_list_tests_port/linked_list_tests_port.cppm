@@ -17,7 +17,9 @@ module;
 #include <string_view>
 #include <charconv>
 #include <cstdlib>
+#include <cstdio>
 #include <bit>
+#include <cwctype>
 #include <stdexcept>
 #include <print>
 #include <immintrin.h>
@@ -30,9 +32,8 @@ module;
 #endif
 
 export module linked_list_tests_port;
-
-// patcher-injected module imports:
 import linked_list_port;
+
 
 namespace linked_list_tests_port {
 

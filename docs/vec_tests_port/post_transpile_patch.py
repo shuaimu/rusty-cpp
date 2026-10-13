@@ -26,7 +26,7 @@ from _test_port_helpers import (  # noqa
 HELPERS = """
 // The tests exercise the ALLOC consolidated module's Vec.
 template<typename T, typename A = rusty::alloc::Global>
-using VecT = ::vec::Vec<T, A>;
+using VecT = ::rusty::port::vec::Vec<T, A>;
 // vec![a, b, c] literal factories (the alloc Vec has no init-list ctor).
 template<typename T, typename... Ts>
 static auto vt_of_t(Ts&&... xs) {
@@ -392,6 +392,11 @@ def apply_patches(path: Path) -> None:
     text = inject_test_runner_include(text)
     text = inject_module_imports(text, "vec_tests_port", ["alloc"])
 
+    # 2026-10: the port is named by its deep path; the walker/helpers below
+    # are keyed on the historical `rusty::Vec` spelling.
+    text = text.replace("::rusty::port::vec::Vec", "rusty::Vec")
+    text = text.replace("using ::testing::macros::struct_with_counted_drop;",
+                        "using std::testing::macros::struct_with_counted_drop;")
     marker = "namespace vec_tests_port {"
     if marker in text and "using VecT = " not in text:
         text = text.replace(marker, marker + "\n" + HELPERS, 1)

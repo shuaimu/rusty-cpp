@@ -9,3 +9,5 @@ sed -i \
   -e 's|use core::|use std::|g' \
   "$SRC"
 echo "[vec_tests_port prep] normalized $SRC"
+# fn-local structs/enums/impls become module-level items (C++ forbids local templates + friends).
+python3 "$(dirname "${BASH_SOURCE[0]}")/prep_hoist.py" "$SRC"
