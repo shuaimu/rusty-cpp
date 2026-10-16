@@ -356,3 +356,38 @@ fn lion_slab_and_timer_wheel_cases_match_rustc() {
     assert_success(&ran, "running the C++");
     assert_eq!(String::from_utf8(ran.stdout).unwrap(), expected);
 }
+
+#[test]
+fn crate_graph_refuses_lions_vstd_without_verus_exec() {
+    // lion-slab and lion-timer-wheel depend on vstd from Verus's git
+    // repository, which --crate-graph lets stay external only under
+    // --verus-exec. Without it the graph is refused before any output, and the
+    // remedy is --verus-exec, not naming Verus's repository.
+    let root = fixture_root();
+    let work = tempfile::tempdir().unwrap();
+    for dir in ["parity", "tree/lion-slab", "tree/lion-timer-wheel"] {
+        copy_tree(&root.join(dir), &work.path().join(dir));
+    }
+    let out = work.path().join("cpp");
+    let transpiled = Command::new(env!("CARGO_BIN_EXE_rusty-cpp-transpiler"))
+        .arg("--crate")
+        .arg(work.path().join("parity/Cargo.toml"))
+        .arg("--crate-graph")
+        .args(["--locked", "--offline", "--output-dir"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(transpiled.status.code(), Some(1), "vstd was accepted without --verus-exec");
+    let stderr = String::from_utf8_lossy(&transpiled.stderr);
+    for crate_name in ["lion-slab", "lion-timer-wheel"] {
+        assert!(
+            stderr.contains(&format!(
+                "\n  {crate_name} -> vstd v0.0.0-2025-11-10-1957 (https://github.com/verus-lang/verus)\n"
+            )),
+            "{stderr}"
+        );
+    }
+    assert!(stderr.contains("external under --verus-exec"), "{stderr}");
+    assert!(!stderr.contains("--crate-graph-git https"), "{stderr}");
+    assert!(!out.exists(), "output was written before the error");
+}

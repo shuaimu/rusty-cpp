@@ -556,35 +556,39 @@ fn crate_graph_git_repository_emits_exactly_what_path_dependencies_do() {
 }
 
 #[test]
-fn crate_graph_git_repository_stays_external_unless_named() {
-    // Without --crate-graph-git the git crates are external, as before: the
-    // graph holds only the path dependency `dep-unused`.
+fn crate_graph_refuses_a_git_dependency_until_its_repository_is_named() {
+    // Without --crate-graph-git, the root's git dependency dep-core would be
+    // left out of the graph (only the path dependency dep-unused would join),
+    // so --crate-graph refuses it before any output.
     let git = git_fixture(false, true, |_| {});
+    let family = format!("file://{}", git.family.display());
+    let other = format!("file://{}", git.other.display());
     let out = git.directory.path().join("cpp");
     let transpiled = transpile_git(&git, &out, &[]);
-    let stdout = String::from_utf8_lossy(&transpiled.stdout);
-    assert!(stdout.contains("Crate graph (1 dependency crate(s)):\n  dep-unused "), "{stdout}");
-    for package in ["dep-base", "dep-core", "dep-spec", "dep-other"] {
-        assert!(!stdout.contains(package) && !out.join(package).exists(), "{stdout}");
-    }
+    assert_eq!(transpiled.status.code(), Some(1), "an unnamed git dependency was accepted");
+    let stderr = String::from_utf8_lossy(&transpiled.stderr);
+    assert!(
+        stderr.contains(&format!("\n  graph-root -> dep-core v0.1.0 ({family})\n")),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&format!("graph crates: --crate-graph-git {family}\n")), "{stderr}");
+    assert!(!stderr.contains("dep-other"), "dep-base is not a graph crate yet: {stderr}");
+    assert!(!out.exists(), "output was written before the error");
 
-    // Naming the family brings its three crates; `dep-other`, from another
-    // repository, stays external.
-    let family = format!("file://{}", git.family.display());
+    // Naming the family brings its three crates, and with them dep-base's
+    // dependency on dep-other, from a second repository no one named.
     let out = git.directory.path().join("cpp-family");
     let transpiled = transpile_git(&git, &out, &["--crate-graph-git".to_string(), family.clone()]);
-    assert_success(&transpiled, "--crate-graph-git naming the family");
-    let manifest = std::fs::read_to_string(out.join("crate-graph.json")).unwrap();
-    assert!(!manifest.contains("dep-other") && !out.join("dep-other").exists(), "{manifest}");
-    let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
-    assert_eq!(manifest["crates"][0]["package"], "dep-base");
-    assert_eq!(manifest["crates"][1]["package"], "dep-core");
-    assert_eq!(manifest["ghost_only"], serde_json::json!(["dep-spec"]));
+    assert_eq!(transpiled.status.code(), Some(1), "an unnamed git dependency was accepted");
+    let stderr = String::from_utf8_lossy(&transpiled.stderr);
+    assert!(stderr.contains(&format!("\n  dep-base -> dep-other v0.1.0 ({other})\n")), "{stderr}");
+    assert!(stderr.contains(&format!("graph crates: --crate-graph-git {other}\n")), "{stderr}");
+    assert!(!stderr.contains("dep-core v"), "{stderr}");
+    assert!(!out.exists(), "output was written before the error");
 
     // Naming the other repository too makes dep-other a graph crate, one the
     // root never needs.
     let out = git.directory.path().join("cpp-both");
-    let other = format!("file://{}", git.other.display());
     let transpiled = transpile_git(
         &git,
         &out,
@@ -593,6 +597,9 @@ fn crate_graph_git_repository_stays_external_unless_named() {
     assert_success(&transpiled, "--crate-graph-git naming both repositories");
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("crate-graph.json")).unwrap()).unwrap();
+    assert_eq!(manifest["crates"][0]["package"], "dep-base");
+    assert_eq!(manifest["crates"][1]["package"], "dep-core");
+    assert_eq!(manifest["ghost_only"], serde_json::json!(["dep-spec"]));
     assert_eq!(manifest["unused"], serde_json::json!(["dep-other", "dep-unused"]));
 }
 

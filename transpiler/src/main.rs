@@ -222,15 +222,17 @@ struct Cli {
     /// With --crate-graph: also make every package Cargo resolves from the git
     /// repository <URL> a graph crate, exactly as if it were a local path
     /// dependency (its source is read from Cargo's checkout). Repeatable.
-    /// Without it a git package, like a registry one, is an external crate the
-    /// graph neither descends into nor emits. Naming the repository rather
-    /// than its packages brings in every package Cargo selects from it; a
-    /// package from another repository (Verus's `vstd` under Lion) stays
-    /// external unless that repository is named too. <URL> is the `git = "..."`
-    /// URL with no reference or commit, matched as Cargo compares git URLs: a
-    /// trailing `/` or `.git`, the case of the scheme and host, and the path
-    /// case of a github.com URL do not matter. A URL that contributes no
-    /// package to the target-normal graph is an error before any output.
+    /// A registry package is an external crate the graph neither descends into
+    /// nor emits; a git package must be one of a named repository instead:
+    /// --crate-graph refuses, before any output, a graph crate that depends on
+    /// a git package from a repository no --crate-graph-git names. The one
+    /// exception is Verus's repository (`vstd`) under --verus-exec. Naming the
+    /// repository rather than its packages brings in every package Cargo
+    /// selects from it. <URL> is the `git = "..."` URL with no reference or
+    /// commit, matched as Cargo compares git URLs: a trailing `/` or `.git`,
+    /// the case of the scheme and host, and the path case of a github.com URL
+    /// do not matter. A URL that contributes no package to the target-normal
+    /// graph is an error before any output.
     #[arg(long = "crate-graph-git", value_name = "URL", requires = "crate_graph")]
     crate_graph_git: Vec<String>,
 
@@ -12723,6 +12725,7 @@ fn main() {
     );
     let crate_graph_git =
         match metadata::CrateGraphGitRepositories::from_urls(&cli.crate_graph_git) {
+            Ok(repositories) if cli.crate_graph => repositories.refusing_unnamed(cli.verus_exec),
             Ok(repositories) => repositories,
             Err(e) => {
                 eprintln!("Error: {}", e);
