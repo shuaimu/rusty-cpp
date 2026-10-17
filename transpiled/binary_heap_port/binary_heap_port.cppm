@@ -3450,7 +3450,7 @@ struct BinaryHeap {
     rusty::Option<T> pop() {
         return this->data.pop().map([&](auto&& item) {
 if (!rusty::is_empty((*this))) {
-    rusty::mem::swap(&item, &this->data[static_cast<size_t>(0)]);
+    rusty::mem::swap(item, this->data[static_cast<size_t>(0)]);
     // @unsafe
     {
         this->sift_down_to_bottom(static_cast<size_t>(0));
@@ -3593,7 +3593,7 @@ return std::move(item);
     }
     void append(BinaryHeap<T, A>& other) {
         if (this->len() < rusty::len(other)) {
-            rusty::mem::swap((*this), other);
+            rusty::mem::swap(rusty::detail::deref_if_pointer((*this)), rusty::detail::deref_if_pointer(other));
         }
         auto start = rusty::len(this->data);
         this->data.append(other.data);

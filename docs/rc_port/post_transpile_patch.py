@@ -1123,6 +1123,35 @@ def patch_vendored_hand_ports(cpp_out: Path) -> int:
     return 1
 
 
+def patch_rc_inner_ptr_module_linkage(cpp_out: Path) -> int:
+    """`trait RcInnerPtr` is private, so the transpiler puts its interface class
+    in an anonymous namespace (TU-local). The exported `RcInner<T>` / the
+    adapters derive from it, so a CONSUMER TU that instantiates them needs the
+    base's vtable — "undefined reference to vtable for (anonymous
+    namespace)::RcInnerPtr" (the parity matrix's smallvec row). Give the class
+    module linkage: drop the anonymous-namespace wrapper around its forward
+    declaration and its definition."""
+    path = cpp_out / RC_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = text.replace("namespace {\nclass RcInnerPtr;\n}\n", "class RcInnerPtr;\n", 1)
+    # the tier-1 concept's own one-line forward declaration (a second,
+    # anonymous-namespace entity would make the name ambiguous afterwards)
+    text = text.replace("namespace { class RcInnerPtr; }", "class RcInnerPtr;")
+    head = "namespace {\nclass RcInnerPtr {\n"
+    i = text.find(head)
+    if i != -1:
+        end = text.find("\n};\n}\n", i)
+        if end != -1:
+            text = text[:i] + "class RcInnerPtr {\n" + text[i + len(head):end] + "\n};\n" + text[end + len("\n};\n}\n"):]
+    if text == original:
+        return 0
+    path.write_text(text)
+    return 1
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -1154,6 +1183,7 @@ def main() -> int:
         ("string::String → rusty::String", patch_string_module_qualified_string),
         ("from_raw: ptr.byte_sub → address arithmetic", patch_from_raw_byte_sub),
         ("Cow forward-declaration stub", patch_cow_stub),
+        ("RcInnerPtr: module linkage (consumers reference its vtable)", patch_rc_inner_ptr_module_linkage),
         ("vendored hand-ports: from_box_in / UniqueRc::new_in / make_mut / clone_from_ref_in / deref shims / counters / data_ptr",
             patch_vendored_hand_ports),
     ]

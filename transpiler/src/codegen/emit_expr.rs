@@ -20231,11 +20231,21 @@ impl CodeGen {
                 .map(|seg| seg.ident.to_string())
                 .collect::<Vec<_>>()
                 .join("::");
+            // A bare `swap(..)` under `use core::mem::swap` resolves to the
+            // same callee (binary_heap's `pop`): key on the RESOLVED path.
+            let bare_swap_callee = (joined == "swap")
+                .then(|| {
+                    let f = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
+                    (f == "rusty::mem::swap" || f.ends_with("::mem::swap")).then_some(f)
+                })
+                .flatten();
             if matches!(
                 joined.as_str(),
                 "mem::swap" | "core::mem::swap" | "std::mem::swap" | "rusty::mem::swap"
-            ) {
-                let mut func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
+            ) || bare_swap_callee.is_some()
+            {
+                let mut func = bare_swap_callee
+                    .unwrap_or_else(|| self.emit_call_func_with_owner_template_recovery(call, expected_ty));
                 func = self.rewrite_seed_ctor_path_string(&func);
                 func = self.maybe_defer_static_owner_lookup_for_path_call(call, func);
                 let args: Vec<String> = call

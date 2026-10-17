@@ -3341,11 +3341,11 @@ return rusty::deref_call(this->alloc, rusty::detail::__mdisp_allocate{}, std::mo
             this->cap = ZERO_CAP;
         } else {
             auto ptr_shadow2 = ({ auto new_size = elem_layout.size * (std::move(cap));
-auto new_layout = Layout::from_size_align_unchecked(std::move(new_size), layout.align());
+auto new_layout = Layout::from_size_align_unchecked(std::move(new_size), layout.align);
 RUSTY_TRY_INTO(rusty::deref_call(this->alloc, rusty::detail::__mdisp_shrink{}, std::move(ptr_shadow1), std::move(layout), std::move(new_layout)).map_err([&](auto _closure_wild0) { return rusty::alloc::AllocError{.layout = std::move(new_layout), .non_exhaustive = std::make_tuple()}; }), rusty::Result<rusty::Unit, rusty::collections::TryReserveError>); });
             // @unsafe
             {
-                this->set_ptr_and_cap(std::move(ptr_shadow2), std::move(cap));
+                this->set_ptr_and_cap(rusty::ptr::NonNullSlice<uint8_t>(std::move(ptr_shadow2)), std::move(cap));
             }
         }
         return rusty::Result<rusty::Unit, rusty::collections::TryReserveError>::Ok(std::make_tuple());

@@ -3060,9 +3060,7 @@ struct Rc;
 export template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
 struct Weak;
-namespace {
 class RcInnerPtr;
-}
 export template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
 struct UniqueRc;
@@ -3108,7 +3106,7 @@ namespace RcFromSlice_ {
     template<class E0, class... E, class S, class... R> requires (!std::same_as<std::remove_cvref_t<S>, impl_::tag>) auto from_slice(S&& __self, R&&... __rest) -> decltype(from_slice<E0, E...>(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...)) { return from_slice<E0, E...>(impl_::tag{}, std::forward<S>(__self), std::forward<R>(__rest)...); }
 }
 template<class U> struct impls_RcInnerPtr : std::false_type {};
-namespace { class RcInnerPtr; }
+class RcInnerPtr;
 template<class U> concept has_tier1_RcInnerPtr = std::derived_from<std::remove_cvref_t<U>, RcInnerPtr>;
 template<class U> concept has_RcInnerPtr = impls_RcInnerPtr<std::remove_cvref_t<U>>::value || has_tier1_RcInnerPtr<U>;
 namespace RcInnerPtr_ {
@@ -3323,7 +3321,6 @@ template <class U> class RcInnerPtrAdapter;
 template <class U> class RcInnerPtrAdapterRef;
 template <class U> class RcInnerPtrAdapterRefMut;
 }
-namespace {
 class RcInnerPtr {
 public:
     virtual ~RcInnerPtr() noexcept(false) {}
@@ -3369,7 +3366,6 @@ protected:
     RcInnerPtr(RcInnerPtr&&) = default;
     RcInnerPtr& operator=(RcInnerPtr&&) = default;
 };
-}
 
 namespace {
 template <class U> class RcInnerPtrAdapter final : public RcInnerPtr {

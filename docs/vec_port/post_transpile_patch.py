@@ -877,6 +877,9 @@ def patch_layout_align_method_to_field(cpp_out: Path) -> int:
         text = text.replace("old_layout.align()", "old_layout.align")
         text = text.replace("new_layout.align()", "new_layout.align")
         text = text.replace("elem_layout.align()", "elem_layout.align")
+        # 2026-10: shrink_unchecked's local is plain `layout` (a value, not
+        # a method call site — `(layout).align()` would be the method).
+        text = re.sub(r"(?<![A-Za-z0-9_.])layout\.align\(\)", "layout.align", text)
         if text != original:
             path.write_text(text)
             n += 1
@@ -3211,7 +3214,12 @@ def patch_vendored_hand_edits_2026(cpp_out: Path) -> int:
       - retain_mut: `ptr::drop_in_place(cur)` where `cur: &mut T` auto-refs to a
         pointer in Rust; C++ needs `&cur`.
       - raw_vec from_raw_parts_in: `ptr.cast()` on a raw `*mut T` targets
-        `uint8_t*` (RawVecInner::from_raw_parts_in's parameter)."""
+        `uint8_t*` (RawVecInner::from_raw_parts_in's parameter).
+      - raw_vec shrink_unchecked: Rust's `Allocator::shrink` returns
+        `NonNull<[u8]>`, the runtime's (alloc.hpp) returns `NonNull<u8>`; the
+        `auto`-typed `ptr` then needs the EXPLICIT `NonNullSlice<uint8_t>`
+        conversion to reach `set_ptr_and_cap` (instantiated only by
+        shrink_to_fit — the matrix's binary_heap full_api test)."""
     n = 0
     f = cpp_out / "vec_port.vec.cppm"
     if f.exists():
@@ -3234,6 +3242,15 @@ def patch_vendored_hand_edits_2026(cpp_out: Path) -> int:
             body2 = body.replace("            auto ptr_shadow1 = ptr.cast();\n",
                                  "            auto ptr_shadow1 = reinterpret_cast<uint8_t*>(ptr);\n", 1)
             u = t[:i] + body2 + t[end:]
+        sig = "    auto shrink_unchecked(size_t cap, rusty::alloc::Layout elem_layout) -> "
+        i = u.find(sig)
+        if i != -1:
+            end = u.find("\n    }\n", i)
+            body = u[i:end]
+            body2 = body.replace(
+                "                this->set_ptr_and_cap(std::move(ptr_shadow2), std::move(cap));\n",
+                "                this->set_ptr_and_cap(rusty::ptr::NonNullSlice<uint8_t>(std::move(ptr_shadow2)), std::move(cap));\n", 1)
+            u = u[:i] + body2 + u[end:]
         if u != t:
             f.write_text(u); n += 1
     return n
