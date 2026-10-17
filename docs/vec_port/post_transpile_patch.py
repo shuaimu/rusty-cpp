@@ -669,11 +669,28 @@ struct SpecFromElem {
 template<typename T, typename Iter>
 struct SpecFromIter;
 
-// SpecExtend stub.
+// SpecExtend — generic fallback mirroring the Rust default impl (push each
+// item). The vendored port carried this as a hand edit: a no-op stub silently
+// broke `Vec::extend` (`v.extend(4..=6)` did nothing — parity row `vec`).
 template<typename T, typename Iter>
 struct SpecExtend {
     template<typename V, typename I>
-    static void spec_extend(V&, I) {}
+    static void spec_extend(V& vec, I iter) {
+        if constexpr (!requires { iter.next(); }) {
+            auto it = rusty::iter(iter);
+            while (true) {
+                auto next = it.next();
+                if (next.is_none()) break;
+                vec.push(rusty::detail::deref_if_pointer(next.unwrap()));
+            }
+        } else {
+            while (true) {
+                auto next = iter.next();
+                if (next.is_none()) break;
+                vec.push(rusty::detail::deref_if_pointer(next.unwrap()));
+            }
+        }
+    }
 };
 
 // SpecCloneIntoVec stub — bridge for slice::clone_from_slice.
@@ -3171,6 +3188,12 @@ def patch_inject_vec_ergonomic_members(cpp_out: Path) -> int:
     # The block's `T& operator[](I)` replaces the transpiled mutable
     # subscript (`index_mut` through the span deref — no member for a
     # ZST element's `std::span<std::tuple<>>`).
+    # `Vec::from_iter(I iter)`: `into_iter_value(std::array)` is the array
+    # itself (no `.next()`); the vendored body went through `rusty::iter`,
+    # which yields an iterator for arrays/ranges and is identity on iterators.
+    text = text.replace(
+        "        return SpecFromIter<T, typename rusty::detail::into_iter_t<I>>::from_iter(rusty::detail::into_iter_value(std::move(iter)));\n",
+        "        return SpecFromIter<T, I>::from_iter(rusty::iter(std::move(iter)));\n")
     text = text.replace(
         "    template<typename I>\n"
         "    decltype(auto) operator[](I index) {\n"

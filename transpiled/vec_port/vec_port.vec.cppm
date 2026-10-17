@@ -3071,11 +3071,28 @@ struct SpecFromElem {
 template<typename T, typename Iter>
 struct SpecFromIter;
 
-// SpecExtend stub.
+// SpecExtend — generic fallback mirroring the Rust default impl (push each
+// item). The vendored port carried this as a hand edit: a no-op stub silently
+// broke `Vec::extend` (`v.extend(4..=6)` did nothing — parity row `vec`).
 template<typename T, typename Iter>
 struct SpecExtend {
     template<typename V, typename I>
-    static void spec_extend(V&, I) {}
+    static void spec_extend(V& vec, I iter) {
+        if constexpr (!requires { iter.next(); }) {
+            auto it = rusty::iter(iter);
+            while (true) {
+                auto next = it.next();
+                if (next.is_none()) break;
+                vec.push(rusty::detail::deref_if_pointer(next.unwrap()));
+            }
+        } else {
+            while (true) {
+                auto next = iter.next();
+                if (next.is_none()) break;
+                vec.push(rusty::detail::deref_if_pointer(next.unwrap()));
+            }
+        }
+    }
 };
 
 // SpecCloneIntoVec stub — bridge for slice::clone_from_slice.
@@ -4924,7 +4941,7 @@ return ([&](auto&& __w, auto&& __v) -> decltype(auto) { if constexpr (requires {
     }
     template<typename I>
     static Vec<T> from_iter(I iter) {
-        return SpecFromIter<T, typename rusty::detail::into_iter_t<I>>::from_iter(rusty::detail::into_iter_value(std::move(iter)));
+        return SpecFromIter<T, I>::from_iter(rusty::iter(std::move(iter)));
     }
     IntoIter<T, A> into_iter() {
         // HAND-PORT: bypass ManuallyDrop wrapper + T::IS_ZST.
