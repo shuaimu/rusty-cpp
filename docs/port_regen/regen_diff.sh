@@ -145,6 +145,9 @@ case "$PORT" in
 esac
 ns_flag=()
 [[ -n "$CXX_NS" ]] && ns_flag=(--cxx-namespace "$CXX_NS")
+# btree_port is wrapped per MODULE (`namespace btree_port::btree::map {`):
+# the auto-namespace shape its patcher and the umbrella alias expect.
+[[ $PORT == btree_port ]] && ns_flag=(--auto-namespace)
 "$REPO_ROOT/target/release/rusty-cpp-transpiler" \
   --crate "$WORK/crate/Cargo.toml" --in-umbrella-closure "${ns_flag[@]}" --output-dir "$WORK/out" > "$WORK/transpile.log" 2>&1
 tx=$?

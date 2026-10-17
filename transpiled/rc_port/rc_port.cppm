@@ -4047,7 +4047,7 @@ return reinterpret_cast<std::add_pointer_t<RcInner<std::span<const rusty::MaybeU
     // Hand-written-Arc-compatibility extensions. Rust's std::rc::Rc<T>
     // only allows immutable access through operator*; consumers needing
     // mutation go through Cell<T> / RefCell<T>. The hand-written legacy
-    // `Rc<T>` exposed mutable access freely via `rc->`, so the
+    // `rusty::Rc<T>` exposed mutable access freely via `rc->`, so the
     // mako rrr codebase (and ported transaction protocols) call `rc->m`
     // and `rc.get()` directly. Surface these here to keep that code
     // building after the rusty::Rc alias was retargeted at this
@@ -4687,7 +4687,6 @@ rusty::alloc::Layout rc_inner_layout_for_value_layout(rusty::alloc::Layout layou
 // trait impl for `Pin` lowered via the Default_ free functions above
 
 #if 0  // patcher: orphan-impl block stubbed
-#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `T` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -4702,7 +4701,6 @@ rusty::alloc::Layout rc_inner_layout_for_value_layout(rusty::alloc::Layout layou
 
 // trait impl for `I` lowered via the ToRcSlice_ free functions above
 
-#endif  // patcher: end orphan-impl stub
 #endif  // patcher: end orphan-impl stub
 export template<typename T>
 bool is_dangling(std::add_pointer_t<std::add_const_t<T>> ptr) {
