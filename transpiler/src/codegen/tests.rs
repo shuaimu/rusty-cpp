@@ -35096,9 +35096,13 @@ fn test_leaf41543333333151_result_match_stmt_with_nested_struct_pattern_uses_run
     "#,
     );
     assert!((out.contains("if (_m.is_err()) {") || out.contains("if (rusty::detail::deref_if_pointer(_m).is_err()) {")));
-    assert!(!out.contains("unwrap_err()"));
-    assert!(!out.contains("std::visit(overloaded {"));
-    assert!(!out.contains("complex tuple-struct pattern binding"));
+    // The negative checks are about the MATCH lowering, so scope them to the
+    // function body: `panic!("{:?}", e)` legitimately pulls in the Debug
+    // prelude block, whose `Result` branch spells `value.unwrap_err()`.
+    let body = &out[out.rfind("void f(rusty::Result").expect("f's definition")..];
+    assert!(!body.contains("unwrap_err()"));
+    assert!(!body.contains("std::visit(overloaded {"));
+    assert!(!body.contains("complex tuple-struct pattern binding"));
 }
 
 #[test]
