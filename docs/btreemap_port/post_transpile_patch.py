@@ -427,7 +427,9 @@ def hide_template_free_misroutes(path: Path) -> None:
             # a hidden cluster and isn't safe to wrap with this naive
             # method).
             if any(inside_skip[k] for k in range(sig_start, method_end + 1)):
-                i = method_end + 1
+                # The backward signature walk can land on a method that CLOSES
+                # before this line (lane-namespace output): never move back.
+                i = max(i + 1, method_end + 1)
                 continue
             # Wrap.
             out[sig_start] = (
@@ -437,7 +439,7 @@ def hide_template_free_misroutes(path: Path) -> None:
             for k in range(sig_start, method_end + 1):
                 inside_skip[k] = True
             wrapped.append((sig_start, method_end))
-            i = method_end + 1
+            i = max(i + 1, method_end + 1)
             continue
         i += 1
 
@@ -6990,6 +6992,29 @@ def _run_auto_namespace_postprocess(cpp_out_dir: Path) -> None:
         print(f"  [warn] auto-namespace postprocess failed: {exc}")
 
 
+def fix_2026_lane_shapes(path: Path) -> None:
+    """2026-10 transpiler shapes in btree_internal.cppm:
+      - `struct SetValZST : public IsSetVal {` — the local marker trait became a
+        tier-2 interface base, which makes `SetValZST{}` / `return {}` ill-formed
+        (no aggregate, no default ctor); the vendored port's SetValZST has no base.
+      - `Handle<Q, …>::new_edge(std::move((*this)), …)` — the owner's node type
+        was taken from the enclosing fn's `Q` key param; the receiver's own type
+        is the node (the vendored spelling)."""
+    src = path.read_text()
+    original = src
+    src = src.replace("export struct SetValZST : public IsSetVal {", "export struct SetValZST {")
+    # The defaulted copy/move ctors suppress the implicit default ctor (and
+    # aggregate-ness): `SetValZST{}` / `return {}` need one.
+    if "SetValZST() = default;" not in src:
+        src = src.replace("export struct SetValZST {\n", "export struct SetValZST {\n    SetValZST() = default;\n", 1)
+    src = src.replace(
+        "Handle<Q, ::btree_port::btree::btree_internal::marker::Edge>::new_edge(std::move((*this))",
+        "Handle<std::remove_cvref_t<decltype((*this))>, ::btree_port::btree::btree_internal::marker::Edge>::new_edge(std::move((*this))")
+    if src != original:
+        path.write_text(src)
+        print(f"  applied 2026 lane-shape fixes in: {path.name}")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -7083,6 +7108,7 @@ def main() -> int:
             fix_noderef_borrow_mut_auto_ref(p)
             fix_occupied_entry_no_template_args(p)
     patch_internal(internal)
+    fix_2026_lane_shapes(internal)
     # Phase B: replace stubs with real impls. Runs AFTER patch_internal
     # so that on fresh transpile output we first install the stub
     # (which makes the templated method parse) and then immediately
