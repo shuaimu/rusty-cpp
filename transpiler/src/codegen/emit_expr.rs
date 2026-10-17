@@ -2783,6 +2783,14 @@ impl CodeGen {
                 // which aborted even in unwind mode.
                 if tokens.is_empty() {
                     self.writeln("rusty::panic::do_panic(\"explicit panic\");");
+                } else if self.format_tokens_need_smart_lowering(&tokens) {
+                    // `panic!("index {index} out of {len}")`: inline-named
+                    // arguments are not std::format syntax — share format!'s
+                    // smart lowering (the raw text made the enclosing lambda
+                    // an immediate function, "cannot take address of
+                    // immediate call operator").
+                    let formatted = self.lower_format_like_tokens(&tokens);
+                    self.writeln(&format!("rusty::panic::do_panic({});", formatted));
                 } else {
                     let args = self.convert_format_args(&tokens);
                     self.writeln(&format!("rusty::panic::do_panic(std::format({}));", args));
@@ -3160,6 +3168,9 @@ impl CodeGen {
                 // (unwind), -DRUSTY_PANIC_ABORT prints + aborts.
                 if tokens.is_empty() {
                     "rusty::panic::do_panic(\"explicit panic\")".to_string()
+                } else if self.format_tokens_need_smart_lowering(&tokens) {
+                    let formatted = self.lower_format_like_tokens(&tokens);
+                    format!("rusty::panic::do_panic({})", formatted)
                 } else {
                     let args = self.convert_format_args(&tokens);
                     format!("rusty::panic::do_panic(std::format({}))", args)

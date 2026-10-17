@@ -2121,6 +2121,12 @@ def patch_as_mut_slice_pointer_wrap(cpp_out: Path) -> int:
             r"std::span<\1> \2 = rusty::as_mut_slice(",
             text,
         )
+        # 2026-10 spelling: the receiver is the member call.
+        text = re.sub(
+            r"std::add_pointer_t<std::span<([^>]+)>>\s+(\w+)\s*=\s*this->as_mut_slice\(",
+            r"std::span<\1> \2 = this->as_mut_slice(",
+            text,
+        )
         if text != original:
             path.write_text(text)
             n += 1
@@ -3176,6 +3182,40 @@ def patch_inject_vec_ergonomic_members(cpp_out: Path) -> int:
     return 1
 
 
+def patch_vendored_hand_edits_2026(cpp_out: Path) -> int:
+    """Hand edits the vendored vec_port carried without a rule (surfaced by the
+    parity matrix's instantiations, not the module suites):
+      - retain_mut: `ptr::drop_in_place(cur)` where `cur: &mut T` auto-refs to a
+        pointer in Rust; C++ needs `&cur`.
+      - raw_vec from_raw_parts_in: `ptr.cast()` on a raw `*mut T` targets
+        `uint8_t*` (RawVecInner::from_raw_parts_in's parameter)."""
+    n = 0
+    f = cpp_out / "vec_port.vec.cppm"
+    if f.exists():
+        t = f.read_text()
+        u = t.replace("                    rusty::ptr::drop_in_place(cur);\n",
+                      "                    rusty::ptr::drop_in_place(&cur);\n")
+        if u != t:
+            f.write_text(u); n += 1
+    f = cpp_out / "vec_port.raw_vec.cppm"
+    if f.exists():
+        t = f.read_text()
+        # Only the RAW-pointer overload (`from_raw_parts_in(std::add_pointer_t<T> ptr, …)`);
+        # `from_nonnull_in(NonNull<T> ptr, …)` right after it keeps `ptr.cast()`.
+        u = t
+        sig = "    static RawVec<T, A> from_raw_parts_in(std::add_pointer_t<T> ptr, size_t capacity, A alloc) {\n"
+        i = t.find(sig)
+        if i != -1:
+            end = t.find("\n    }\n", i)
+            body = t[i:end]
+            body2 = body.replace("            auto ptr_shadow1 = ptr.cast();\n",
+                                 "            auto ptr_shadow1 = reinterpret_cast<uint8_t*>(ptr);\n", 1)
+            u = t[:i] + body2 + t[end:]
+        if u != t:
+            f.write_text(u); n += 1
+    return n
+
+
 def main(cpp_out: Path):
     patches = [
         ("set_len_on_drop copy-assign", patch_set_len_on_drop_copy_assign),
@@ -3318,6 +3358,8 @@ def main(cpp_out: Path):
             patch_strip_cast_as_non_null_ptr_late),
         ("inject the vendored hand-written Vec ergonomic members (ctors, operator[], iterators, …)",
             patch_inject_vec_ergonomic_members),
+        ("vendored hand edits: retain_mut &cur, from_raw_parts_in uint8_t* cast",
+            patch_vendored_hand_edits_2026),
         # The into_iter anchors spell `rusty::from_raw_parts_mut`, which only
         # exists AFTER the bare-namespace rewrite above; the early pass sees
         # `slice::from_raw_parts_mut` and skips. Idempotent, so run it again.

@@ -4397,7 +4397,7 @@ struct Vec {
     }
     T swap_remove(size_t index) {
         const rusty::SafeFn<void(size_t, size_t)> assert_failed = +[](size_t index, size_t len) {
-            rusty::panic::do_panic(std::format("swap_remove index (is {index}) should be < len (is {len})"));
+            rusty::panic::do_panic(std::format("swap_remove index (is {0}) should be < len (is {1})", index, len));
         };
         const auto len = this->len();
         if (rusty::detail::deref_if_pointer_like(index) >= rusty::detail::deref_if_pointer_like(len)) {
@@ -4417,7 +4417,7 @@ struct Vec {
     }
     T& insert_mut(size_t index, T element) {
         const rusty::SafeFn<void(size_t, size_t)> assert_failed = +[](size_t index, size_t len) {
-            rusty::panic::do_panic(std::format("insertion index (is {index}) should be <= len (is {len})"));
+            rusty::panic::do_panic(std::format("insertion index (is {0}) should be <= len (is {1})", index, len));
         };
         auto len = this->len();
         if (rusty::detail::deref_if_pointer_like(index) > rusty::detail::deref_if_pointer_like(len)) {
@@ -4441,7 +4441,7 @@ struct Vec {
     }
     T remove(size_t index) {
         const rusty::SafeFn<void(size_t, size_t)> assert_failed = +[](size_t index, size_t len) {
-            rusty::panic::do_panic(std::format("removal index (is {index}) should be < len (is {len})"));
+            rusty::panic::do_panic(std::format("removal index (is {0}) should be < len (is {1})", index, len));
         };
         return [&]() -> T { auto&& _m = this->try_remove(std::move(index)); if (rusty::detail::deref_if_pointer(_m).is_some()) { return rusty::detail::deref_if_pointer(_m).unwrap(); } if (rusty::detail::deref_if_pointer(_m).is_none()) { assert_failed(std::move(index), this->len()); } return [&]() -> T { rusty::intrinsics::unreachable_panic(); }(); }();
     }
@@ -4528,7 +4528,7 @@ struct Vec {
                 g.read += 1;
                 // @unsafe
                 {
-                    rusty::ptr::drop_in_place(cur);
+                    rusty::ptr::drop_in_place(&cur);
                 }
             } else {
                 // @unsafe
@@ -4702,7 +4702,7 @@ return same_bucket(*current, *prev); }();
         }
     }
     void clear() {
-        const std::add_pointer_t<std::span<T>> elems = this->as_mut_slice();
+        const std::span<T> elems = this->as_mut_slice();
         // @unsafe
         {
             this->len_field = static_cast<size_t>(0);
@@ -4722,7 +4722,7 @@ return same_bucket(*current, *prev); }();
     }
     Vec<T, A> split_off(size_t at) {
         const rusty::SafeFn<void(size_t, size_t)> assert_failed = +[](size_t at, size_t len) {
-            rusty::panic::do_panic(std::format("`at` split index (is {at}) should be <= len (is {len})"));
+            rusty::panic::do_panic(std::format("`at` split index (is {0}) should be <= len (is {1})", at, len));
         };
         if (rusty::detail::deref_if_pointer_like(at) > this->len()) {
             assert_failed(std::move(at), this->len());
