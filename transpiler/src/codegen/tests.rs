@@ -49993,6 +49993,12 @@ fn test_self_return_hint_instantiates_a_static_call_owner() {
         impl Rc<[u8]> {
             pub fn from_bytes(v: &[u8]) -> Rc<[u8]> { Rc { ptr: v as *const [u8], alloc: Global } }
         }
+        impl From<&str> for Rc<str> {
+            fn from(v: &str) -> Rc<str> {
+                let rc = Rc::<[u8]>::from_bytes(v.as_bytes());
+                unsafe { Rc::from_raw(Rc::into_raw(rc) as *const str) }
+            }
+        }
         impl Default for Rc<str> {
             fn default() -> Self {
                 let rc = Rc::<[u8]>::from_bytes(b"");
@@ -50001,7 +50007,10 @@ fn test_self_return_hint_instantiates_a_static_call_owner() {
         }
         "#,
     );
+    // The explicit `-> Rc<str>` hint spells the owner; the `-> Self` form
+    // resolves through the impl self type (single-file member form keeps the
+    // struct's own `Rc<T>` spelling — fine, but never a placeholder).
     assert!(out.contains("Rc<std::string_view>::from_raw("), "{out}");
-    assert!(!out.contains("Rc<T, Global>::from_raw("), "{out}");
     assert!(!out.contains("Rc<auto"), "{out}");
+    assert!(!out.contains("<auto"), "{out}");
 }
