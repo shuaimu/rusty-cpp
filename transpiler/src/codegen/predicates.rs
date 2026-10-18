@@ -950,7 +950,10 @@ impl CodeGen {
         let name = path.segments.last()?.ident.to_string();
         let op = map_operator_trait(&name)?;
         let key = self.resolve_trait_scoped_key_for_impl(path, module_path);
-        if self.trait_declared_paths.contains(&key) {
+        // A key the foreign-lane synthesis registered is the std trait itself
+        // (`impl PartialEq<Local> for str` gave PartialEq a lane), not a
+        // crate-local namesake: the local impls keep their operator.
+        if self.trait_declared_paths.contains(&key) && !self.foreign_lane_trait_keys.contains(&key) {
             return None;
         }
         Some(op.to_string())

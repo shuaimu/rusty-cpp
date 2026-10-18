@@ -6355,7 +6355,22 @@ impl CodeGen {
         let syn::Type::Path(tp) = receiver_ty else {
             return None;
         };
-        let type_name = tp.path.segments.last()?.ident.to_string();
+        let mut type_name = tp.path.segments.last()?.ident.to_string();
+        // Inside a UFCS lane body the receiver is bound as `self_: &Self` and
+        // the current struct IS `Self`; the deref map is keyed on the impl's
+        // self type, which the lane emitter records as the method's self type.
+        if type_name == "Self" {
+            type_name = self
+                .current_impl_method_self_tys
+                .last()
+                .and_then(|ty| ty.as_ref())
+                .and_then(|ty| match self.peel_reference_paren_group_type(ty) {
+                    syn::Type::Path(owner) => owner.path.segments.last().map(|s| s.ident.to_string()),
+                    _ => None,
+                })
+                .filter(|owner| owner != "Self")
+                .or_else(|| self.current_struct.clone().filter(|owner| owner != "Self"))?;
+        }
 
         // The receiver's type must implement a user `Deref`.
         let target = self
@@ -14444,6 +14459,15 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if let Some(mapped) = self.try_emit_standard_future_pending(expr, expected_ty) { return mapped; }
+        // A value-position `const { EXPR }` (a struct field init, a `let`
+        // initializer) IS its tail expression, evaluated at compile time;
+        // only a fence-shaped block (a macro tail such as `assert!`) has
+        // nothing to produce. The expected type travels to the tail: a
+        // data-enum tail (`if HAS_PREFIXES { State::Prefix } else {
+        // State::StartDir }`) needs it to spell the variant.
+        if let Some(tail) = Self::const_block_value_tail(expr) {
+            return self.emit_expr_to_string_with_expected(tail, expected_ty);
+        }
         // Book §3.2.10: `let d: &dyn Tr = &x;` over a tier-2 value — the
         // forwarder temporary is lifetime-extended by the `const Tr&` binding.
         if let Some(wrapped) = self.try_emit_interface_traits_dyn_ref_coercion(expr, expected_ty) {
@@ -25850,6 +25874,19 @@ impl CodeGen {
         ))
     }
 
+    /// The tail of a value-producing `const { EXPR }` block: exactly one
+    /// statement, an expression without a semicolon, and not a macro call
+    /// (`const { assert!(..) }` is a compile-time fence with no value).
+    pub(super) fn const_block_value_tail(expr: &syn::Expr) -> Option<&syn::Expr> {
+        let syn::Expr::Const(inline_const) = expr else {
+            return None;
+        };
+        match inline_const.block.stmts.as_slice() {
+            [syn::Stmt::Expr(tail, None)] if !matches!(tail, syn::Expr::Macro(_)) => Some(tail),
+            _ => None,
+        }
+    }
+
     pub(super) fn emit_expr_to_string(&self, expr: &syn::Expr) -> String {
         if let Some(mapped) = self.try_emit_standard_future_pending(expr, None) { return mapped; }
         match expr {
@@ -26742,9 +26779,10 @@ impl CodeGen {
             // tail) lower to a comment + `(void)0` so the surrounding
             // expression context stays well-formed without injecting a
             // runtime `unreachable()` call.
-            syn::Expr::Const(_) => {
-                "/* const-block elided (Rust 2024 compile-time fence) */ (void)0".to_string()
-            }
+            syn::Expr::Const(_) => match Self::const_block_value_tail(expr) {
+                Some(tail) => self.emit_expr_to_string(tail),
+                None => "/* const-block elided (Rust 2024 compile-time fence) */ (void)0".to_string(),
+            },
             // An expression kind with no lowering here (a value-position
             // `loop`/`while`/`for`, a bare `let`, `yield`, a try block,
             // verbatim tokens): fail closed. The placeholder still compiles

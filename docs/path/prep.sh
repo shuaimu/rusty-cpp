@@ -260,6 +260,13 @@ for a in ("pub fn into_boxed_path(self)",
           "impl From<&mut Path> for Rc<Path>",
           "impl From<&Path> for Box<Path>", "impl From<&mut Path> for Box<Path>",
           "impl From<Cow<'_, Path>> for Box<Path>",
+          # Cow<'a, Path> conversions: the runtime's Cow is the str/String
+          # variant pair (no generic Cow<T>), so `Cow<Path>` has no C++ shape;
+          # the emitter spells the impl type `::borrow::Cow<Path>` (a Rust-only
+          # crate path, see the `using ::borrow::` strip in the patcher).
+          "impl<'a> From<&'a Path> for Cow<'a, Path>",
+          "impl<'a> From<PathBuf> for Cow<'a, Path>",
+          "impl<'a> From<&'a PathBuf> for Cow<'a, Path>",
           "impl Clone for Box<Path>", "pub fn into_path_buf(self: Box<Self>)",
           "impl FromStr for PathBuf",
           "impl<'a> From<Cow<'a, Path>> for PathBuf",

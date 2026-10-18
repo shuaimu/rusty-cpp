@@ -2202,6 +2202,14 @@ pub struct CodeGen {
     /// worked example (54 such symbols), while rrr.serializable's `Serialize`
     /// and `Deserialize` DO own theirs and are deliberately unmarked.
     pub(crate) ufcs_internal_linkage_traits: HashSet<String>,
+    /// Trait keys that `synthesize_foreign_trait_lanes` registered into
+    /// `trait_declared_paths` on its own (a std trait implemented here for a
+    /// non-local self type — `impl PartialEq<Local> for str`). The lane
+    /// needs the registration for its dispatch, but the trait is NOT a
+    /// declaration of this crate: a std operator trait keeps its C++
+    /// operator spelling on the local impls, which `operator_trait_cpp_name_
+    /// for_impl` would otherwise suppress as a same-named local trait.
+    pub(crate) foreign_lane_trait_keys: HashSet<String>,
     /// `impl Trait for Type` provenance for methods merged into a concrete
     /// class: type tail name → method name → trait leaf name.  Lets emission
     /// distinguish a private trait's plumbing (contract 7: no ordinary strong
@@ -3760,6 +3768,7 @@ impl CodeGen {
             internal_linkage_traits: HashSet::new(),
             ufcs_emitting_internal_linkage_trait: false,
             ufcs_internal_linkage_traits: HashSet::new(),
+            foreign_lane_trait_keys: HashSet::new(),
             impl_method_source_trait: HashMap::new(),
             standard_wake_methods: HashMap::new(),
             cpp_marker_trait_paths: HashSet::new(),
@@ -24463,7 +24472,9 @@ impl CodeGen {
                     declared.push(m.clone());
                 }
             }
-            self.trait_declared_paths.insert(f.key.clone());
+            if self.trait_declared_paths.insert(f.key.clone()) {
+                self.foreign_lane_trait_keys.insert(f.key.clone());
+            }
             self.trait_declared_path_by_short_name
                 .entry(f.leaf.clone())
                 .or_insert_with(|| f.key.clone());

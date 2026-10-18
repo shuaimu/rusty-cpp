@@ -216,7 +216,12 @@ def patch(text: str) -> str:
         required=False,
     )
 
-    # `const { … }` blocks are elided to `(void)0`. On Unix:
+    # `const { … }` blocks used to be elided to `(void)0` everywhere. The
+    # transpiler now lowers a VALUE-position const block to its tail
+    # expression (2026-10-18: `if const { !HAS_PREFIXES }` ->
+    # `if (rust_not(HAS_PREFIXES))`, the Components front init -> a ternary
+    # over the State values), so both anchors below are obsolete and stay
+    # optional only to re-announce a regression. On Unix they rewrote:
     #  - `if const { !HAS_PREFIXES }`  ->  if (true)
     #  - Components front init `const { if HAS_PREFIXES {Prefix} else {StartDir} }`
     #    ->  State_StartDir()

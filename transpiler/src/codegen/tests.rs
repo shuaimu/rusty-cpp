@@ -50079,3 +50079,128 @@ fn test_self_return_hint_instantiates_a_static_call_owner() {
     assert!(!out.contains("Rc<auto"), "{out}");
     assert!(!out.contains("<auto"), "{out}");
 }
+
+#[test]
+fn test_foreign_self_partialeq_impl_keeps_local_operator_eq() {
+    // `impl PartialEq<A> for str` gives PartialEq a foreign-trait lane (the
+    // str side has no C++ member to carry it). That registration must not
+    // make PartialEq look like a crate-local namesake: the local impls keep
+    // their `operator==` (or `a == b` has no operator at all).
+    let out = transpile_str(
+        r#"
+        pub struct A { pub x: i32 }
+        impl PartialEq for A {
+            fn eq(&self, o: &A) -> bool { self.x == o.x }
+        }
+        impl PartialEq<str> for A {
+            fn eq(&self, o: &str) -> bool { self.x == o.len() as i32 }
+        }
+        impl PartialEq<A> for str {
+            fn eq(&self, o: &A) -> bool { o == self }
+        }
+        pub fn f(a: &A, b: &A) -> bool { a == b }
+        "#,
+    );
+    assert!(out.contains("bool operator==(const A& o) const;"), "{out}");
+    assert!(out.contains("bool operator==(std::string_view o) const;"), "{out}");
+    assert!(!out.contains("bool eq(const A& o) const;"), "{out}");
+    // The lane itself stays: the str-side body lives there.
+    assert!(
+        out.contains("eq(PartialEq_::impl_::tag, const std::string_view& self_, const A& o)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_unresolved_qualified_partialeq_foreign_impl_keeps_local_operator_eq() {
+    // std's path.rs shape: `use crate::cmp;` + `impl cmp::PartialEq<X> for
+    // str`. The import is unresolvable in a single-file crate, so the lane
+    // key is an `@unresolved-trait::` one — still not a local declaration.
+    let out = transpile_str(
+        r#"
+        use crate::cmp;
+        pub struct A { pub x: i32 }
+        impl PartialEq for A {
+            fn eq(&self, o: &A) -> bool { self.x == o.x }
+        }
+        impl cmp::PartialEq<str> for A {
+            fn eq(&self, o: &str) -> bool { self.x == o.len() as i32 }
+        }
+        impl cmp::PartialEq<A> for str {
+            fn eq(&self, o: &A) -> bool { o == self }
+        }
+        "#,
+    );
+    assert!(out.contains("bool operator==(const A& o) const;"), "{out}");
+    assert!(out.contains("bool operator==(std::string_view o) const;"), "{out}");
+    assert!(!out.contains("bool eq(const A& o) const;"), "{out}");
+}
+
+#[test]
+fn test_value_position_const_block_is_its_tail_expression() {
+    // A Rust 2024 `const { EXPR }` in VALUE position (std path.rs:
+    // `front: const { if HAS_PREFIXES { State::Prefix } else { State::StartDir } }`)
+    // is its tail; only a fence (`const { assert!(..) }`) is elided.
+    let out = transpile_str(
+        r#"
+        const N: usize = 4;
+        pub struct S { pub n: usize, pub m: usize }
+        pub fn mk() -> S {
+            S { n: const { N * 2 }, m: const { if N > 2 { 1 } else { 0 } } }
+        }
+        pub fn fence() -> i32 {
+            const { assert!(N == 4); }
+            7
+        }
+        "#,
+    );
+    assert!(!out.contains(".n = /* const-block elided"), "{out}");
+    assert!(out.contains("* static_cast<size_t>(2)"), "{out}");
+    assert!(!out.contains(".m = /* const-block elided"), "{out}");
+    assert!(out.contains("? static_cast<size_t>(1) : static_cast<size_t>(0)"), "{out}");
+    let fence = out.find("int32_t fence()").map(|i| &out[i..]).unwrap_or("");
+    assert!(fence.contains("const-block elided"), "{out}");
+    assert!(
+        fence.contains("return static_cast<int32_t>(7);") || fence.contains("return 7;"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_ufcs_lane_body_keeps_user_deref_route_on_self() {
+    // The lane copy of a method body binds the receiver as `self_: &Self`;
+    // a call that resolves through the owner's `Deref` target must still
+    // take the deref route there (the member copy already did).
+    let out = transpile_str(
+        r#"
+        use std::ops::Deref;
+        pub struct Comps { pub n: usize }
+        impl PartialEq for Comps {
+            fn eq(&self, o: &Comps) -> bool { self.n == o.n }
+        }
+        pub struct P { pub inner: String }
+        impl P {
+            pub fn components(&self) -> Comps { Comps { n: self.inner.len() } }
+        }
+        pub struct PB { pub inner: String }
+        impl PB {
+            pub fn as_path(&self) -> &P { unsafe { &*(self as *const PB as *const P) } }
+        }
+        impl Deref for PB {
+            type Target = P;
+            fn deref(&self) -> &P { self.as_path() }
+        }
+        impl PartialEq for PB {
+            fn eq(&self, o: &PB) -> bool { self.components() == o.components() }
+        }
+        impl PartialEq<PB> for str {
+            fn eq(&self, o: &PB) -> bool { o.inner.as_str() == self }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::detail::deref_if_pointer_like(self_).components()"),
+        "{out}"
+    );
+    assert!(!out.contains("return self_.components()"), "{out}");
+}
