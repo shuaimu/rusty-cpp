@@ -567,6 +567,157 @@ def _arc_rules(t: str) -> str:
     return t
 
 
+def _strip_anonymous_namespace_around_class(t: str, cls: str) -> str:
+    """rc_port `patch_rc_inner_ptr_module_linkage`, module-indented: a private
+    trait's interface class is emitted in an anonymous namespace, but the
+    exported structs derive from it, so a CONSUMER TU (the runtime test)
+    that instantiates them cannot reach its vtable / its (protected,
+    defaulted) ctors — "no matching constructor for initialization of
+    '::rc::RcInnerPtr'" from the implicit move ctor of WeakInner. Give the
+    class module linkage: drop the anonymous-namespace wrapper around every
+    forward declaration and around the definition (brace-tracked)."""
+    t = re.sub(r"namespace \{\s*class " + cls + r";\s*\}", "class " + cls + ";", t)
+    m = re.search(r"\n( *)namespace \{\n\1class " + cls + r" \{\n", t)
+    if not m:
+        return t
+    indent = m.group(1)
+    start = m.start() + 1
+    body_start = t.index("class " + cls + " {", start)
+    # the class ends at the first `\n<indent>};` after its start, the anonymous
+    # namespace at the following `\n<indent>}`
+    cls_end = t.index("\n" + indent + "};\n", body_start) + len("\n" + indent + "};\n")
+    ns_close = "\n" + indent + "}\n"
+    if t[cls_end - 1:cls_end - 1 + len(ns_close)] != ns_close:
+        return t
+    return t[:start] + t[body_start:cls_end] + t[cls_end - 1 + len(ns_close):]
+
+
+def _deduce_handle_factory_owners(src: str) -> str:
+    """btreemap_port `fix_handle_factory_owner_recovery`, text-level.
+    `Handle::new_edge(node, idx)` / `Handle::new_kv(node, idx)` are static
+    factories on `Handle<Node, Type>` whose NODE type is exactly the first
+    argument's type. The transpiler recovers the owner from whatever generic
+    is in scope or from the enclosing method's own Node (`Leaf` where the
+    argument is a LeafOrInternal node), so the factory returns
+    `Handle<NodeRef<.., Leaf>, Edge>` for a LeafOrInternal argument and the
+    `Err(pos) => Handle::new_edge(pos, idx)` arm of remove_leaf_kv's
+    `new_pos` match does not convert. Deduce the owner from the argument
+    wherever it is `std::move(X)` or `this->reborrow_mut()`."""
+    n = 0
+    pos = 0
+    while True:
+        cands = [c for c in (src.find(">::new_edge(", pos), src.find(">::new_kv(", pos)) if c != -1]
+        if not cands:
+            break
+        j = min(cands)
+        depth = 0
+        k = j
+        while k >= 0:
+            c = src[k]
+            if c == ">":
+                depth += 1
+            elif c == "<":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        start = k - len("Handle")
+        if k < 0 or src[start:k] != "Handle" or (start > 0 and (src[start - 1].isalnum() or src[start - 1] in "_:")):
+            pos = j + 1
+            continue
+        inner = src[k + 1:j]
+        d = 0
+        split_at = None
+        for idx_c, c in enumerate(inner):
+            if c == "<":
+                d += 1
+            elif c == ">":
+                d -= 1
+            elif c == "," and d == 0:
+                split_at = idx_c
+        if split_at is None:
+            pos = j + 1
+            continue
+        owner = inner[:split_at]
+        if owner.startswith("std::remove_cvref_t<decltype("):
+            pos = j + 1
+            continue
+        paren = src.index("(", j + 2)
+        d = 0
+        end = None
+        for idx_c in range(paren + 1, len(src)):
+            c = src[idx_c]
+            if c in "([{":
+                d += 1
+            elif c in ")]}":
+                if d == 0:
+                    end = idx_c
+                    break
+                d -= 1
+            elif c == "," and d == 0:
+                end = idx_c
+                break
+        if end is None:
+            pos = j + 1
+            continue
+        arg = src[paren + 1:end].strip()
+        if arg.startswith("std::move(") and arg.endswith(")"):
+            node_expr = arg[len("std::move("):-1]
+        elif arg == "this->reborrow_mut()":
+            node_expr = arg
+        else:
+            pos = j + 1
+            continue
+        new_owner = f"std::remove_cvref_t<decltype(({node_expr}))>"
+        src = src[:k + 1] + new_owner + src[k + 1 + len(owner):]
+        n += 1
+        pos = k + 1 + len(new_owner)
+    return src
+
+
+def _instantiation_surface_rules(t: str) -> str:
+    """Shapes that only fail once the runtime test instantiates concrete
+    types (the BMI precompile never does). Each mirrors a rule the
+    regenerated standalone port patchers carry (file-keyed there)."""
+    # rc / sync: private-trait interface classes must have module linkage.
+    for cls in ("RcInnerPtr", "ArcInnerPtr"):
+        t = _strip_anonymous_namespace_around_class(t, cls)
+    # rc_port `patch_rcinner_methods` 2: a count read is the field's Cell/Atomic
+    # value. `.strong()`/`.weak()` on an inner object → `.strong.get()` /
+    # `.weak.get()` (the dot prefix excludes inc_/dec_/_ref spellings); the
+    # tier-1 default-method forwarders (`__self.weak()`: WeakInner's FIELD
+    # `weak` hides the interface's `weak()`) read through the accessor the
+    # trait does define.
+    t = re.sub(r"__self\.strong\(\)", "__self.strong_ref().get()", t)
+    t = re.sub(r"__self\.weak\(\)", "__self.weak_ref().get()", t)
+    t = re.sub(r"(?<!__self)\.strong\(\)", ".strong.get()", t)
+    t = re.sub(r"(?<!__self)\.weak\(\)", ".weak.get()", t)
+    # btreemap_port `fix_as_leaf_ptr_self`: `Self::as_leaf_ptr(self)` (a
+    # `this_: &Self` static) is emitted as a member call through `->` on the
+    # object, `((*this))->as_leaf_ptr()`; pass the receiver explicitly.
+    t = t.replace("((*this))->as_leaf_ptr((*this))", "as_leaf_ptr((*this))")
+    t = t.replace("((*this))->as_leaf_ptr()", "as_leaf_ptr((*this))")
+    t = re.sub(r"(?<![\w:>])as_leaf_ptr\(\)", "as_leaf_ptr((*this))", t)
+    # VacantEntry::insert_entry: `let root = map.root.insert(..)` is `&mut Root`
+    # (Option::insert returns a reference); `const auto root = ...insert(..)`
+    # copies it const, and `root.borrow_mut()` needs the live mutable node.
+    t = re.sub(
+        r"const auto root = (\[&\]\(auto&& __r\) -> decltype\(auto\) \{ if constexpr \(requires \{ \(__r\.root\); \}\)[^\n]*?\}\(map\)\.insert\()",
+        r"auto&& root = \1",
+        t,
+    )
+    t = _deduce_handle_factory_owners(t)
+    # binary_heap_port P14 (`patch_hole_dtor_copy_nonoverlapping_address`):
+    # Hole::~Hole — `copy_nonoverlapping(.., this->data[pos], 1)` needs the
+    # element's address.
+    t = re.sub(
+        r"(rusty::ptr::copy_nonoverlapping\([^;]+?,\s*)(?<![&])this->data\[",
+        r"\1&this->data[",
+        t,
+    )
+    return t
+
+
 def _alloc_specific(cpp_out: Path):
     """Rules the per-port patchers apply per-FILE (so they miss the single
     module) or that only arise in the consolidated crate. Applied glob-wide."""
@@ -756,6 +907,7 @@ def _alloc_specific(cpp_out: Path):
         # rc.rs (Rc/Weak) + sync.rs (Arc) rules.
         t = _rc_rules(t)
         t = _arc_rules(t)
+        t = _instantiation_surface_rules(t)
         # Stub next_chunk (ill-formed rusty::array::IntoIter return type poisons
         # the enclosing IntoIter class → cascades to clone/next_back "not a
         # member").
