@@ -7625,6 +7625,60 @@ fn owning_pointer_reborrow_keeps_payload_dereference() {
 }
 
 #[test]
+fn ufcs_lane_definitions_naming_a_later_type_by_value_compile() {
+    // lion-reactor: `mod os`'s OsBackend precedes `mod types` in source, so
+    // its dyn adapter's inline overrides took `types::interest::Interest` by
+    // value before Interest was defined ("variable has incomplete type").
+    // srpc.channel: the prologue tier-1 bridge of ChannelFactoryBase returned
+    // ConnectResult by value before any struct definition ("incomplete result
+    // type in function definition").
+    let source = r#"
+        pub trait Backend { fn register(&mut self, token: usize, interest: Interest) -> Interest; }
+        pub struct Plain;
+        impl Backend for Plain {
+            fn register(&mut self, _token: usize, interest: Interest) -> Interest { interest }
+        }
+        #[derive(Clone, Copy)]
+        pub struct Interest { pub bits: u8 }
+        pub trait Factory { fn connect(&self, address: &str) -> ConnectResult; }
+        pub struct Tcp;
+        impl Factory for Tcp {
+            fn connect(&self, _address: &str) -> ConnectResult { ConnectResult { ok: true } }
+        }
+        pub struct ConnectResult { pub ok: bool }
+    "#;
+    // Module mode under --cxx-namespace: the shape both failures had.
+    let file: syn::File = syn::parse_str(source).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("probe".to_string()));
+    cg.emit_file(&file, Some("probe.lanes"));
+    let output = cg.into_output();
+    // Declared in place, defined once every type is.
+    assert!(
+        output.contains("template<class S> requires has_tier1_Factory<S> ConnectResult connect(Factory_::impl_::tag, const S& __self, std::string_view address);"),
+        "{output}"
+    );
+    assert!(output.contains("Interest register_(size_t token, Interest interest) override;"), "{output}");
+    assert!(
+        output.contains("template <class U> auto BackendAdapter<U>::register_(size_t token, Interest interest) -> Interest {"),
+        "{output}"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let cpp = temp.path().join("probe.lanes.cppm");
+    std::fs::write(&cpp, &output).unwrap();
+    let result = std::process::Command::new(std::env::var("CXX").unwrap_or_else(|_| "clang++".into()))
+        .args(["-w", "-std=c++23", "-stdlib=libc++", "--precompile"])
+        .arg("-I").arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../include"))
+        .arg(&cpp).arg("-o").arg(temp.path().join("probe.lanes.pcm")).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{output}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn user_upgrade_method_keeps_its_declared_value_type() {
     let output = transpile_str(r#"
         pub struct Value { pub value: i32 }

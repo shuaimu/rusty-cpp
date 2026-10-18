@@ -6381,18 +6381,77 @@ impl CodeGen {
                         m = slot.cpp_name
                     )
                 };
-                self.writeln(&format!(
-                    "{} {}({}){} override {{ {} }}",
+                let declarator = format!(
+                    "{} {}({}){}",
                     slot.return_type,
                     slot.cpp_name,
                     slot.params.join(", "),
-                    slot.const_suffix,
-                    body
-                ));
+                    slot.const_suffix
+                );
+                // The forwarders sit beside their interface, in source order:
+                // an override taking or returning a later-defined type by value
+                // is declared here and defined out of line after every type.
+                if self.lane_signature_names_undefined_local_type(&declarator) {
+                    self.writeln(&format!("{} override;", declarator));
+                    self.deferred_lane_definitions.push(DeferredLaneDefinition {
+                        module_path: self.module_stack.clone(),
+                        namespace_open: None,
+                        text: format!(
+                            "template <{ta}> auto {t}{s}<{names}>::{m}({ps}){c} -> {r} {{ {b} }}",
+                            ta = template_args,
+                            t = trait_name,
+                            s = suffix,
+                            names = Self::template_parameter_names(template_args),
+                            m = slot.cpp_name,
+                            ps = slot.params.join(", "),
+                            c = slot.const_suffix,
+                            r = slot.return_type,
+                            b = body
+                        ),
+                    });
+                } else {
+                    self.writeln(&format!("{} override {{ {} }}", declarator, body));
+                }
             }
             self.indent -= 1;
             self.writeln("};");
         }
+    }
+
+    /// `class T, class U` → `T, U`: the argument list naming a class
+    /// template's own parameters, for an out-of-line member definition.
+    fn template_parameter_names(template_params: &str) -> String {
+        let mut names: Vec<String> = Vec::new();
+        let mut depth = 0usize;
+        let mut current = String::new();
+        let mut push = |param: &str, names: &mut Vec<String>| {
+            let param = param.split('=').next().unwrap_or(param).trim();
+            if let Some(name) = param.rsplit(|c: char| c.is_whitespace()).next()
+                && !name.is_empty()
+            {
+                let pack = param.contains("...");
+                names.push(format!("{}{}", name.trim_start_matches("..."), if pack { "..." } else { "" }));
+            }
+        };
+        for ch in template_params.chars() {
+            match ch {
+                '<' | '(' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                '>' | ')' => {
+                    depth = depth.saturating_sub(1);
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    push(&current, &mut names);
+                    current.clear();
+                }
+                _ => current.push(ch),
+            }
+        }
+        push(&current, &mut names);
+        names.join(", ")
     }
 
     /// The method names a block calls on `self` (`self.m(…)`, through parens

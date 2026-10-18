@@ -18,6 +18,17 @@ struct UfcsTraitCallInfo {
     non_receiver_arg_count: usize,
 }
 
+/// One deferred trait-lane definition (see `deferred_lane_definitions`).
+#[derive(Clone, Debug)]
+pub(crate) struct DeferredLaneDefinition {
+    /// module_stack where the declaration was emitted: reopened at the flush.
+    pub(crate) module_path: Vec<String>,
+    /// An extra namespace block around the definition (a tier-1 bridge's
+    /// `[export ]namespace <Tr>_::impl_ {`), or None for a class member.
+    pub(crate) namespace_open: Option<String>,
+    pub(crate) text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VariantTypeContext {
     enum_name: String,
@@ -2908,6 +2919,18 @@ pub struct CodeGen {
     /// bare-name binding checks (does THIS module declare/import `Range`?)
     /// read the module from here instead.
     pub(crate) ufcs_impl_module_path: Vec<String>,
+    /// Leaf names of this file's local types whose complete C++ definition
+    /// has been emitted so far (recorded after emit_struct / emit_enum).
+    pub(crate) defined_local_type_leaves: HashSet<String>,
+    /// Out-of-line definitions of trait-lane members that name a local type
+    /// by value before that type is defined: a tier-1 bridge in the prologue,
+    /// a dyn adapter's override beside its interface. Their declarations stay
+    /// in place; flush_deferred_lane_definitions emits these after every type
+    /// definition, before the Phase 2 lane functions.
+    pub(crate) deferred_lane_definitions: Vec<DeferredLaneDefinition>,
+    /// Set once the deferred lane definitions are flushed; later emissions
+    /// (synthesized multi-trait interfaces) keep their inline definitions.
+    pub(crate) deferred_lane_definitions_flushed: bool,
     /// Scoped Rust-local to emitted-C++ local name mappings.
     /// Used to preserve Rust shadowing semantics where repeated `let` names
     /// in the same block must be renamed for valid C++.
@@ -3914,6 +3937,9 @@ impl CodeGen {
             impl_method_receiver_kinds: HashMap::new(),
             current_impl_method_self_tys: Vec::new(),
             ufcs_impl_module_path: Vec::new(),
+            defined_local_type_leaves: HashSet::new(),
+            deferred_lane_definitions: Vec::new(),
+            deferred_lane_definitions_flushed: false,
             local_cpp_bindings: Vec::new(),
             local_cpp_names_used: Vec::new(),
             pending_loop_var_bindings: Vec::new(),
@@ -8182,6 +8208,9 @@ impl CodeGen {
         self.import_alias_names.clear();
         self.module_scope_namespace_aliases.clear();
         self.scope_import_bindings.clear();
+        self.defined_local_type_leaves.clear();
+        self.deferred_lane_definitions.clear();
+        self.deferred_lane_definitions_flushed = false;
         self.scope_glob_import_modules.clear();
         self.ufcs_marker_primaries_emitted.clear();
         self.ufcs_marker_specializations_emitted.clear();
@@ -9208,6 +9237,11 @@ impl CodeGen {
             self.output.insert_str(anchor, &adapters);
         }
         log_emit("emit_local_trait_adapter_specializations");
+
+        // Every type is defined by now: the lane members deferred for naming
+        // one by value get their out-of-line definitions here.
+        self.flush_deferred_lane_definitions();
+        log_emit("flush_deferred_lane_definitions");
 
         // UFCS trait migration, Phase 2 (book § 3.2.2): emit
         // `impl Tr for U` methods as free functions in
@@ -15693,9 +15727,15 @@ impl CodeGen {
         };
         match item {
             syn::Item::Fn(f) => self.emit_function(f),
-            syn::Item::Struct(s) => self.emit_struct(s),
+            syn::Item::Struct(s) => {
+                self.emit_struct(s);
+                self.defined_local_type_leaves.insert(s.ident.to_string());
+            }
             syn::Item::Union(u) => self.emit_union(u),
-            syn::Item::Enum(e) => self.emit_enum(e),
+            syn::Item::Enum(e) => {
+                self.emit_enum(e);
+                self.defined_local_type_leaves.insert(e.ident.to_string());
+            }
             syn::Item::Type(t) => self.emit_type_alias(t),
             syn::Item::Const(c) => self.emit_const(c),
             syn::Item::Static(s) => self.emit_static(s),
@@ -22313,16 +22353,32 @@ impl CodeGen {
             let prefix = if ret.trim() == "void" { "" } else { "return " };
             let mut all: Vec<String> = vec![format!("{}_::impl_::tag", name), recv_param.to_string()];
             all.extend(params);
-            lines.push(format!(
-                "template<class S> requires {c} {ret} {m}({ps}) {{ {p}{r}.{m}({a}); }}",
+            let head = format!(
+                "template<class S> requires {c} {ret} {m}({ps})",
                 c = constraint,
                 ret = ret,
                 m = mname,
-                ps = all.join(", "),
+                ps = all.join(", ")
+            );
+            let definition = format!(
+                "{head} {{ {p}{r}.{m}({a}); }}",
+                head = head,
                 p = prefix,
                 r = recv_expr,
+                m = mname,
                 a = args.join(", ")
-            ));
+            );
+            // The bridges sit in the prologue, before any type definition.
+            if self.lane_signature_names_undefined_local_type(&head) {
+                lines.push(format!("{};", head));
+                self.deferred_lane_definitions.push(DeferredLaneDefinition {
+                    module_path: self.module_stack.clone(),
+                    namespace_open: Some(format!("{}namespace {}_::impl_ {{", export, name)),
+                    text: definition,
+                });
+            } else {
+                lines.push(definition);
+            }
         }
         if lines.is_empty() {
             return;
@@ -22338,6 +22394,105 @@ impl CodeGen {
         }
         self.indent -= 1;
         self.writeln("}");
+    }
+
+    /// Does this C++ signature name, other than through a reference or a
+    /// pointer, a local type of this file whose definition has not been
+    /// emitted yet? A function definition needs its by-value parameter and
+    /// return types complete (`incomplete result type 'ConnectResult' in
+    /// function definition`); a declaration does not. A mention inside a
+    /// template argument list counts as by value. Over-reporting only moves a
+    /// definition out of line, which is always valid.
+    pub(crate) fn lane_signature_names_undefined_local_type(&self, signature: &str) -> bool {
+        if self.deferred_lane_definitions_flushed {
+            return false;
+        }
+        let bytes = signature.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if !(bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let tok = &signature[start..i];
+            if self.defined_local_type_leaves.contains(tok)
+                || !self.local_declared_types.iter().any(|declared| {
+                    declared == tok || declared.rsplit("::").next() == Some(tok)
+                })
+            {
+                continue;
+            }
+            // Skip the token's own template arguments, then whitespace and
+            // `const`: a following `&` or `*` makes it a reference or pointer.
+            let mut j = i;
+            if j < bytes.len() && bytes[j] == b'<' {
+                let mut depth = 0usize;
+                while j < bytes.len() {
+                    match bytes[j] {
+                        b'<' => depth += 1,
+                        b'>' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                j += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+            }
+            loop {
+                while j < bytes.len() && bytes[j] == b' ' {
+                    j += 1;
+                }
+                if signature[j..].starts_with("const") {
+                    j += "const".len();
+                    continue;
+                }
+                break;
+            }
+            if j < bytes.len() && (bytes[j] == b'&' || bytes[j] == b'*') {
+                continue;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Emit the definitions `deferred_lane_definitions` collected, each in the
+    /// namespaces its declaration was emitted in, and stop deferring.
+    pub(crate) fn flush_deferred_lane_definitions(&mut self) {
+        self.deferred_lane_definitions_flushed = true;
+        let pending = std::mem::take(&mut self.deferred_lane_definitions);
+        if pending.is_empty() {
+            return;
+        }
+        self.writeln("// Trait-lane definitions that name a type defined after their declaration");
+        for def in pending {
+            let segments = self.renamed_module_scope_segments(&def.module_path);
+            for seg in &segments {
+                self.writeln(&format!("namespace {} {{", seg));
+                self.indent += 1;
+            }
+            if let Some(open) = &def.namespace_open {
+                self.writeln(open);
+                self.indent += 1;
+            }
+            self.writeln(&def.text);
+            if def.namespace_open.is_some() {
+                self.indent -= 1;
+                self.writeln("}");
+            }
+            for _ in &segments {
+                self.indent -= 1;
+                self.writeln("}");
+            }
+        }
     }
 
     /// Book §3.2.3 (2026-10-07): does `spelling` name a crate-declared generic
