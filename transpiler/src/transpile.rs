@@ -1091,6 +1091,12 @@ pub struct TranspileOptions {
     /// module tree). Empty in single-file mode; populated by main.rs
     /// before per-file transpilation begins.
     pub crate_module_names: Vec<String>,
+    /// Crate mode: the INLINE modules (`pub mod marker { … }` inside a
+    /// file module) as dotted paths under their file module
+    /// (`btree_port.btree.btree_internal.marker`). A sibling's `use` of
+    /// one names a NAMESPACE, which a using-declaration cannot refer to;
+    /// the emitter aliases it instead. Empty in single-file mode.
+    pub crate_inline_module_names: Vec<String>,
     /// Optional C++ namespace to wrap all exported items in. When
     /// `Some("foo::bar")`, codegen emits `export namespace foo::bar { … }`
     /// around the module's items (in module mode); `None` keeps the
@@ -2897,6 +2903,7 @@ impl Default for TranspileOptions {
             cross_file_type_aliases: Vec::new(),
             flat_import_type_authorizations: BTreeSet::new(),
             crate_module_names: Vec::new(),
+            crate_inline_module_names: Vec::new(),
             cxx_namespace: None,
             flat_import_namespace: None,
             auto_namespace: false,
@@ -3777,6 +3784,7 @@ fn transpile_full_with_options_impl(
         options.flat_import_type_authorizations.clone(),
     );
     codegen.set_crate_module_names(options.crate_module_names.clone());
+    codegen.set_crate_inline_module_names(options.crate_inline_module_names.clone());
     codegen.set_consumer_module_map(
         options.consumer_module_map.clone(),
         module_name,

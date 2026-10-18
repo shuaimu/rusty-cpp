@@ -9896,7 +9896,21 @@ impl CodeGen {
                             // its `export using`.
                             let same_namespace =
                                 self.cxx_namespace.as_deref() == Some(ns_path.as_str());
-                            if !same_namespace || !export_prefix.is_empty() {
+                            // `use super::node::{marker, …}` where `marker` is an
+                            // INLINE module of the sibling: a using-declaration
+                            // cannot refer to a namespace — alias it (a repeated
+                            // alias of the same namespace is well-formed).
+                            let item_is_inline_module = self
+                                .crate_inline_module_names
+                                .contains(&format!("{}.{}", sibling_module, item));
+                            if item_is_inline_module {
+                                self.writeln(&format!(
+                                    "namespace {} = ::{}::{};",
+                                    escape_cpp_keyword(item),
+                                    ns_path,
+                                    escape_cpp_keyword(item)
+                                ));
+                            } else if !same_namespace || !export_prefix.is_empty() {
                                 self.writeln(&format!(
                                     "{}using ::{}::{};",
                                     export_prefix,

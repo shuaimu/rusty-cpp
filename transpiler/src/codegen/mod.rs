@@ -3541,6 +3541,10 @@ pub struct CodeGen {
     /// `::sibling` doesn't exist as a global namespace).
     /// Empty in single-file mode.
     pub(crate) crate_module_names: HashSet<String>,
+    /// Crate mode: inline modules of every file module, as
+    /// `<file module>.<inline>` dotted paths (see
+    /// `TranspileOptions::crate_inline_module_names`).
+    pub(crate) crate_inline_module_names: HashSet<String>,
     /// Sibling/parent/child modules already imported in this file's
     /// emission, used to dedup `import M;` statements when several
     /// use-statements in the same file reference the same module
@@ -4070,6 +4074,7 @@ impl CodeGen {
             cross_file_member_dispatch_trait_tails: HashSet::new(),
             cross_file_cpp_name_targets: std::collections::BTreeMap::new(),
             crate_module_names: HashSet::new(),
+            crate_inline_module_names: HashSet::new(),
             sibling_modules_imported: HashSet::new(),
             glob_imported_enum_tails: HashSet::new(),
             cross_file_impl_blocks: Vec::new(),
@@ -6790,6 +6795,10 @@ impl CodeGen {
         self.crate_module_names = names.into_iter().collect();
     }
 
+    pub fn set_crate_inline_module_names(&mut self, names: Vec<String>) {
+        self.crate_inline_module_names = names.into_iter().collect();
+    }
+
     /// Configure a consumer-specific module projection for this emit.
     /// `current_rust_module` is an optional invocation-local lexical scope,
     /// already canonicalized without `crate::`. If absent, the current Rust
@@ -7994,6 +8003,30 @@ impl CodeGen {
                 &normalized_file
             }
             None => file,
+        };
+        // Inherent impls on aliases of crate-local nominal types are impls on
+        // those types (alias_impl_inline.rs): rewrite their headers to the
+        // target so the methods become members. Crate-wide declarations come
+        // from the cross-file tables; the file's own are added by the pass.
+        let alias_inlined_file;
+        let file = {
+            let mut candidate = file.clone();
+            let mut nominal: HashSet<String> = self
+                .cross_file_struct_field_types
+                .keys()
+                .map(|k| k.to_string())
+                .collect();
+            nominal.extend(self.cross_file_enums.iter().map(|e| e.ident.to_string()));
+            let aliases: Vec<syn::ItemType> =
+                self.cross_file_auto_trait_aliases.values().cloned().collect();
+            if crate::alias_impl_inline::inline_alias_impl_headers(&mut candidate, &aliases, &nominal)
+                > 0
+            {
+                alias_inlined_file = candidate;
+                &alias_inlined_file
+            } else {
+                file
+            }
         };
         // Same treatment for let-chains, which every if-let lowering below
         // would otherwise miss (they all require the condition to be exactly

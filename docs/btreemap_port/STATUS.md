@@ -1761,3 +1761,49 @@ Transpiler unit tests pass at every step:
 | Step 2 (slots) | 1531/1531 | +7 slots-module tests |
 | Step 3 (cross-module) | 1534/1534 | +3 sibling-module tests |
 | Step 4 (op==/walk/alloc) | 1537/1537 | +3 derive-eq dedup + ancestor-sibling tests |
+
+## 2026-10-17 — regenerated with the current transpiler
+
+The four vendored modules are again the output of `docs/port_regen/regen_diff.sh
+btree_port` (prep.sh → transpiler `--crate … --in-umbrella-closure
+--auto-namespace` → this patcher) with zero patcher warnings. What the regen
+surfaced and where each fix lives:
+
+- **Transpiler (crate mode):** `impl<K, V> Root<K, V>` — an inherent impl on a
+  type alias of the crate's own `NodeRef` — had been lowered to
+  `__rusty_alias_Root_*` free helpers whose `K`/`V` nothing could deduce
+  (since 10b24a2a; before it the alias went unrecognized in crate mode and
+  the methods fell into the member path by accident). `alias_impl_inline.rs`
+  rewrites such impl headers to the aliased type in `CodeGen::emit_file`, so
+  the methods are `NodeRef` members: the shape this port always relied on.
+- **Transpiler (crate mode):** `use super::node::{marker, …}` of an INLINE
+  module emitted `using ::…::marker;` (ill-formed: a using-declaration cannot
+  name a namespace). Crate preparation records inline module paths and the
+  use-emission aliases them. Both are covered by
+  `transpiler/tests/crate_inline_module_import.rs`.
+- **Patcher re-anchoring (the emission drifted, the hand-ports did not):**
+  `normalize_2026_qualified_spellings` runs first on btree_internal.cppm and
+  restores the raw global-qualified marker spelling the anchors were written
+  against (marker TYPES only — the `BorrowType` trait lane in `marker` is
+  referenced before the namespace opens and keeps its full path;
+  `full_range(` stays qualified because the member calls the free function);
+  `fix_handle_factory_owner_recovery` deduces every `Handle::new_edge/new_kv`
+  owner from the node argument (`Handle<R|Q|K, …>` / the enclosing Node were
+  recovered instead); `((*this))->as_leaf_ptr((*this))` (the `this: &Self`
+  static spelled as an arrow member call); the field-dispatch-lambda form of
+  `const auto root = …insert(`; append's `const auto other_iter =
+  rusty::detail::into_iter_value(…)`; `bulk_build`'s length site now routes
+  the array/range source through `rusty::iter`; `hide_template_free_misroutes`
+  no longer takes a `using …SetValZST;` line as a misrouted body (it hid the
+  merged entry forward declarations); `remove_setvalzst_methods` hides
+  BTreeMap's own `template<typename T>` blocks only on a signal (`extend<T>`
+  is legitimate). prep.sh rewrites entry.rs's `crate::collections::btree_map::
+  OccupiedError` (the prepped crate has no such root).
+- **CMake:** `btree_port` links `vec_port` (`BTreeMap::from_iter` collects into
+  a `Vec` before bulk-building, as `alloc::vec` in Rust).
+- **Still open (pre-existing, identical in the previous vendored copy):** under
+  `-fsanitize=address`, `btree_tests_port_module_test`'s
+  `height_0_keeping_half_unstubbed` reports a heap-use-after-free in
+  `~BTreeMap → ~IntoIter` after `extract_if` freed a leaf inside
+  `remove_leaf_kv`; the plain build passes all 477 tests. The module stress
+  test, drop-balance and set_hash suites are ASan-clean.

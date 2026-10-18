@@ -361,6 +361,15 @@ MOD
     done
   done
 
+  # map/entry.rs names OccupiedError through the alloc crate root
+  # (`crate::collections::btree_map::OccupiedError`); the prepped crate's
+  # root is `pub mod btree;`, so that path resolves nowhere and the
+  # transpiler spells it `::collections::btree_map::OccupiedError`.
+  # The struct is declared in this very file.
+  if [[ -f "$BTREE_DIR/map/entry.rs" ]]; then
+    sed -i 's|crate::collections::btree_map::OccupiedError|OccupiedError|g' "$BTREE_DIR/map/entry.rs"
+  fi
+
   # Drop `use super::map::MIN_LEN;` lines from the merged file — the
   # consts are now defined inside btree_internal.rs itself, so there
   # is no parent or sibling to import from.

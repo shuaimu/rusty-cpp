@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Output};
 
+mod alias_impl_inline;
 mod cmake;
 mod codegen;
 mod cpp_abi;
@@ -3153,6 +3154,22 @@ impl PreparedCrateCodegen {
     }
 }
 
+/// Every inline `mod name { … }` under `items`, recursively, as
+/// `<prefix>.<name>[.<child>…]` dotted paths.
+fn collect_inline_module_names(items: &[syn::Item], prefix: &str, out: &mut Vec<String>) {
+    for item in items {
+        let syn::Item::Mod(module) = item else {
+            continue;
+        };
+        let Some((_, children)) = &module.content else {
+            continue;
+        };
+        let path = format!("{}.{}", prefix, module.ident);
+        collect_inline_module_names(children, &path, out);
+        out.push(path);
+    }
+}
+
 fn prepare_crate_codegen(
     sources: &[PathBuf],
     source_units: &[(PathBuf, String)],
@@ -3200,6 +3217,16 @@ fn prepare_crate_codegen(
         .iter()
         .map(|rs_path| cmake::map_rs_to_cppm(rs_path, crate_name).1)
         .collect();
+    // Inline `mod`s of each file module, so a sibling's `use` of one is
+    // aliased as the namespace it is (a using-declaration cannot name one).
+    let mut crate_inline_module_names: Vec<String> = Vec::new();
+    for (path, source) in source_units {
+        let Ok(file) = syn::parse_str::<syn::File>(source) else {
+            continue;
+        };
+        let file_module = cmake::map_rs_to_cppm(path, crate_name).1;
+        collect_inline_module_names(&file.items, &file_module, &mut crate_inline_module_names);
+    }
     let module_preambles = if let Some(manifest) = module_preamble {
         manifest.select_for_modules(crate_module_names.iter().map(String::as_str))?
     } else {
@@ -3265,6 +3292,7 @@ fn prepare_crate_codegen(
     options.cross_file_struct_qualified_paths = cross_file_struct_qualified_paths;
     options.cross_file_type_aliases = cross_file_type_aliases;
     options.crate_module_names = crate_module_names;
+    options.crate_inline_module_names = crate_inline_module_names;
     Ok(PreparedCrateCodegen {
         extension_method_hints,
         module_preambles,
@@ -12131,6 +12159,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cross_file_type_aliases: Vec::new(),
         flat_import_type_authorizations: BTreeSet::new(),
         crate_module_names: Vec::new(),
+        crate_inline_module_names: Vec::new(),
         cxx_namespace: None,
         flat_import_namespace: None,
         crate_namespace_wrap: false,
@@ -12868,6 +12897,7 @@ fn main() {
         cross_file_type_aliases: Vec::new(),
         flat_import_type_authorizations: BTreeSet::new(),
         crate_module_names: Vec::new(),
+        crate_inline_module_names: Vec::new(),
         cxx_namespace: cli.cxx_namespace.clone(),
         flat_import_namespace: cli.flat_import_namespace.clone(),
         crate_namespace_wrap: cli.crate_namespace_wrap,

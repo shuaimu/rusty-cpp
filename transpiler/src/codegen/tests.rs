@@ -44820,15 +44820,48 @@ fn test_known_receiver_type_not_misrouted_to_unrelated_alias() {
         }
         "#,
     );
-    // `Root::split_off` still emits its alias helper (it is a type-alias owner)...
-    assert!(out.contains("__rusty_alias_Root_split_off"), "{out}");
-    // ...but the KNOWN-typed `self.v` receiver must call the member directly,
-    // not route to that unrelated alias.
+    // `Root` aliases the crate's own `NodeRef`, so `impl Root` IS an impl on
+    // NodeRef (alias_impl_inline.rs): `split_off` is a plain member, no
+    // `__rusty_alias_` helper exists to misroute to...
+    assert!(out.contains(" split_off(size_t at)"), "{out}");
+    assert!(!out.contains("__rusty_alias_Root_split_off"), "{out}");
+    // ...and the KNOWN-typed `self.v` receiver calls MyVec's member directly.
     assert!(out.contains("this->v.split_off"), "{out}");
-    assert!(
-        !out.contains("__rusty_alias_Root_split_off(this->v"),
-        "known Vec receiver mis-dispatched to Root's split_off alias:\n{out}"
+}
+
+#[test]
+fn test_generic_alias_impl_lowers_to_members_of_the_aliased_struct() {
+    // `impl<K, V> Root<K, V>` with `type Root<K, V> = NodeRef<Owned, K, V,
+    // LeafOrInternal>` (btree's Root): the alias-helper lowering left K and V
+    // undeducible at every call. The methods are NodeRef members; a bare
+    // `Root::new_pillar(..)` spells the alias's arguments; a member call on
+    // a Root-typed receiver stays a member call.
+    let out = transpile_str(
+        r#"
+        pub mod marker { pub struct Owned; pub struct LeafOrInternal; }
+        pub struct NodeRef<B, K, V, T> { pub h: usize, _p: core::marker::PhantomData<(B, K, V, T)> }
+        pub type Root<K, V> = NodeRef<marker::Owned, K, V, marker::LeafOrInternal>;
+        impl<K, V> Root<K, V> {
+            pub fn fix_top(&mut self) { self.h += 1; }
+            pub fn split_off(&mut self, at: usize) -> Root<K, V> { self.fix_top(); NodeRef { h: at, _p: core::marker::PhantomData } }
+            pub fn new_pillar(height: usize) -> Root<K, V> { NodeRef { h: height, _p: core::marker::PhantomData } }
+        }
+        pub struct Map<K, V> { root: Option<Root<K, V>> }
+        impl<K, V> Map<K, V> {
+            pub fn go(&mut self, at: usize) -> Root<K, V> {
+                let left_root = self.root.as_mut().unwrap();
+                left_root.split_off(at)
+            }
+            pub fn mk(h: usize) -> Root<K, V> { Root::new_pillar(h) }
+        }
+        "#,
     );
+    assert!(!out.contains("__rusty_alias_"), "{out}");
+    assert!(out.contains("Root<K, V> split_off(size_t at)"), "{out}");
+    assert!(out.contains("static Root<K, V> new_pillar(size_t height)"), "{out}");
+    assert!(out.contains("this->fix_top();"), "{out}");
+    assert!(out.contains("left_root.split_off("), "{out}");
+    assert!(out.contains("Root<K, V>::new_pillar("), "{out}");
 }
 
 #[test]

@@ -125,6 +125,9 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     )
     target_include_directories(btree_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_features(btree_port PUBLIC cxx_std_23)
+    # The regenerated map module imports vec_port.vec (BTreeMap::from_iter
+    # collects into a Vec before bulk-building), as alloc::vec in Rust.
+    target_link_libraries(btree_port PUBLIC vec_port)
     target_compile_options(btree_port PRIVATE -O3 -DNDEBUG -march=native )
 endif()
 

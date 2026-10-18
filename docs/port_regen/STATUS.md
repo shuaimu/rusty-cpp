@@ -270,9 +270,10 @@ build files into `transpiled/vec_port/`, `cmake --build .rusty-modules-cache/bui
 | port | patches | brought under harness | lost-fixes recovered | re-baselined |
 |---|---|---|---|---|
 | vec_port | 62 | ✅ | `clone_into` (56fc9428) | ⬜ 5 errs left (into_iter: VecDeque arity + `super`/new_in) then matrix |
-| btree_port | 4 | ⬜ | | ⬜ |
+| btree_port | 4 | ✅ | alias-impl members + inline-module imports (transpiler, 2026-10-17), 9 patcher re-anchors (docs/btreemap_port/STATUS.md) | ✅ zero drift, 477+12+2 suites green (ASan: one pre-existing UAF in extract_if) |
 | hashbrown_port | 54 | ⬜ | (b72cd879: "zero hand-fixes" — verify) | ⬜ |
-| string_port, rc_port, arc_port, core_slice_port, binary_heap_port, cell_port, linked_list_port, vec_deque_port, ascii_port, borrow_port | — | ⬜ | | ⬜ |
+| rc_port, arc_port, binary_heap_port, cell_port, linked_list_port, vec_deque_port, ascii_port, borrow_port | — | ✅ (2026-10, re-vendored from the driver) | | ✅ |
+| string_port, core_slice_port | — | ⬜ | string: reference artifact; core_slice: prep parse error in slice/iter.rs | ⬜ |
 | *_tests_port (mostly stubs) | 0 | ⬜ | | ⬜ |
 
 Harness currently configured for `vec_port` only; add each port's source

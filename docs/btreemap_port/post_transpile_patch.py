@@ -84,6 +84,139 @@ def stub(src: str, sig_tail: str) -> tuple[str, bool]:
     return src, True
 
 
+def normalize_2026_qualified_spellings(path: Path) -> None:
+    """The 2026 transpiler spells the module's own markers and free
+    functions through the module namespace
+    (`::btree_port::btree::btree_internal::marker::Leaf`,
+    `::btree_port::btree::btree_internal::move_to_slice(`); the rules below
+    were written against the earlier global-qualified raw spelling
+    (`::marker::Leaf`, `::move_to_slice(`), which
+    `fix_global_qualifiers_for_namespace_wrap` later strips to the bare
+    in-namespace form. Restore that raw spelling FIRST so every anchor
+    matches again; the late strip then produces the vendored shape."""
+    src = path.read_text()
+    sentinel = "// btree_port port: 2026 module-qualified spellings normalized by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (2026 spellings already normalized)")
+        return
+    own = "::btree_port::btree::btree_internal::"
+    # Only the marker TYPES: the `BorrowType` trait lane that also lives in
+    # `marker` (`marker::__ufcs_BorrowType…`) is referenced before the
+    # namespace is open in this file and needs its full path.
+    new = re.sub(
+        own + r"marker::(Owned|Mut|Immut|Internal|LeafOrInternal|Leaf|Dying|DormantMut|ValMut|KV|Edge)\b",
+        r"::marker::\1",
+        src,
+    )
+    new = re.sub(
+        # (`full_range(` stays module-qualified: the NodeRef::full_range
+        # member calls the FREE function of the same name, and the bare
+        # spelling the late strip would produce resolves to the member.)
+        own.replace("::", r"::") + r"(move_to_slice|replace|slice_remove|slice_insert|slice_shr|slice_shl|take_mut|splitpoint)\(",
+        r"::\1(",
+        new,
+    )
+    new = re.sub(own + r"(LeafNode|InternalNode)<", r"::\1<", new)
+    if new == src:
+        print(f"  no 2026 module-qualified spellings in: {path.name}")
+        return
+    path.write_text(sentinel + "\n" + new)
+    print(f"  normalized 2026 module-qualified spellings in: {path.name}")
+
+
+def fix_handle_factory_owner_recovery(path: Path) -> None:
+    """`Handle::new_edge(node, idx)` / `Handle::new_kv(node, idx)` are static
+    factories on `Handle<Node, Type>` whose NODE type is exactly the first
+    argument's type. The transpiler recovers the owner from whatever generic
+    is in scope (`Handle<R, …>`, `Handle<Q, …>`, `Handle<K, …>`) or from the
+    enclosing method's own Node (`…, arg_3>` = Leaf where the argument is a
+    LeafOrInternal node); the swap-in-era transpiler spelled the owner as
+    `std::remove_cvref_t<decltype((arg))>` at every such site. Restore that:
+    deduce the owner from the first argument wherever it is `std::move(X)`
+    or `this->reborrow_mut()`."""
+    src = path.read_text()
+    sentinel = "// btree_port port: Handle factory owners deduced from the node argument by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (Handle factory owners already deduced)")
+        return
+    n = 0
+    pos = 0
+    while True:
+        cands = [c for c in (src.find(">::new_edge(", pos), src.find(">::new_kv(", pos)) if c != -1]
+        if not cands:
+            break
+        j = min(cands)
+        # matching `Handle<` for the `>` at j
+        depth = 0
+        k = j
+        while k >= 0:
+            c = src[k]
+            if c == ">":
+                depth += 1
+            elif c == "<":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        start = k - len("Handle")
+        if k < 0 or src[start:k] != "Handle" or (start > 0 and (src[start - 1].isalnum() or src[start - 1] in "_:")):
+            pos = j + 1
+            continue
+        inner = src[k + 1 : j]
+        # split owner / marker at the last top-level comma
+        d = 0
+        split_at = None
+        for idx_c, c in enumerate(inner):
+            if c == "<":
+                d += 1
+            elif c == ">":
+                d -= 1
+            elif c == "," and d == 0:
+                split_at = idx_c
+        if split_at is None:
+            pos = j + 1
+            continue
+        owner = inner[:split_at]
+        if owner.startswith("std::remove_cvref_t<decltype("):
+            pos = j + 1
+            continue
+        # first argument of the call
+        paren = src.index("(", j + 2)
+        d = 0
+        end = None
+        for idx_c in range(paren + 1, len(src)):
+            c = src[idx_c]
+            if c in "([{":
+                d += 1
+            elif c in ")]}":
+                if d == 0:
+                    end = idx_c
+                    break
+                d -= 1
+            elif c == "," and d == 0:
+                end = idx_c
+                break
+        if end is None:
+            pos = j + 1
+            continue
+        arg = src[paren + 1 : end].strip()
+        if arg.startswith("std::move(") and arg.endswith(")"):
+            node_expr = arg[len("std::move(") : -1]
+        elif arg == "this->reborrow_mut()":
+            node_expr = arg
+        else:
+            pos = j + 1
+            continue
+        new_owner = f"std::remove_cvref_t<decltype(({node_expr}))>"
+        src = src[: k + 1] + new_owner + src[k + 1 + len(owner) :]
+        n += 1
+        pos = k + 1 + len(new_owner)
+    if n:
+        src = sentinel + "\n" + src
+        path.write_text(src)
+    print(f"  deduced {n} Handle factory owner(s) from the node argument in: {path.name}")
+
+
 def patch_internal(path: Path) -> None:
     src = path.read_text()
     changed_any = False
@@ -211,8 +344,18 @@ def remove_setvalzst_methods(path: Path) -> None:
     i = 0
     hidden_blocks = 0
     in_skip = False
+    # The column-0 struct the scan is inside. The hide-all heuristic is
+    # right for the entry structs and BTreeSet (their own params cover
+    # every legitimate method), but the MERGED map.cppm also holds
+    # BTreeMap, whose `Extend<(K, V)>::extend<T>` legitimately spells
+    # `template<typename T>` (2026: hiding it broke the sibling
+    # `Extend<(&K, &V)>` impl's `this->extend(..)` call).
+    cur_struct = ""
     while i < n:
         line = lines[i]
+        m_struct = re.match(r"^(?:export )?(?:struct|class) (\w+)\b", line)
+        if m_struct:
+            cur_struct = m_struct.group(1)
         # Track #if 0 / #endif so we don't double-wrap.
         if line.startswith("#if 0"):
             in_skip = True
@@ -270,6 +413,11 @@ def remove_setvalzst_methods(path: Path) -> None:
             # map::*Entry (or vice versa) and references symbols
             # (`this->inner.*`, `SetValZST`, `this->get()`) that
             # don't exist on the host struct. Hide them all.
+            signalled = any(sig in block for sig in ("SetValZST", "this->inner.", "this->get()"))
+            if cur_struct == "BTreeMap" and not signalled:
+                out.append(line)
+                i += 1
+                continue
             if True:
                 # Hide it (and swallow any contiguous next template<typename T>
                 # blocks too — they're all part of the same misrouted cluster).
@@ -368,7 +516,17 @@ def hide_template_free_misroutes(path: Path) -> None:
     wrapped: list[tuple[int, int]] = []  # (start, end) inclusive of wrapped regions
     i = 0
     while i < n:
-        if "SetValZST" in out[i] and not inside_skip[i]:
+        trigger = out[i].lstrip()
+        # A `using ::…::SetValZST;` import or a declaration naming the type
+        # is not a misrouted BODY: walking back from it lands on whatever
+        # `{`-line precedes (2026: the merged `namespace entry {` forward
+        # declarations), hiding a whole region of good code.
+        is_body_use = (
+            "SetValZST" in out[i]
+            and not inside_skip[i]
+            and not trigger.startswith(("using ", "export using ", "namespace ", "template<", "struct ", "export "))
+        )
+        if is_body_use:
             # Walk backward to find method signature.
             # A method signature at indent 4 ends with `{` on its own
             # line OR on the signature line. Walk back through prior
@@ -391,6 +549,12 @@ def hide_template_free_misroutes(path: Path) -> None:
                 if l.startswith("};") or l == "};":
                     sig_end = None
                     break
+            # The anchor must be a METHOD signature (indent 4, parameter
+            # list), never a namespace/struct opener.
+            if sig_end is not None:
+                sig_line = out[sig_end]
+                if not (sig_line.startswith("    ") and not sig_line.startswith("     ") and "(" in sig_line):
+                    sig_end = None
             if sig_end is None:
                 i += 1
                 continue
@@ -1318,11 +1482,18 @@ def fix_as_leaf_ptr_self(path: Path) -> None:
     # which already passes (*this)). Use a simple word-boundary check.
     import re
     pattern = re.compile(r"(?<![\w:])as_leaf_ptr\(\)")
+    # 2026: `Self::as_leaf_ptr(self)` (a `this: &Self` static) is emitted as
+    # a member call through `->` on the object: `((*this))->as_leaf_ptr((*this))`.
+    arrow = "((*this))->as_leaf_ptr((*this))"
+    n_arrow = src.count(arrow)
     matches = list(pattern.finditer(src))
-    if not matches:
+    if not matches and not n_arrow:
         print(f"  no bare as_leaf_ptr() sites in: {path.name}")
         return
     src = pattern.sub("as_leaf_ptr((*this))", src)
+    src = src.replace(arrow, "as_leaf_ptr((*this))")
+    if n_arrow:
+        print(f"  rewrote {n_arrow} `((*this))->as_leaf_ptr((*this))` site(s) in: {path.name}")
     src = sentinel + "\n" + src
     path.write_text(src)
     print(f"  fixed {len(matches)} bare as_leaf_ptr() call(s) in: {path.name}")
@@ -3777,6 +3948,10 @@ def fix_dormant_map_reborrow_binding(path: Path) -> None:
         # `map.root.insert(...)` — Option::insert returns &mut T.
         ("const auto root = map.root.insert(",
          "auto& root = map.root.insert("),
+        # 2026: `map` is an untyped `auto&&` binding, so `map.root` is reached
+        # through the field-dispatch lambda; same `Option::insert -> &mut T`.
+        ("const auto root = [&](auto&& __r) -> decltype(auto) {",
+         "auto& root = [&](auto&& __r) -> decltype(auto) {"),
         # `const auto handle = [&]() {...}()` — IIFE result is moved into
         # an OccupiedEntry; needs non-const so `.forget_node_type()` works.
         ("const auto handle = [&]() { auto&& _m = this->handle;",
@@ -5419,7 +5594,7 @@ def generalize_collapsed_full_range_return(path: Path) -> None:
     # Spelling at patcher time may be `::marker::Immut` (global-qualified)
     # or `marker::Immut`; possibly const or not. Tolerate both.
     anchor_re = re.compile(
-        r"( *)LazyLeafRange<(?:::)?marker::Immut, K, V> full_range\(\)( const)? \{"
+        r"( *)LazyLeafRange<(?:::btree_port::btree::btree_internal::|::)?marker::Immut, K, V> full_range\(\)( const)? \{"
     )
     m = anchor_re.search(src)
     if m is None:
@@ -6287,9 +6462,13 @@ def codify_cursor_mut_key(path: Path) -> None:
     src, n = member_swap(src, n, anchor, "void insert_after_unchecked(K key, V value) {", insert_after_body)
     src, n = member_swap(src, n, anchor, "void insert_before_unchecked(K key, V value) {", insert_before_body)
     old_peek = "auto& kv = RUSTY_TRY_OPT(current.reborrow_mut().next_back_kv().ok()).into_kv_mut();"
+    new_peek = "auto&& kv = RUSTY_TRY_OPT(current.reborrow_mut().next_back_kv().ok()).into_kv_mut();"
     if old_peek in src:
-        src = src.replace(old_peek, "auto&& kv = RUSTY_TRY_OPT(current.reborrow_mut().next_back_kv().ok()).into_kv_mut();", 1)
+        src = src.replace(old_peek, new_peek, 1)
         n += 1
+    elif new_peek in src:
+        # The 2026 transpiler binds the try-carrier result with `auto&&` itself.
+        print("  CursorMutKey peek_prev already binds auto&& (transpiler)")
     else:
         print("  [warn] CursorMutKey peek_prev auto& line missing", file=sys.stderr)
     if n:
@@ -6512,7 +6691,10 @@ def fix_map_splitoff_alloc_and_le(path: Path) -> None:
     # the still-armed originals' destructors then dying_next the SAME
     # tree again (ASan double-free in map_append). Rust moves them.
     for cident in ("const auto self_iter = rusty::mem::replace(",
-                   "const auto other_iter = rusty::mem::replace("):
+                   "const auto other_iter = rusty::mem::replace(",
+                   # 2026: `other.into_iter()` is spelled through into_iter_value
+                   "const auto self_iter = rusty::detail::into_iter_value(",
+                   "const auto other_iter = rusty::detail::into_iter_value("):
         if cident in src:
             src = src.replace(cident, cident.replace("const auto ", "auto ", 1))
             n += 1
@@ -6531,16 +6713,22 @@ def fix_map_splitoff_alloc_and_le(path: Path) -> None:
     # bulk_build_from_sorted_iter (first instantiated via set::from):
     # emitted `auto length = 0` (int) + `&length` (pointer) where
     # Root::bulk_push takes `size_t&`. Type the local, pass the lvalue.
-    old_len = (
-        "        auto length = 0;\n"
-        "        root.bulk_push(__btree_port_make_dedup<K, V>(rusty::iter(std::move(iter))), &length, rusty::clone(alloc));"
+    # (2026: the iterator argument is spelled
+    # `rusty::detail::into_iter_value(std::move(iter))`; tolerate both.)
+    len_re = re.compile(
+        r"        auto length = 0;\n"
+        r"        root\.bulk_push\(__btree_port_make_dedup<K, V>\("
+        r"(rusty::iter\(std::move\(iter\)\)|rusty::detail::into_iter_value\(std::move\(iter\)\))"
+        r"\), &length, rusty::clone\(alloc\)\);"
     )
+    # (`rusty::iter(..)` turns an array/range source into an iterator —
+    # DedupSortedIter peeks `.next()`; into_iter_value hands the array back.)
     new_len = (
         "        size_t length = 0;\n"
         "        root.bulk_push(__btree_port_make_dedup<K, V>(rusty::iter(std::move(iter))), length, rusty::clone(alloc));"
     )
-    if old_len in src:
-        src = src.replace(old_len, new_len, 1)
+    src, n_len = len_re.subn(new_len, src, count=1)
+    if n_len:
         n += 1
     else:
         print("  [warn] bulk_build length site not found", file=sys.stderr)
@@ -7007,9 +7195,20 @@ def fix_2026_lane_shapes(path: Path) -> None:
     # aggregate-ness): `SetValZST{}` / `return {}` need one.
     if "SetValZST() = default;" not in src:
         src = src.replace("export struct SetValZST {\n", "export struct SetValZST {\n    SetValZST() = default;\n", 1)
-    src = src.replace(
-        "Handle<Q, ::btree_port::btree::btree_internal::marker::Edge>::new_edge(std::move((*this))",
-        "Handle<std::remove_cvref_t<decltype((*this))>, ::btree_port::btree::btree_internal::marker::Edge>::new_edge(std::move((*this))")
+    # (the marker may be spelled through the module namespace, the old
+    # global form or bare — the normalization rule runs before this one)
+    src = re.sub(
+        r"Handle<Q, ((?:::btree_port::btree::btree_internal::|::)?marker::Edge)>::new_edge\(std::move\(\(\*this\)\)",
+        r"Handle<std::remove_cvref_t<decltype((*this))>, \1>::new_edge(std::move((*this))",
+        src)
+    # `Handle::new_edge(self.reborrow_mut(), i)` inside a method generic over
+    # the range type R: the owner's node type was recovered as R.
+    # (R in correct_childrens_parent_links, K in NodeRef::push: whichever
+    # enclosing generic the recovery picked)
+    src = re.sub(
+        r"Handle<[A-Z][A-Za-z0-9_]*, ((?:::btree_port::btree::btree_internal::|::)?marker::Edge)>::new_edge\(this->reborrow_mut\(\), ",
+        r"Handle<std::remove_cvref_t<decltype((this->reborrow_mut()))>, \1>::new_edge(this->reborrow_mut(), ",
+        src)
     if src != original:
         path.write_text(src)
         print(f"  applied 2026 lane-shape fixes in: {path.name}")
@@ -7107,8 +7306,10 @@ def main() -> int:
         if p.exists():
             fix_noderef_borrow_mut_auto_ref(p)
             fix_occupied_entry_no_template_args(p)
+    normalize_2026_qualified_spellings(internal)
     patch_internal(internal)
     fix_2026_lane_shapes(internal)
+    fix_handle_factory_owner_recovery(internal)
     # Phase B: replace stubs with real impls. Runs AFTER patch_internal
     # so that on fresh transpile output we first install the stub
     # (which makes the templated method parse) and then immediately
