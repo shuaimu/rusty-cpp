@@ -50170,14 +50170,12 @@ fn test_value_position_const_block_is_its_tail_expression() {
 fn test_ufcs_lane_body_keeps_user_deref_route_on_self() {
     // The lane copy of a method body binds the receiver as `self_: &Self`;
     // a call that resolves through the owner's `Deref` target must still
-    // take the deref route there (the member copy already did).
+    // take the deref route there (the member copy already did). The trait
+    // is crate-declared so its impl IS lane-carried.
     let out = transpile_str(
         r#"
         use std::ops::Deref;
         pub struct Comps { pub n: usize }
-        impl PartialEq for Comps {
-            fn eq(&self, o: &Comps) -> bool { self.n == o.n }
-        }
         pub struct P { pub inner: String }
         impl P {
             pub fn components(&self) -> Comps { Comps { n: self.inner.len() } }
@@ -50190,11 +50188,11 @@ fn test_ufcs_lane_body_keeps_user_deref_route_on_self() {
             type Target = P;
             fn deref(&self) -> &P { self.as_path() }
         }
-        impl PartialEq for PB {
-            fn eq(&self, o: &PB) -> bool { self.components() == o.components() }
+        pub trait CompCount {
+            fn comp_count(&self) -> usize;
         }
-        impl PartialEq<PB> for str {
-            fn eq(&self, o: &PB) -> bool { o.inner.as_str() == self }
+        impl CompCount for PB {
+            fn comp_count(&self) -> usize { self.components().n }
         }
         "#,
     );
@@ -50202,5 +50200,257 @@ fn test_ufcs_lane_body_keeps_user_deref_route_on_self() {
         out.contains("rusty::detail::deref_if_pointer_like(self_).components()"),
         "{out}"
     );
-    assert!(!out.contains("return self_.components()"), "{out}");
+    assert!(!out.contains("self_.components()"), "{out}");
+}
+
+#[test]
+fn test_foreign_lane_trait_local_self_impls_keep_the_member_route() {
+    // `impl PartialEq<A> for str` synthesizes a foreign lane for PartialEq.
+    // The lane carries the str-side impl (no C++ member can); the local
+    // `impl PartialEq for A` is not lane-carried — it keeps its member and
+    // its implementor marker, and gets no free-function copy of its body.
+    let out = transpile_str(
+        r#"
+        pub struct A { pub x: i32 }
+        impl PartialEq for A {
+            fn eq(&self, o: &A) -> bool { self.x == o.x }
+        }
+        impl PartialEq<A> for str {
+            fn eq(&self, o: &A) -> bool { o.x == self.len() as i32 }
+        }
+        "#,
+    );
+    assert!(out.contains("bool operator==(const A& o) const;"), "{out}");
+    assert!(
+        out.contains("eq(PartialEq_::impl_::tag, const std::string_view& self_, const A& o)"),
+        "{out}"
+    );
+    assert!(!out.contains("eq(PartialEq_::impl_::tag, const A& self_"), "{out}");
+    assert!(out.contains("struct impls_PartialEq<A>"), "{out}");
+}
+
+#[test]
+fn test_foreign_trait_lane_key_collapses_an_unresolved_key_to_its_leaf() {
+    // A qualified spelling the single-file resolver cannot pin
+    // (`cmp::PartialEq`) and a glob-visible module (`use Kind::*;`) both
+    // leave the key `@unresolved-trait::…`. No crate trait carries the leaf,
+    // so the foreign lane is keyed `PartialEq`: the str-side impl gets its
+    // lane function instead of a "lane is skipped" note, and no `@` key is
+    // ever spelled as a namespace.
+    let qualified = transpile_str(
+        r#"
+        use crate::cmp;
+        pub struct A { pub x: i32 }
+        impl cmp::PartialEq<A> for str {
+            fn eq(&self, o: &A) -> bool { o.x == self.len() as i32 }
+        }
+        "#,
+    );
+    assert!(
+        qualified.contains("eq(PartialEq_::impl_::tag, const std::string_view& self_, const A& o)"),
+        "{qualified}"
+    );
+    assert!(!qualified.contains("UNRESOLVED TRAIT PATH"), "{qualified}");
+    assert!(!qualified.contains("@unresolved-trait"), "{qualified}");
+    let glob = transpile_str(
+        r#"
+        pub enum Kind { Big, Small }
+        pub mod inner {
+            use super::Kind::*;
+            pub struct B { pub n: usize }
+            impl PartialEq<B> for str {
+                fn eq(&self, o: &B) -> bool { self.len() == o.n }
+            }
+            pub fn pick(k: super::Kind) -> usize {
+                match k { Big => 1, Small => 2 }
+            }
+        }
+        "#,
+    );
+    assert!(
+        glob.contains("eq(PartialEq_::impl_::tag, const std::string_view& self_, const"),
+        "{glob}"
+    );
+    assert!(!glob.contains("@unresolved-trait"), "{glob}");
+}
+
+#[test]
+fn test_untyped_maybe_uninit_repeat_is_typed_from_the_transpose_return_chain() {
+    // std's `Iterator::next_chunk` shape: `[const { MaybeUninit::uninit() }; N]`
+    // whose `.transpose().assume_init()` is returned — as the fn tail, and as
+    // `return Ok(unsafe { .. })` under `Result<[T; N], _>`. The return type
+    // types the local; without it the seed leaks `MaybeUninit<auto>`.
+    let out = transpile_str(
+        r#"
+        use std::mem::MaybeUninit;
+        pub struct Pair<T> { a: T, b: T }
+        impl<T: Copy> Pair<T> {
+            pub fn chunk<const N: usize>(&self) -> [T; N] {
+                let mut raw = [const { MaybeUninit::uninit() }; N];
+                for i in 0..N {
+                    raw[i] = MaybeUninit::new(self.a);
+                }
+                unsafe { raw.transpose().assume_init() }
+            }
+            pub fn chunk2<const N: usize>(&self) -> Result<[T; N], usize> {
+                let mut raw = [MaybeUninit::uninit(); N];
+                let raw_ptr = raw.as_mut_ptr().cast();
+                unsafe { std::ptr::copy_nonoverlapping(&self.b as *const T, raw_ptr, 1) };
+                return Ok(unsafe { raw.transpose().assume_init() });
+            }
+        }
+        "#,
+    );
+    assert!(!out.contains("MaybeUninit<auto>"), "{out}");
+    assert_eq!(out.matches("rusty::MaybeUninit<T>::uninit()").count(), 2, "{out}");
+    assert!(out.contains("std::array<rusty::MaybeUninit<T>, "), "{out}");
+}
+
+#[test]
+fn test_maybe_uninit_repeat_hint_from_the_initialized_element_wraps_the_seed() {
+    // `raw.map(|m| m.assume_init())` returned as `[T; N]` already hinted the
+    // local as `[T; N]` — the INITIALIZED element — and declared a
+    // `std::array<T, N>` seeded with a MaybeUninit: silently wrong. The seed's
+    // owner wraps the hint.
+    let out = transpile_str(
+        r#"
+        use std::mem::MaybeUninit;
+        pub struct Pair<T> { a: T }
+        impl<T: Copy> Pair<T> {
+            pub fn chunk<const N: usize>(&self) -> [T; N] {
+                let mut raw = [const { MaybeUninit::uninit() }; N];
+                for i in 0..N {
+                    raw[i] = MaybeUninit::new(self.a);
+                }
+                unsafe { raw.map(|m| m.assume_init()) }
+            }
+        }
+        "#,
+    );
+    assert!(!out.contains("MaybeUninit<auto>"), "{out}");
+    assert!(out.contains("std::array<rusty::MaybeUninit<T>, "), "{out}");
+    // (`std::array<T, N>` is still the fn's RETURN type — only the seeded
+    // local must not be declared as one.)
+    assert!(
+        !out.contains("std::array<T, rusty::sanitize_array_capacity<N>()> _repeat"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_uninitialized_tuple_let_declares_each_binding() {
+    // btree split.rs: `let (length_a, length_b);` assigned in both branches
+    // below. The pattern declares two deferred-init locals; it emitted
+    // nothing, so every assignment named an undeclared identifier.
+    let out = transpile_str(
+        r#"
+        pub fn split(c: bool, v: &[u8], total: usize) -> (usize, usize) {
+            let (length_a, length_b);
+            if c {
+                length_a = v.len();
+                length_b = total - length_a;
+            } else {
+                length_b = v.len();
+                length_a = total - length_b;
+            }
+            (length_a, length_b)
+        }
+        "#,
+    );
+    // Each binding is a deferred-init local typed from its assignments
+    // (the emitter's delayed-init storage), not an undeclared name.
+    assert!(out.contains("std::optional<size_t> length_a;"), "{out}");
+    assert!(out.contains("std::optional<size_t> length_b;"), "{out}");
+    assert!(out.contains("length_a.emplace(rusty::len(v));"), "{out}");
+}
+
+#[test]
+fn test_lane_head_qualifies_import_bound_types_through_reexports() {
+    // A lane forward declaration is emitted ahead of every module body: a
+    // param type the impl's module reaches through `use super::store::Slot`
+    // has no `using` in scope there, and the leaf `Slot` is declared in two
+    // modules, so the nested-type map cannot qualify it. The import binding
+    // names the declaring module exactly (through the `pub use` re-export).
+    let out = transpile_str(
+        r#"
+        pub mod store {
+            pub struct Bucket<T> { pub n: usize, pub m: core::marker::PhantomData<T> }
+            pub mod inner {
+                pub struct Slot<T> { pub n: usize, pub m: core::marker::PhantomData<T> }
+            }
+            pub use self::inner::Slot;
+        }
+        pub mod other {
+            pub struct Slot { pub k: u8 }
+        }
+        pub mod spec {
+            use super::store::{Bucket, Slot};
+            pub trait SpecFrom<I> {
+                fn spec_from(it: I) -> Self;
+            }
+            impl<T> SpecFrom<Slot<T>> for Bucket<T> {
+                fn spec_from(it: Slot<T>) -> Self {
+                    Bucket { n: it.n, m: core::marker::PhantomData }
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::self_tag<::store::Bucket<T>>, ::store::inner::Slot<T> it, rusty::tag<::store::inner::Slot<T>> = {});"),
+        "{out}"
+    );
+    assert!(!out.contains(", Slot<T> it,"), "{out}");
+}
+
+#[test]
+fn test_cpp_inherit_base_is_keyed_by_the_implementors_module() {
+    // alloc: `rc::WeakInner` implements `RcInnerPtr`; `sync::WeakInner` is an
+    // unrelated struct of the same name. The base clause belongs to the
+    // module that recorded the impl — the other struct stays base-less
+    // (it inherited the interface and was abstract).
+    let out = transpile_str_interface_traits_with_authenticated_cpp_inherit(
+        r#"
+        use rusty::cpp_inherit;
+        pub mod a {
+            pub trait Counter {
+                fn count(&self) -> usize;
+            }
+            pub struct Inner { pub n: usize }
+            #[cpp_inherit]
+            impl Counter for Inner {
+                fn count(&self) -> usize { self.n }
+            }
+        }
+        pub mod b {
+            pub struct Inner { pub k: usize }
+            impl Inner {
+                pub fn get(&self) -> usize { self.k }
+            }
+        }
+        "#,
+    );
+    assert_eq!(out.matches("struct Inner : public").count(), 1, "{out}");
+    assert!(out.contains("struct Inner {"), "{out}");
+}
+
+#[test]
+fn test_one_field_positional_struct_literal_uses_braces() {
+    // A struct whose literals take the positional route (an operator trait
+    // renames a member, so the emitter avoids designated init) with ONE
+    // field: `W(x)` is a functional cast, not aggregate init — no converting
+    // ctor exists, so clang rejects it. `W{x}` aggregate-initializes.
+    let out = transpile_str(
+        r#"
+        pub struct W { v: Vec<u8> }
+        impl PartialEq for W {
+            fn eq(&self, o: &W) -> bool { self.v.len() == o.v.len() }
+        }
+        impl W {
+            pub fn new() -> W { W { v: Vec::new() } }
+        }
+        "#,
+    );
+    assert!(out.contains("W{rusty::Vec<uint8_t>::new_()}"), "{out}");
+    assert!(!out.contains("W(rusty::Vec<uint8_t>::new_())"), "{out}");
 }

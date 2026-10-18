@@ -12515,6 +12515,16 @@ impl CodeGen {
         };
         // Use positional constructor syntax (not designated initializers) when the
         // struct has impl blocks that make it non-aggregate in C++.
+        // Types whose positional literal targets a SYNTHESIZED fieldwise ctor
+        // (non-aggregates): `T(x)` is a constructor call there.
+        let has_fieldwise_ctor = resolved_struct_name.as_ref().is_some_and(|name| {
+            self.is_cpp_inherit_type(name)
+                || self.type_has_drop_impl(name)
+                || self
+                    .cross_file_drop_tails
+                    .contains(name.rsplit("::").next().unwrap_or(name))
+                || self.type_has_phantom_pinned(name)
+        });
         let has_impl_methods = resolved_struct_name.as_ref().is_some_and(|name| {
             // cpp_inherit structs are non-aggregate; designated init is illegal,
             // so always route them through the positional-ctor form (which
@@ -12600,7 +12610,19 @@ impl CodeGen {
                                 )
                             })
                             .collect();
-                        let emitted = format!("{}({})", target_name, args.join(", "));
+                        let emitted = if args.len() == 1 && !has_fieldwise_ctor {
+                            // One parenthesized argument is a functional CAST
+                            // (`T(x)` is `(T)x`), not C++20 parenthesized
+                            // aggregate init: a one-field AGGREGATE (impl
+                            // methods / operator renames only, no synthesized
+                            // ctor) has no converting ctor, so the literal
+                            // never compiled (alloc's `String { vec:
+                            // Vec::new() }`). Braces aggregate-initialize. A
+                            // type with a fieldwise ctor keeps the call form.
+                            format!("{}{{{}}}", target_name, args[0])
+                        } else {
+                            format!("{}({})", target_name, args.join(", "))
+                        };
                         if let Some(expected_ty) = expected_ty
                             && is_variant_struct_literal_target
                             && let Some(wrapped) = self

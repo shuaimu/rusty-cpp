@@ -852,6 +852,11 @@ impl CodeGen {
                 &mut placeholder_hints,
             );
             block_profile_mark("augment_option_none_placeholder_hints_from_return_context");
+            self.augment_uninit_repeat_local_hints_from_transpose_return_context(
+                &block.stmts,
+                &mut placeholder_hints,
+            );
+            block_profile_mark("augment_uninit_repeat_local_hints_from_transpose_return_context");
             self.augment_mut_unsuffixed_int_seed_hints_from_option_return_context(
                 &block.stmts,
                 &mut placeholder_hints,

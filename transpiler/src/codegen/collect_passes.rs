@@ -3363,7 +3363,17 @@ impl CodeGen {
                                 // this implementor is `cpp_inherit_trait`'s entry, every
                                 // later one joins `cpp_inherit_extra_traits`.
                                 let scoped = self.scoped_type_key(&simple_type_name);
-                                for key in [simple_type_name.clone(), type_name.clone(), scoped.clone()] {
+                                // The impl's own module (module_stack is not
+                                // pushed during collection): the key emit_struct
+                                // looks up first, so a same-named struct in
+                                // another module never inherits this impl's
+                                // interface (alloc's rc::WeakInner / sync::WeakInner).
+                                let module_scoped = if module_path.is_empty() {
+                                    simple_type_name.clone()
+                                } else {
+                                    format!("{}::{}", module_path.join("::"), simple_type_name)
+                                };
+                                for key in [simple_type_name.clone(), type_name.clone(), scoped.clone(), module_scoped] {
                                     match self.cpp_inherit_trait.get(&key) {
                                         None => {
                                             self.cpp_inherit_trait.insert(key, trait_short.clone());
@@ -7279,8 +7289,13 @@ impl CodeGen {
                         continue;
                     }
 
-                    let trait_scoped_key =
-                        self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+                    // Keyed exactly as synthesize_foreign_trait_lanes keys the
+                    // lane: a foreign trait's `@unresolved-trait::` key collapses
+                    // to its leaf (trait_declared_paths is complete here).
+                    let trait_scoped_key = self.foreign_trait_lane_key(
+                        self.resolve_trait_scoped_key_for_impl(trait_path, module_path),
+                        &blanket_trait_name,
+                    );
                     let mut associated_type_bindings: HashMap<String, syn::Type> = HashMap::new();
                     for impl_item in &impl_block.items {
                         if let syn::ImplItem::Type(assoc) = impl_item {

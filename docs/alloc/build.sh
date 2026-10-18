@@ -39,7 +39,7 @@ cp "$SRC/borrow.rs" "$W/src/borrow.rs"
 cp "$SRC/rc.rs" "$W/src/rc.rs"
 cp "$SRC/sync.rs" "$W/src/sync.rs"
 printf 'pub mod vec_deque;\npub use vec_deque::VecDeque;\npub mod binary_heap;\npub use binary_heap::BinaryHeap;\npub mod linked_list;\npub use linked_list::LinkedList;\nmod btree;\npub mod btree_map {\n    pub use super::btree::map::*;\n}\npub mod btree_set {\n    pub use super::btree::set::*;\n}\npub use btree_map::BTreeMap;\npub use btree_set::BTreeSet;\n' > "$W/src/collections/mod.rs"
-cat > "$W/Cargo.toml" <<EOF
+cat > "$W/Cargo.toml" <<'EOF'
 [package]
 name = "alloc"
 version = "0.0.1"

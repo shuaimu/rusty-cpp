@@ -1194,6 +1194,21 @@ impl CodeGen {
     /// first (short names). Empty for a non-cpp_inherit type.
     pub(super) fn cpp_inherit_traits_of(&self, type_name: &str) -> Vec<String> {
         let scoped_key = self.scoped_type_key(type_name);
+        // Same-named structs in different modules (alloc's `rc::WeakInner`
+        // implements `RcInnerPtr`; `sync::WeakInner` implements nothing): the
+        // bare-name entry belongs to whichever module recorded it. Inside a
+        // module, only our own module-scoped entry counts when another
+        // module's scoped entry exists for the leaf.
+        if !self.module_stack.is_empty() && !self.cpp_inherit_trait.contains_key(&scoped_key) {
+            let suffix = format!("::{}", type_name);
+            let another_module_owns_it = self
+                .cpp_inherit_trait
+                .keys()
+                .any(|k| k != &scoped_key && k.ends_with(&suffix));
+            if another_module_owns_it {
+                return Vec::new();
+            }
+        }
         let Some(first) = self
             .cpp_inherit_trait
             .get(type_name)

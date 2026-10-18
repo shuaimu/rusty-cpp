@@ -21,6 +21,9 @@ REPO = Path(__file__).resolve().parents[2]
 # Structural rules that assume the per-submodule layout — harmful or moot here.
 NEUTRALIZE = {
     "patch_module_qualified_refs",           # strips real submodule:: namespaces
+    # 2026-10-18: the emitter keeps one `spec_extend(I iter)` member on Vec
+    # itself (the SpecExtend impl collapse); the stand-in would redeclare it.
+    "patch_inject_vec_spec_extend_member",
     "patch_merge_drain_into_vec",
     "patch_merge_extract_if_into_vec",
     "_merge_aux_module_into_vec",
@@ -588,6 +591,20 @@ def _alloc_specific(cpp_out: Path):
         t = t.replace("std::ub_checks::assert_unsafe_precondition", "rusty::intrinsics::noop")
         # Vec self-defines Vec; the umbrella alias isn't in scope here.
         t = t.replace("rusty::Vec<", "Vec<")
+        # …except at GLOBAL scope: the implementor markers (`template<..>
+        # struct impls_<Tr><Vec<..>>`) precede every module body's `using
+        # vec::Vec;`, so the bare name does not resolve there.
+        t = re.sub(r"(struct impls_\w+<)Vec<", r"\1::vec::Vec<", t)
+        # `impl Error for OccupiedError` (btree/map/entry.rs): the marker's
+        # self type is spelled through the `pub mod btree_map { pub use
+        # super::btree::map::*; }` glob-shell alias the C++ never populates
+        # (the usings come with the module body, after the marker). Spell the
+        # declaring module. (Transpiler gap: a glob re-export shell as a
+        # type's nested-module path for global-scope spellings.)
+        t = t.replace(
+            "struct impls_Error<::collections::btree_map::OccupiedError<",
+            "struct impls_Error<::collections::btree::map::entry::OccupiedError<",
+        )
         # The transpiler puts `requires (Allocator<A>)` on the Vec/VecDeque
         # CLASS template but NOT on the out-of-line method DEFINITIONS, so they
         # mismatch ("requires clause differs in template redeclaration").
@@ -630,13 +647,17 @@ def _alloc_specific(cpp_out: Path):
         # emits the branch assignments but drops the hoisted binding decl.
         # join_head_and_tail_wrapping is the one site; inject the decl (all
         # three are physical indices → size_t, matching the vendored port).
-        t = t.replace(
-            "const auto join_head_and_tail_wrapping = [](auto& source_deque, "
-            "size_t drain_len, size_t head_len, size_t tail_len) {\n",
-            "const auto join_head_and_tail_wrapping = [](auto& source_deque, "
-            "size_t drain_len, size_t head_len, size_t tail_len) {\n"
-            "                                size_t src, dst, len;\n",
-        )
+        # OBSOLETE since 2026-10-18: `let (src, dst, len);` is split by the
+        # transpiler into three deferred-init locals (let_tuple_uninit.rs);
+        # a second declaration is a redefinition. Guarded for older emitters.
+        if "std::optional<size_t> src;" not in t:
+            t = t.replace(
+                "const auto join_head_and_tail_wrapping = [](auto& source_deque, "
+                "size_t drain_len, size_t head_len, size_t tail_len) {\n",
+                "const auto join_head_and_tail_wrapping = [](auto& source_deque, "
+                "size_t drain_len, size_t head_len, size_t tail_len) {\n"
+                "                                size_t src, dst, len;\n",
+            )
         # Late-init `let ret; unsafe { ret = ptr::read(..); .. }` — the transpiler
         # scopes `ret` inside the inner unsafe block, which closes before
         # `return Some(ret)`. Dissolve the inner block so ret survives (it's
@@ -666,6 +687,37 @@ def _alloc_specific(cpp_out: Path):
         )
         # `const { … }` value blocks emitted as an argument (const-eval seed)
         # also collapse to `(void)0`; already covered by the replace above.
+        # raw_vec::handle_error — vec_port's `patch_handle_error_function` stubs
+        # the body (variant-as-parameter `std::visit`, `.kind()` on a field,
+        # unqualified `AllocError`) but is keyed on `vec_port.raw_vec.cppm`;
+        # the single module applies the same stub here.
+        t = re.sub(
+            r"\[\[noreturn\]\] (constexpr )?void handle_error\(([^)]+)\) \{[\s\S]*?\n    \}",
+            r"[[noreturn]] \1void handle_error(\2) {\n"
+            r"        if (e.kind == rusty::collections::TryReserveErrorKind::CapacityOverflow) {\n"
+            r"            capacity_overflow();\n"
+            r"        }\n"
+            r"        // AllocError branch: abort (a full port would call handle_alloc_error).\n"
+            r"        rusty::intrinsics::abort();\n"
+            r"    }",
+            t,
+            count=1,
+        )
+        # in_place_collect's `SpecFromIter for Vec<T>` (I: InPlaceCollect):
+        # `let fun: fn(I) -> Vec<T> = const { if in_place_collectible::<..>(..)
+        # { from_iter_in_place } else { SpecFromIterNested::<T, I>::from_iter } }`
+        # selects a fn ITEM at const-eval. C++ cannot form the SafeFn from the
+        # uninstantiated `from_iter_in_place` template, and the in-place path
+        # needs the SourceIter/AsVecIntoIter machinery the port does not model.
+        # The nested path is the always-correct fallback (it is what the
+        # collapsed impl keeps as `rusty_SpecFromIterNested_from_iter`).
+        t = re.sub(
+            r"const rusty::SafeFn<Vec<T>\(I\)> fun = \(::vec::in_place_collect::in_place_collectible<[^\n]*\n"
+            r"( *)return fun\(std::move\(iterator\)\);",
+            r"\1return rusty_SpecFromIterNested_from_iter(std::move(iterator));",
+            t,
+            count=1,
+        )
         # `rusty::alloc::Global` is a (unit) TYPE; using it as a value needs an
         # instance.
         t = t.replace("= rusty::alloc::Global;", "= rusty::alloc::Global{};")
@@ -721,8 +773,10 @@ def _alloc_specific(cpp_out: Path):
         # memset-zero fast path, so returning false (element-wise fill) is
         # always correct. Rewrite just the Option-of-bool bodies (same-size
         # is_zero(u8)/(i8)/… transmutes are fine, left untouched).
+        # (2026-10: the impl is a lane function now — `is_zero(IsZero_::impl_::tag,
+        # const rusty::Option<bool>& self_)`; the tag parameter is optional here.)
         t = re.sub(
-            r"(export bool is_zero\(const rusty::Option<[^;{]*?bool[^;{]*?>& self_\) \{\n)"
+            r"(export bool is_zero\((?:IsZero_::impl_::tag, )?const rusty::Option<[^;{]*?bool[^;{]*?>& self_\) \{\n)"
             r" +using Self[^\n]*\n"
             r" +const uint8_t raw = rusty::mem::transmute[^\n]*\n"
             r" +return rusty::detail::deref_if_pointer_like\(raw\)[^\n]*\n"
@@ -1078,17 +1132,19 @@ def _alloc_specific(cpp_out: Path):
         # (str -> std::string_view, [T] -> std::span<const T>) have no member
         # Owned; Rust's blanket `impl<T: Clone> ToOwned for T` makes identity
         # the fallback. SFINAE the primary + add the two foreign specializations.
-        t = t.replace(
-            "template <class B> struct ToOwnedTraits { using Owned = typename B::Owned; };\n"
-            "    template <class S> struct ToOwnedTraits<S*> { using Owned = typename ToOwnedTraits<S>::Owned; };\n"
-            "    template <class S> struct ToOwnedTraits<S&> { using Owned = typename ToOwnedTraits<S>::Owned; };",
-            "template <class B, class = void> struct ToOwnedTraits { using Owned = std::remove_cvref_t<B>; };\n"
-            "    template <class B> struct ToOwnedTraits<B, std::void_t<typename B::Owned>> { using Owned = typename B::Owned; };\n"
-            "    template <class S> struct ToOwnedTraits<S*, void> { using Owned = typename ToOwnedTraits<S>::Owned; };\n"
-            "    template <class S> struct ToOwnedTraits<S&, void> { using Owned = typename ToOwnedTraits<S>::Owned; };\n"
-            "    template <> struct ToOwnedTraits<std::string_view, void> { using Owned = rusty::String; };\n"
-            "    template <class T> struct ToOwnedTraits<std::span<const T>, void> { using Owned = vec::Vec<T>; };",
-        )
+        # The specializations are `export`ed since 2026-10; both shapes anchor.
+        for exp in ("export ", ""):
+            t = t.replace(
+                "template <class B> struct ToOwnedTraits { using Owned = typename B::Owned; };\n"
+                f"    {exp}template <class S> struct ToOwnedTraits<S*> {{ using Owned = typename ToOwnedTraits<S>::Owned; }};\n"
+                f"    {exp}template <class S> struct ToOwnedTraits<S&> {{ using Owned = typename ToOwnedTraits<S>::Owned; }};",
+                "template <class B, class = void> struct ToOwnedTraits { using Owned = std::remove_cvref_t<B>; };\n"
+                f"    {exp}template <class B> struct ToOwnedTraits<B, std::void_t<typename B::Owned>> {{ using Owned = typename B::Owned; }};\n"
+                f"    {exp}template <class S> struct ToOwnedTraits<S*, void> {{ using Owned = typename ToOwnedTraits<S>::Owned; }};\n"
+                f"    {exp}template <class S> struct ToOwnedTraits<S&, void> {{ using Owned = typename ToOwnedTraits<S>::Owned; }};\n"
+                f"    {exp}template <> struct ToOwnedTraits<std::string_view, void> {{ using Owned = rusty::String; }};\n"
+                f"    {exp}template <class T> struct ToOwnedTraits<std::span<const T>, void> {{ using Owned = vec::Vec<T>; }};",
+            )
         # ── binary_heap: usize::BITS leaked verbatim (assoc-const on primitive).
         t = t.replace("usize::BITS", "(8u * sizeof(size_t))")
         # binary_heap instantiation fixes (surface with concrete T):
@@ -1147,20 +1203,29 @@ def _alloc_specific(cpp_out: Path):
         # `auto a_next = RUSTY_TRY_OPT(…)` declarations — keep those.)
         t = re.sub(r"auto (a_next|b_next) = (?!RUSTY_TRY_OPT)", r"\1 = ", t)
         # (b4) split.rs calc_split_length(): `let (length_a, length_b);`
-        t = re.sub(
-            r"( *)(inline std::tuple<size_t, size_t> __rusty_alias_Root_calc_split_length\([^)]*\) \{\n)",
-            r"\1\2\1    size_t length_a; size_t length_b;\n",
-            t,
-            count=1,
-        )
+        # OBSOLETE since 2026-10-18: the transpiler splits an uninitialized
+        # tuple `let` into one deferred-init local per binding
+        # (let_tuple_uninit.rs) and types each from its assignments. Kept
+        # guarded for older emitters: only when the body declares neither.
+        if not re.search(r"__rusty_alias_Root_calc_split_length\([^)]*\) \{\n(?:[^\n]*\n){0,3}?[^\n]*\blength_a;", t):
+            t = re.sub(
+                r"( *)(inline std::tuple<size_t, size_t> __rusty_alias_Root_calc_split_length\([^)]*\) \{\n)",
+                r"\1\2\1    size_t length_a; size_t length_b;\n",
+                t,
+                count=1,
+            )
         # (b5) append.rs bulk_push(): `let mut open_node;` — typed via the
         # (scope-visible) Err-arm assignment's decltype.
-        t = re.sub(
-            r"( *)(auto test_node = cur_node\.forget_type\(\);\n)",
-            r"\1std::remove_cvref_t<decltype(self_.push_internal_level(rusty::clone(alloc)))> open_node;\n\1\2",
-            t,
-            count=1,
-        )
+        # OBSOLETE since 2026-10-18: the transpiler declares the deferred-init
+        # local itself (`std::optional<NodeRef<…>> open_node;`); a second
+        # declaration is a redeclaration. Kept guarded for older emitters.
+        if not re.search(r"> open_node;\n", t):
+            t = re.sub(
+                r"( *)(auto test_node = cur_node\.forget_type\(\);\n)",
+                r"\1std::remove_cvref_t<decltype(self_.push_internal_level(rusty::clone(alloc)))> open_node;\n\1\2",
+                t,
+                count=1,
+            )
         t = t.replace("auto open_node = parent_shadow1;", "open_node = parent_shadow1;")
         # (b6) set.rs is_subset(): refutable `let (Some(a), Some(b)) = … else`
         # emitted as /* TODO: pattern */ structured bindings with the else
@@ -2291,8 +2356,15 @@ def _vd_suite_fixes(text: str) -> str:
 
 
 def run(cpp_out: Path):
-    for rel in ("docs/vec_port/post_transpile_patch.py",
-                "docs/vec_deque_port/post_transpile_patch.py"):
+    # vec_deque_port's patcher is NOT chained any more: its 2026-10 regen
+    # rewrote `main()` to a no-arg argv entry (the chained `main(cpp_out)` call
+    # raised TypeError and silently applied nothing since then), and its global
+    # rules now target the standalone port's `::rusty::port::vec::Vec` shape —
+    # measured on the single-module output they are a net +3 errors
+    # (`redefinition of dst/len/src`, a `Default_::default_` lookup). The one
+    # rule the consolidated module still wants (`_stub_copied_spec_extend_front`)
+    # is loaded explicitly in _alloc_specific.
+    for rel in ("docs/vec_port/post_transpile_patch.py",):
         m = load(rel)
         for name in NEUTRALIZE:
             if hasattr(m, name):

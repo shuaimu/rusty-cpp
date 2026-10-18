@@ -5714,6 +5714,126 @@ impl CodeGen {
         out
     }
 
+    /// serde_core Fix B, extended to IMPORTED names (book § 3.2.7): a lane
+    /// forward declaration is emitted ahead of every module body, so a type
+    /// the impl's module reaches through `use crate::vec::Vec` / `use
+    /// super::IntoIter` has no `using` in scope there yet, and
+    /// `local_type_module_path` cannot qualify it either when the leaf is
+    /// declared in several modules (alloc's five `IntoIter`s blank the entry).
+    /// The impl module's import bindings name the declaring module exactly:
+    /// qualify each bare identifier bound to a crate-declared type (through a
+    /// re-export, `vec::IntoIter` → `vec::into_iter::IntoIter`) absolutely.
+    /// No-op outside a lane (`ufcs_impl_module_path` empty) and for names
+    /// already preceded or followed by `::`.
+    fn qualify_import_bound_types_in_type_string(&self, s: &str) -> String {
+        if self.ufcs_impl_module_path.is_empty() {
+            return s.to_string();
+        }
+        let bytes = s.as_bytes();
+        let mut out = String::with_capacity(s.len() + 16);
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            if c.is_alphabetic() || c == '_' {
+                let start = i;
+                while i < bytes.len() && ((bytes[i] as char).is_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let ident = &s[start..i];
+                let already_qualified = start >= 2 && &s[start - 2..start] == "::";
+                let followed_by_path_sep =
+                    i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b':';
+                if !already_qualified
+                    && !followed_by_path_sep
+                    && let Some(path) = self.import_bound_crate_type_cpp_path(ident)
+                {
+                    out.push_str(&path);
+                    continue;
+                }
+                out.push_str(ident);
+            } else {
+                out.push(c);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// The absolute C++ spelling of a crate-declared type that `ident` names
+    /// through a `use` binding visible in the current lane's impl module
+    /// (`::vec::into_iter::IntoIter`), or `None` when the name is not bound,
+    /// bound ambiguously, or bound to something other than a crate type.
+    fn import_bound_crate_type_cpp_path(&self, ident: &str) -> Option<String> {
+        let debug = std::env::var_os("RUSTY_CPP_DEBUG_IMPORT_QUALIFY").is_some();
+        let lookup = crate::transpile::nearest_rust_item_import_targets(
+            ident,
+            &self.ufcs_impl_module_path,
+            &self.rust_item_import_bindings,
+        );
+        if debug {
+            let own = format!("{}::{}", self.ufcs_impl_module_path.join("::"), ident);
+            eprintln!(
+                "[rusty-cpp][import-qualify] ident={} module={:?} targets={:?} own_declared={} nested_path={:?} declared_with_leaf={:?}",
+                ident,
+                self.ufcs_impl_module_path,
+                lookup.as_ref().map(|(_, t)| t.iter().cloned().collect::<Vec<_>>()),
+                self.local_declared_types.contains(&own),
+                self.local_type_module_path.get(ident),
+                self.local_declared_types
+                    .iter()
+                    .filter(|k| k.rsplit("::").next() == Some(ident))
+                    .take(6)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            );
+        }
+        let Some((_, targets)) = lookup else {
+            // Not imported: the impl module's own declaration (alloc's
+            // `impl From<..> for Vec<T>` inside `vec`, where the crate-defined
+            // builtin has no nested-module entry to qualify through).
+            let own = format!("{}::{}", self.ufcs_impl_module_path.join("::"), ident);
+            if !self.local_declared_types.contains(&own) {
+                return None;
+            }
+            let renamed = self.renamed_module_scope_segments(&self.ufcs_impl_module_path);
+            return Some(format!("::{}::{}", renamed.join("::"), escape_cpp_keyword(ident)));
+        };
+        if targets.len() != 1 {
+            return None;
+        }
+        let target = targets.iter().next()?;
+        let crate_path = target.strip_prefix("@crate:")?;
+        // The import's literal target first: the re-export resolver may
+        // prefer a public alias module (`collections::btree_map`, a glob
+        // re-export shell) that the C++ does not populate with every name.
+        let resolved = self.resolve_nested_local_reexport_path(crate_path);
+        let candidate = if self.local_declared_types.contains(crate_path) {
+            crate_path.to_string()
+        } else if self.local_declared_types.contains(&resolved) {
+            resolved
+        } else if crate_path
+            .split("::")
+            .next()
+            .is_some_and(|head| self.declared_module_names.contains(head))
+        {
+            // A crate module's item the type registry does not carry under
+            // this key (alloc's own `vec::Vec`, a builtin the stdlib crate
+            // defines itself): the import still says where it is emitted.
+            resolved
+        } else {
+            return None;
+        };
+        let mut segments: Vec<String> = candidate.split("::").map(|s| s.to_string()).collect();
+        let leaf = segments.pop()?;
+        if leaf != ident || segments.is_empty() {
+            // A renaming import (`use a::B as C`) or a crate-root type: the
+            // bare spelling already resolves at global scope.
+            return None;
+        }
+        let renamed = self.renamed_module_scope_segments(&segments);
+        Some(format!("::{}::{}", renamed.join("::"), escape_cpp_keyword(&leaf)))
+    }
+
     pub(super) fn qualify_nested_local_types_in_type_string(&self, s: &str) -> String {
         if self.local_type_module_path.is_empty() {
             return s.to_string();
@@ -8030,8 +8150,11 @@ impl CodeGen {
                 self.cross_file_auto_trait_aliases.values().cloned().collect();
             // `<u8>::MAX` / `<u8>::from_str_radix(..)` → the plain primitive
             // path every route lowers (primitive_qself.rs).
+            // `let (a, b);` → one deferred-init `let` per binding
+            // (let_tuple_uninit.rs).
             let changed = crate::alias_impl_inline::inline_alias_impl_headers(&mut candidate, &aliases, &nominal)
-                + crate::primitive_qself::rewrite_primitive_qself_paths(&mut candidate);
+                + crate::primitive_qself::rewrite_primitive_qself_paths(&mut candidate)
+                + crate::let_tuple_uninit::split_uninit_tuple_lets(&mut candidate);
             if changed > 0 {
                 alias_inlined_file = candidate;
                 &alias_inlined_file
@@ -21443,11 +21566,25 @@ impl CodeGen {
         let Some((_, trait_path, _)) = impl_block.trait_.as_ref() else {
             return;
         };
-        let trait_key = self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+        // Keyed as the lane is keyed: a foreign trait's `@unresolved-trait::`
+        // spelling collapses to its leaf (see foreign_trait_lane_key), so a
+        // foreign-self impl written `cmp::PartialEq<X> for str` reaches the
+        // lane synthesized under `PartialEq`.
+        let trait_key = self.foreign_trait_lane_key(
+            self.resolve_trait_scoped_key_for_impl(trait_path, module_path),
+            &written_trait_name,
+        );
         // Phase 7: only an exactly resolved crate-declared trait gets UFCS free
         // functions. A foreign import sharing the leaf with a local trait must
         // not acquire that local trait's helper surface.
         if !self.trait_declared_paths.contains(&trait_key) {
+            return;
+        }
+        // Book §3.2.16 phase 3 / (aa): a synthesized foreign lane carries the
+        // impls the extension collector kept (a non-local self type); a
+        // crate-local self type's impl of that std trait keeps its member
+        // route (see impl_rides_foreign_lane_by_member_route).
+        if self.impl_rides_foreign_lane_by_member_route(impl_block, &trait_key, module_path) {
             return;
         }
         let trait_name = trait_key
@@ -21613,22 +21750,37 @@ impl CodeGen {
         let Some((_, trait_path, _)) = impl_block.trait_.as_ref() else {
             return;
         };
-        let trait_key = self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
-        // Phase 7: only an exactly resolved crate-declared trait gets UFCS
-        // declarations (mirrors the definition emitter).
-        if !self.trait_declared_paths.contains(&trait_key) {
-            return;
-        }
         let written_trait_name = trait_path
             .segments
             .last()
             .map(|s| s.ident.to_string())
             .unwrap_or_default();
+        // Keyed as the lane is keyed (see the definition emitter).
+        let trait_key = self.foreign_trait_lane_key(
+            self.resolve_trait_scoped_key_for_impl(trait_path, module_path),
+            &written_trait_name,
+        );
+        // Phase 7: only an exactly resolved crate-declared trait gets UFCS
+        // declarations (mirrors the definition emitter).
+        if !self.trait_declared_paths.contains(&trait_key) {
+            return;
+        }
         let trait_name = trait_key
             .rsplit("::")
             .next()
             .unwrap_or(&written_trait_name)
             .to_string();
+        if self.impl_rides_foreign_lane_by_member_route(impl_block, &trait_key, module_path) {
+            // The implementor marker is the contract (`has_<Tr><Local>` in
+            // lane heads and in consumers); only the lane copy of the body
+            // and its bridge are skipped (mirrors the definition emitter).
+            self.ufcs_impl_module_path = module_path.to_vec();
+            self.ufcs_tag_namespace = Some(format!("{}_", trait_name));
+            self.emit_ufcs_impl_marker_specialization(impl_block, &trait_name);
+            self.ufcs_impl_module_path.clear();
+            self.ufcs_tag_namespace = None;
+            return;
+        }
         let Some((_, specs)) =
             Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods, module_path)
         else {
@@ -22432,9 +22584,11 @@ impl CodeGen {
             return;
         }
         if type_params.is_empty() {
-            let self_cpp = self.qualify_nested_local_type_for_global_scope(
-                &self.rewrite_cpp_import_bound_type_spelling(
-                    &self.map_type(impl_block.self_ty.as_ref()),
+            let self_cpp = self.qualify_import_bound_types_in_type_string(
+                &self.qualify_nested_local_type_for_global_scope(
+                    &self.rewrite_cpp_import_bound_type_spelling(
+                        &self.map_type(impl_block.self_ty.as_ref()),
+                    ),
                 ),
             );
             if self.extension_self_type_mapping_is_unsupported(&self_cpp)
@@ -22561,9 +22715,11 @@ impl CodeGen {
             return;
         }
         self.push_type_param_scope(&impl_block.generics);
-        let self_cpp = self.qualify_nested_local_type_for_global_scope(
-            &self.rewrite_cpp_import_bound_type_spelling(
-                &self.map_type(impl_block.self_ty.as_ref()),
+        let self_cpp = self.qualify_import_bound_types_in_type_string(
+            &self.qualify_nested_local_type_for_global_scope(
+                &self.rewrite_cpp_import_bound_type_spelling(
+                    &self.map_type(impl_block.self_ty.as_ref()),
+                ),
             ),
         );
         self.pop_type_param_scope();
@@ -23226,6 +23382,7 @@ impl CodeGen {
                 if let Some(full) = self
                     .trait_declared_path_by_short_name
                     .get(&trait_name)
+                    .filter(|full| !full.starts_with('@'))
                 {
                     let segments: Vec<&str> = full.split("::").collect();
                     if segments.len() > 1 {
@@ -24056,6 +24213,10 @@ impl CodeGen {
             trailing_keys.retain(|p| !p.starts_with("rusty::self_tag<"));
         }
         params.extend(trailing_keys);
+        // Fix B for imported names (see qualify_import_bound_types_in_type_string).
+        for param in params.iter_mut() {
+            *param = self.qualify_import_bound_types_in_type_string(param);
+        }
 
         if method_name == "serialize"
             && method.sig.inputs.len() == 2
@@ -24093,6 +24254,7 @@ impl CodeGen {
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
         return_type = self.absolutize_shadowed_module_refs_in_ufcs_signature(&return_type);
+        return_type = self.qualify_import_bound_types_in_type_string(&return_type);
         // UFCS heads deduce `Self_&&` as an lvalue reference for `&mut self`
         // receivers (Compound<...>&), where a leading `typename Self_::Error`
         // is ill-formed — spell through remove_cvref (identity for value Self_).
@@ -24435,7 +24597,10 @@ impl CodeGen {
                         {
                             continue;
                         }
-                        let key = cg.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+                        let key = cg.foreign_trait_lane_key(
+                            cg.resolve_trait_scoped_key_for_impl(trait_path, module_path),
+                            &leaf,
+                        );
                         let methods: Vec<String> = imp
                             .items
                             .iter()
@@ -24489,6 +24654,80 @@ impl CodeGen {
                 }
             }
         }
+    }
+
+    /// Book §3.2.16 phase 3 / (aa): the lane a foreign trait gets is keyed by
+    /// the trait itself. A glob-visible module (`use Kind::*;`) or a qualified
+    /// spelling (`cmp::PartialEq`, `core::error::Error`) leaves the resolver's
+    /// key an `@unresolved-trait::` one; when no crate trait carries that leaf
+    /// the glob cannot have bound it to a local declaration, so the leaf IS
+    /// the key. Registered verbatim, the `@` key was spelled as a namespace
+    /// (`namespace @unresolved-trait {}`) and kept the impl's lane skipped.
+    pub(super) fn foreign_trait_lane_key(&self, key: String, leaf: &str) -> String {
+        if key.starts_with("@unresolved-trait::")
+            && !self.trait_declared_paths.iter().any(|k| {
+                // The synthesized lane's own key (`PartialEq`, registered by
+                // synthesize_foreign_trait_lanes) is not a crate declaration:
+                // the impl emitters resolve the same written path AFTER the
+                // synthesis and must still collapse to it.
+                !k.starts_with('@')
+                    && !self.foreign_lane_trait_keys.contains(k)
+                    && k.rsplit("::").next() == Some(leaf)
+            })
+        {
+            return leaf.to_string();
+        }
+        key
+    }
+
+    /// Book §3.2.16 phase 3 / (aa): a synthesized foreign lane exists for the
+    /// impls the extension collector kept — a NON-local self type, which has
+    /// no C++ member to carry the body. A crate-local self type's impl of that
+    /// same std trait is not lane-carried: it keeps its member route (the
+    /// dispatchers' member tier reaches it, and no `<Tr>_::impl_` call site is
+    /// ever emitted for it), and its implementor marker is still emitted. The
+    /// lane copy of its body would be emitted in the weaker free-function
+    /// context (alloc: ~300 Default/From lanes for local types, 55 errors).
+    fn impl_rides_foreign_lane_by_member_route(
+        &self,
+        impl_block: &syn::ItemImpl,
+        trait_key: &str,
+        module_path: &[String],
+    ) -> bool {
+        self.foreign_lane_trait_keys.contains(trait_key)
+            && self.impl_self_type_is_crate_local(impl_block, module_path)
+    }
+
+    /// The extension collector's locality test for an impl's self type (see
+    /// collect_extension_trait_impl_methods): declared by this crate under its
+    /// raw, module-scoped, or re-export-resolved spelling.
+    fn impl_self_type_is_crate_local(
+        &self,
+        impl_block: &syn::ItemImpl,
+        module_path: &[String],
+    ) -> bool {
+        let Some(tp) = Self::impl_self_type_path(impl_block.self_ty.as_ref()) else {
+            return false;
+        };
+        let raw_self_name = tp
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let resolved_raw_self_name = self.resolve_nested_local_reexport_path(&raw_self_name);
+        let scoped_self_name = qualify_impl_type_name(
+            &raw_self_name,
+            module_path,
+            &self.declared_item_names,
+            &self.local_declared_types,
+        );
+        let resolved_scoped_self_name = self.resolve_nested_local_reexport_path(&scoped_self_name);
+        self.local_declared_types.contains(&raw_self_name)
+            || self.local_declared_types.contains(&scoped_self_name)
+            || self.local_declared_types.contains(&resolved_raw_self_name)
+            || self.local_declared_types.contains(&resolved_scoped_self_name)
     }
 
     /// Book §3.2.16 phase 3 / (aa): is this trait (by short name) lane-carried
@@ -24937,6 +25176,7 @@ impl CodeGen {
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
         return_type = self.absolutize_shadowed_module_refs_in_ufcs_signature(&return_type);
+        return_type = self.qualify_import_bound_types_in_type_string(&return_type);
         // UFCS heads deduce `Self_&&` as an lvalue reference for `&mut self`
         // receivers (Compound<...>&), where a leading `typename Self_::Error`
         // is ill-formed — spell through remove_cvref (identity for value Self_).
@@ -25136,6 +25376,10 @@ impl CodeGen {
             trailing_keys.retain(|p| !p.starts_with("rusty::self_tag<"));
         }
         params.extend(trailing_keys);
+        // Fix B for imported names (see qualify_import_bound_types_in_type_string).
+        for param in params.iter_mut() {
+            *param = self.qualify_import_bound_types_in_type_string(param);
+        }
 
         if method_name == "serialize"
             && method.sig.inputs.len() == 2
@@ -25173,6 +25417,7 @@ impl CodeGen {
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
         return_type = self.absolutize_shadowed_module_refs_in_ufcs_signature(&return_type);
+        return_type = self.qualify_import_bound_types_in_type_string(&return_type);
         // UFCS heads deduce `Self_&&` as an lvalue reference for `&mut self`
         // receivers (Compound<...>&), where a leading `typename Self_::Error`
         // is ill-formed — spell through remove_cvref (identity for value Self_).
@@ -30169,6 +30414,102 @@ impl CodeGen {
         };
         if option_none_candidates.contains(&tail_name) && !hints.contains_key(&tail_name) {
             hints.insert(tail_name, option_inner_ty);
+        }
+    }
+
+    /// `let raw = [const { MaybeUninit::uninit() }; N];` (or the bare
+    /// `[MaybeUninit::uninit(); N]`): the element type is pinned by where the
+    /// array flows, not by the seed. The std idiom (`Iterator::next_chunk` in
+    /// vec and vec_deque) returns `raw.transpose().assume_init()` — bare, or
+    /// wrapped in `Ok(..)` / `Some(..)`, an `unsafe` block, parens — from a fn
+    /// whose return type is `[T; N]` / `Result<[T; N], _>` / `Option<[T; N]>`.
+    /// That chain types the local as `[MaybeUninit<T>; N]`; without the hint
+    /// the seed leaks `MaybeUninit<auto>` (the chokepoint panic that took the
+    /// whole alloc crate down once the const block stopped being elided).
+    ///
+    /// `return` sites are chased at any depth — a `return` in the fn body
+    /// returns from the fn (closures and nested items are not entered). The
+    /// tail path is taken only when this block IS the return-hint owner's
+    /// body (the hazard gate of `collect_tail_returned_local_type_hints`).
+    fn augment_uninit_repeat_local_hints_from_transpose_return_context(
+        &self,
+        stmts: &[syn::Stmt],
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        let mut candidates: HashMap<String, (syn::Path, syn::Expr)> = HashMap::new();
+        for stmt in stmts {
+            let syn::Stmt::Local(local) = stmt else {
+                continue;
+            };
+            if get_local_type(local).is_some() {
+                continue;
+            }
+            let Some(name) = local_binding_name(local) else {
+                continue;
+            };
+            if hints.contains_key(&name) {
+                continue;
+            }
+            let Some(init) = local.init.as_ref() else {
+                continue;
+            };
+            let syn::Expr::Repeat(repeat) = peel_paren_group_expr(&init.expr) else {
+                continue;
+            };
+            let Some(owner) = untyped_maybe_uninit_seed_owner(&repeat.expr) else {
+                continue;
+            };
+            candidates.insert(name, (owner, (*repeat.len).clone()));
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        let Some(return_ty) = self.current_return_type_hint() else {
+            return;
+        };
+        let return_ty = return_ty.clone();
+        let owner_body = self.return_type_hint_push_depths.last() == Some(&self.block_depth);
+
+        struct ReturnFlows<'a> {
+            flows: &'a mut Vec<(String, Option<String>)>,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for ReturnFlows<'_> {
+            fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+            fn visit_item(&mut self, _: &'ast syn::Item) {}
+            fn visit_expr_return(&mut self, ret: &'ast syn::ExprReturn) {
+                if let Some(inner) = ret.expr.as_deref()
+                    && let Some(flow) = transpose_assume_init_flow(inner)
+                {
+                    self.flows.push(flow);
+                }
+                syn::visit::visit_expr_return(self, ret);
+            }
+        }
+        let mut flows: Vec<(String, Option<String>)> = Vec::new();
+        {
+            let mut visitor = ReturnFlows { flows: &mut flows };
+            for stmt in stmts {
+                syn::visit::Visit::visit_stmt(&mut visitor, stmt);
+            }
+        }
+        if owner_body
+            && let Some(syn::Stmt::Expr(tail, None)) = stmts.last()
+            && let Some(flow) = transpose_assume_init_flow(tail)
+        {
+            flows.push(flow);
+        }
+        for (name, wrapper) in flows {
+            if hints.contains_key(&name) {
+                continue;
+            }
+            let Some((owner, len)) = candidates.get(&name) else {
+                continue;
+            };
+            let Some(elem) = array_elem_from_return_type(&return_ty, wrapper.as_deref()) else {
+                continue;
+            };
+            let hint: syn::Type = syn::parse_quote!([#owner<#elem>; #len]);
+            hints.insert(name, hint);
         }
     }
 
@@ -66034,6 +66375,136 @@ fn extract_array_element_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
     let ty = peel_reference_paren_group_type_hint(ty);
     match ty {
         syn::Type::Array(array) => Some((*array.elem).clone()),
+        _ => None,
+    }
+}
+
+/// The owner path of an untyped `MaybeUninit::uninit()` repeat seed — bare, or
+/// the tail of a Rust 2024 `const { .. }` value block, through parens:
+/// `MaybeUninit` / `mem::MaybeUninit` / `core::mem::MaybeUninit`, without the
+/// `uninit` segment. `None` for any other seed, or one already carrying a
+/// turbofish (`MaybeUninit::<u8>::uninit()` types itself).
+fn untyped_maybe_uninit_seed_owner(seed: &syn::Expr) -> Option<syn::Path> {
+    let mut seed = peel_paren_group_expr(seed);
+    if let Some(tail) = CodeGen::const_block_value_tail(seed) {
+        seed = peel_paren_group_expr(tail);
+    }
+    let syn::Expr::Call(call) = seed else {
+        return None;
+    };
+    if !call.args.is_empty() {
+        return None;
+    }
+    let syn::Expr::Path(func) = call.func.as_ref() else {
+        return None;
+    };
+    if func.qself.is_some() {
+        return None;
+    }
+    let segs: Vec<&syn::PathSegment> = func.path.segments.iter().collect();
+    if segs.len() < 2 {
+        return None;
+    }
+    let last = segs[segs.len() - 1];
+    let owner_seg = segs[segs.len() - 2];
+    if last.ident != "uninit"
+        || owner_seg.ident != "MaybeUninit"
+        || !matches!(last.arguments, syn::PathArguments::None)
+        || !matches!(owner_seg.arguments, syn::PathArguments::None)
+    {
+        return None;
+    }
+    Some(syn::Path {
+        leading_colon: func.path.leading_colon,
+        segments: segs[..segs.len() - 1].iter().map(|s| (*s).clone()).collect(),
+    })
+}
+
+/// `NAME.transpose().assume_init()` reaching a return position — directly, or
+/// through `Ok(..)` / `Some(..)`, an `unsafe { .. }` / plain block whose tail
+/// it is, or parens: the local's name and the wrapper (`"Ok"` / `"Some"`).
+fn transpose_assume_init_flow(expr: &syn::Expr) -> Option<(String, Option<String>)> {
+    let mut expr = peel_paren_group_expr(expr);
+    let mut wrapper: Option<String> = None;
+    loop {
+        match expr {
+            syn::Expr::Unsafe(u) => {
+                let Some(syn::Stmt::Expr(tail, None)) = u.block.stmts.last() else {
+                    return None;
+                };
+                expr = peel_paren_group_expr(tail);
+            }
+            syn::Expr::Block(b) => {
+                let Some(syn::Stmt::Expr(tail, None)) = b.block.stmts.last() else {
+                    return None;
+                };
+                expr = peel_paren_group_expr(tail);
+            }
+            syn::Expr::Call(call) if wrapper.is_none() && call.args.len() == 1 => {
+                let syn::Expr::Path(p) = call.func.as_ref() else {
+                    return None;
+                };
+                let name = p.path.segments.last()?.ident.to_string();
+                if name != "Ok" && name != "Some" {
+                    return None;
+                }
+                wrapper = Some(name);
+                expr = peel_paren_group_expr(&call.args[0]);
+            }
+            syn::Expr::MethodCall(assume)
+                if assume.method == "assume_init" && assume.args.is_empty() =>
+            {
+                let syn::Expr::MethodCall(transpose) = peel_paren_group_expr(&assume.receiver)
+                else {
+                    return None;
+                };
+                if transpose.method != "transpose" || !transpose.args.is_empty() {
+                    return None;
+                }
+                let name = extract_simple_local_ident(peel_paren_group_expr(&transpose.receiver))?;
+                return Some((name, wrapper));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The element type of the `[T; N]` a return type carries at the position a
+/// wrapper selects: the type itself (no wrapper), `Result<[T; N], _>`'s first
+/// argument (`Ok`), `Option<[T; N]>`'s argument (`Some`).
+fn array_elem_from_return_type(return_ty: &syn::Type, wrapper: Option<&str>) -> Option<syn::Type> {
+    fn peel(mut ty: &syn::Type) -> &syn::Type {
+        loop {
+            match ty {
+                syn::Type::Paren(p) => ty = p.elem.as_ref(),
+                syn::Type::Group(g) => ty = g.elem.as_ref(),
+                _ => return ty,
+            }
+        }
+    }
+    let ty = peel(return_ty);
+    let arr_ty = match wrapper {
+        None => ty,
+        Some(w) => {
+            let syn::Type::Path(tp) = ty else {
+                return None;
+            };
+            let last = tp.path.segments.last()?;
+            let expected_owner = if w == "Ok" { "Result" } else { "Option" };
+            if last.ident != expected_owner {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                return None;
+            };
+            let Some(syn::GenericArgument::Type(first)) = args.args.first() else {
+                return None;
+            };
+            peel(first)
+        }
+    };
+    match arr_ty {
+        syn::Type::Array(arr) => Some((*arr.elem).clone()),
         _ => None,
     }
 }

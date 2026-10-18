@@ -8,6 +8,7 @@ use std::process::{self, Output};
 
 mod alias_impl_inline;
 mod primitive_qself;
+mod let_tuple_uninit;
 mod cmake;
 mod codegen;
 mod cpp_abi;

@@ -1899,7 +1899,7 @@ pub(crate) fn collect_rust_item_import_bindings(
     out
 }
 
-fn nearest_rust_item_import_targets<'a>(
+pub(crate) fn nearest_rust_item_import_targets<'a>(
     local_name: &str,
     module_path: &[String],
     bindings: &'a RustItemImportBindings,

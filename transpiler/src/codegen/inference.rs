@@ -4926,9 +4926,24 @@ impl CodeGen {
             return Some(hint.clone());
         }
         if let Some(cap_expr) = self.infer_array_capacity_arg_for_expr(init_expr) {
-            let elem_ty = extract_array_element_type_for_hint(hint)
+            let mut elem_ty = extract_array_element_type_for_hint(hint)
                 .or_else(|| extract_sequence_element_type_for_hint(hint))
                 .unwrap_or_else(|| hint.clone());
+            // An untyped `MaybeUninit::uninit()` seed: a hint that names the
+            // INITIALIZED element type (`T`, from the fn's `[T; N]` return —
+            // the `raw.map(|m| m.assume_init())` shape) types the slot, not
+            // the seed. Declared as `std::array<T, N>` the local was silently
+            // wrong; the seed's own owner wraps it.
+            if let syn::Expr::Repeat(repeat) = init_expr
+                && let Some(owner) = untyped_maybe_uninit_seed_owner(&repeat.expr)
+                && !matches!(
+                    peel_reference_paren_group_type_hint(&elem_ty),
+                    syn::Type::Path(tp)
+                        if tp.path.segments.last().is_some_and(|s| s.ident == "MaybeUninit")
+                )
+            {
+                elem_ty = syn::parse_quote!(#owner<#elem_ty>);
+            }
             if let Ok(cap_expr) = syn::parse_str::<syn::Expr>(&cap_expr) {
                 if let Ok(inferred) = syn::parse2::<syn::Type>(quote!([#elem_ty; #cap_expr])) {
                     return Some(inferred);
