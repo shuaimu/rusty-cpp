@@ -64,6 +64,10 @@ pub const VERUS_BUILTIN_MACROS_VERSION: &str = "0.0.0-2025-11-10-1957";
 /// can compare it with its own `vstd` source). Must equal
 /// `verus_erase::VERUS_GIT_REV`; checked against every helper response.
 pub const VERUS_GIT_REV: &str = "db81a7496bfffeef3da8b30c306600ea51d2b0fa";
+/// The repository that commit comes from. Its packages (`vstd`) stay external
+/// to `--crate-graph` without being named, under `--verus-exec` only
+/// (`metadata::CrateGraphGitRepositories::refusing_unnamed`).
+pub const VERUS_GIT_URL: &str = "https://github.com/verus-lang/verus";
 
 /// First line of every helper request and response
 /// (`verus_erase::protocol::PROTOCOL`).

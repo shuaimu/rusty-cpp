@@ -499,8 +499,18 @@ struct ResolvedPackage {
 /// joins when `<URL>` names one of these repositories, and is read from the
 /// checkout `cargo metadata` reports for it. Naming a repository rather than
 /// packages means every package Cargo selects from it joins, so a consumer
-/// cannot name part of a crate family; a dependency from another repository
-/// (Lion's `vstd`, from Verus's) stays external unless that one is named too.
+/// cannot name part of a crate family.
+///
+/// `--crate-graph` itself refuses a graph crate's target-normal dependency on
+/// a package from a git repository no one named
+/// ([`Self::refusing_unnamed`]). Left external, such a package is silently
+/// missing from the output, and its dependents are transpiled against a
+/// crate nothing emits: SRPC, with Lion's repository unnamed, exited 0 with
+/// three mis-generated providers. Verus's repository is exempt under
+/// `--verus-exec`, which erases or lowers every use of `vstd` itself
+/// (`crate::verus_lower`). Outside `--crate-graph`, crate mode's
+/// source-contract preflight and `--expand` keep an unnamed git package
+/// external, as before.
 ///
 /// Repository URLs compare as Cargo identifies a git source (its
 /// `CanonicalUrl`): scheme and host ignore case, one trailing `/` and then a
@@ -511,6 +521,11 @@ struct ResolvedPackage {
 pub struct CrateGraphGitRepositories {
     /// Canonical repository URL -> the URL as the caller spelled it.
     named: BTreeMap<String, String>,
+    /// `--crate-graph`: a graph crate's dependency on a package from a git
+    /// repository that is neither named nor in `exempt` is an error.
+    refuse_unnamed: bool,
+    /// Canonical URLs of the repositories `refuse_unnamed` lets stay external.
+    exempt: BTreeSet<String>,
 }
 
 impl CrateGraphGitRepositories {
@@ -540,11 +555,39 @@ impl CrateGraphGitRepositories {
                 .entry(canonical_git_repository_url(url))
                 .or_insert_with(|| url.clone());
         }
-        Ok(Self { named })
+        Ok(Self {
+            named,
+            ..Self::default()
+        })
     }
 
+    /// `--crate-graph`'s policy: refuse a graph crate's dependency on a
+    /// package from an unnamed git repository, except Verus's under
+    /// `--verus-exec` (`verus_exec`).
+    pub fn refusing_unnamed(mut self, verus_exec: bool) -> Self {
+        self.refuse_unnamed = true;
+        if verus_exec {
+            self.exempt
+                .insert(canonical_git_repository_url(crate::verus_exec::VERUS_GIT_URL));
+        }
+        self
+    }
+
+    /// Whether no repository is named.
     pub fn is_empty(&self) -> bool {
         self.named.is_empty()
+    }
+
+    /// Whether a package with this Cargo source comes from a git repository
+    /// that is neither named nor exempt, under `--crate-graph`'s policy.
+    fn refuses(&self, source: Option<&str>) -> bool {
+        let Some(repository) = source.and_then(git_source_repository) else {
+            return false;
+        };
+        let canonical = canonical_git_repository_url(repository);
+        self.refuse_unnamed
+            && !self.named.contains_key(&canonical)
+            && !self.exempt.contains(&canonical)
     }
 
     /// The canonical URL of the named repository a Cargo source comes from.
@@ -1901,6 +1944,10 @@ fn write_effective_graph_probe_manifest(
 struct NormalTargetPackageSelection {
     edges: HashSet<(String, String)>,
     selected_features_by_id: HashMap<String, Vec<String>>,
+    /// Edges from a graph crate to a package of a git repository that
+    /// `--crate-graph` refuses (`CrateGraphGitRepositories::refuses`); empty
+    /// unless that policy is on.
+    refused_git_edges: HashSet<(String, String)>,
 }
 
 fn resolve_normal_target_package_edges(
@@ -1983,8 +2030,9 @@ fn resolve_normal_target_package_edges(
 }
 
 /// Read the `cargo tree --prefix depth --format '{p}|{f}'` output of the
-/// probe against the probe's own metadata: the edges between graph crates
-/// and each graph crate's target-normal feature set.
+/// probe against the probe's own metadata: the edges between graph crates,
+/// each graph crate's target-normal feature set, and the edges from a graph
+/// crate to a git package `--crate-graph` refuses.
 fn select_normal_target_packages(
     stdout: &str,
     metadata: &CargoMetadataResolved,
@@ -2041,8 +2089,42 @@ fn select_normal_target_packages(
     local_prefixes.sort();
     local_prefixes.dedup();
 
+    // Under `--crate-graph`, a package from a git repository that is neither
+    // named nor exempt is recognized too, where a graph crate depends on it,
+    // so the walk can refuse the edge. It stays opaque: nothing below it is
+    // read. Its line must match exactly, as a graph crate's must, or a change
+    // in Cargo's rendering would let the edge through unseen.
+    let mut refused_by_render = HashMap::<String, String>::new();
+    let mut refused_prefixes = Vec::<String>::new();
+    for package in metadata
+        .packages
+        .iter()
+        .filter(|package| git_repositories.refuses(package.source.as_deref()))
+    {
+        let source = package.source.as_deref().unwrap_or_default();
+        let location = cargo_tree_git_source(source).ok_or_else(|| {
+            format!("Cargo metadata reported a git source `cargo tree` cannot render: {source}")
+        })?;
+        let prefix = format!("{} v{} ", package.name, package.version);
+        for rendered in [
+            format!("{prefix}({location})"),
+            format!("{prefix}(proc-macro) ({location})"),
+        ] {
+            if let Some(previous) = refused_by_render.insert(rendered.clone(), package.id.clone())
+                && previous != package.id
+            {
+                return Err(format!(
+                    "Cargo normal-tree rendering is ambiguous for package ids '{previous}' and '{}': {rendered}",
+                    package.id
+                ));
+            }
+        }
+        refused_prefixes.push(prefix);
+    }
+
     let mut stack = Vec::<Option<String>>::new();
     let mut edges = HashSet::new();
+    let mut refused_git_edges = HashSet::new();
     let mut selected_features_by_id = HashMap::<String, Vec<String>>::new();
     let mut roots = Vec::new();
     for (line_index, line) in stdout.lines().enumerate() {
@@ -2119,8 +2201,31 @@ fn select_normal_target_packages(
         stack.truncate(depth);
         if depth == 0 {
             roots.push(package_id.clone());
-        } else if let (Some(Some(parent)), Some(child)) = (stack.last(), package_id.as_ref()) {
-            edges.insert((parent.clone(), child.clone()));
+        } else if let Some(Some(parent)) = stack.last() {
+            match package_id.as_ref() {
+                Some(child) => {
+                    edges.insert((parent.clone(), child.clone()));
+                }
+                None => {
+                    let refused = refused_by_render.iter().find_map(|(rendered, child)| {
+                        rendered_and_features
+                            .strip_prefix(rendered.as_str())
+                            .is_some_and(|suffix| suffix.starts_with('|'))
+                            .then_some(child)
+                    });
+                    if let Some(child) = refused {
+                        refused_git_edges.insert((parent.clone(), child.clone()));
+                    } else if refused_prefixes
+                        .iter()
+                        .any(|prefix| rendered_and_features.starts_with(prefix))
+                    {
+                        return Err(format!(
+                            "Cargo normal tree reported an inexact git package identity on line {}: {rendered_and_features}",
+                            line_index + 1
+                        ));
+                    }
+                }
+            }
         }
         stack.push(package_id);
     }
@@ -2132,6 +2237,7 @@ fn select_normal_target_packages(
     Ok(NormalTargetPackageSelection {
         edges,
         selected_features_by_id,
+        refused_git_edges,
     })
 }
 
@@ -2317,7 +2423,9 @@ struct EffectiveGraphWalk {
 /// Walk Cargo's resolve graph from the selected root along the target-normal
 /// edges the tree selected, descending into every graph crate: a local path
 /// package, or a package from a `--crate-graph-git` repository. Every named
-/// repository must contribute at least one graph crate.
+/// repository must contribute at least one graph crate, and under
+/// `--crate-graph` no graph crate may depend on a package from a git
+/// repository that is neither named nor exempt.
 fn walk_effective_local_graph(
     packages: &[ResolvedPackage],
     resolve: &ResolveGraph,
@@ -2341,6 +2449,8 @@ fn walk_effective_local_graph(
     // every git repository a graph crate depends on (for the error below).
     let mut joined_repositories = BTreeSet::<&str>::new();
     let mut reached_repositories = BTreeSet::<&str>::new();
+    // (graph crate, package, repository) for each edge `--crate-graph` refuses.
+    let mut refused_dependencies = BTreeSet::<(&str, String, &str)>::new();
     let mut pending = vec![selected.id.as_str()];
     let mut visited = HashSet::new();
     while let Some(package_id) = pending.pop() {
@@ -2380,6 +2490,21 @@ fn walk_effective_local_graph(
                     .and_then(|dependency_package| dependency_package.source.as_deref())
                     .and_then(git_source_repository),
             );
+            if normal_selection
+                .refused_git_edges
+                .contains(&(package.id.clone(), dependency.pkg.clone()))
+                && let Some(dependency_package) = packages_by_id.get(dependency.pkg.as_str())
+                && let Some(repository) = dependency_package
+                    .source
+                    .as_deref()
+                    .and_then(git_source_repository)
+            {
+                refused_dependencies.insert((
+                    package.name.as_str(),
+                    format!("{} v{}", dependency_package.name, dependency_package.version),
+                    repository,
+                ));
+            }
             if !normal_selection
                 .edges
                 .contains(&(package.id.clone(), dependency.pkg.clone()))
@@ -2460,6 +2585,38 @@ fn walk_effective_local_graph(
                 "--crate-graph-git {named}: no package of Cargo's target-normal graph comes from this repository; the git repositories its graph crates depend on: {reached}"
             ));
         }
+    }
+    if !refused_dependencies.is_empty() {
+        let edges = refused_dependencies
+            .iter()
+            .map(|(dependent, package, repository)| format!("\n  {dependent} -> {package} ({repository})"))
+            .collect::<String>();
+        let mut repositories = refused_dependencies
+            .iter()
+            .map(|(_, _, repository)| *repository)
+            .collect::<Vec<_>>();
+        repositories.sort_by_key(|repository| canonical_git_repository_url(repository));
+        repositories.dedup_by_key(|repository| canonical_git_repository_url(repository));
+        // Verus's repository is never transpiled; --verus-exec exempts it.
+        let verus = canonical_git_repository_url(crate::verus_exec::VERUS_GIT_URL);
+        let (verus_repositories, repositories): (Vec<_>, Vec<_>) = repositories
+            .into_iter()
+            .partition(|repository| canonical_git_repository_url(repository) == verus);
+        let mut remedy = String::new();
+        if !repositories.is_empty() {
+            remedy.push_str("\nName each repository to transpile its packages as graph crates:");
+            for repository in &repositories {
+                remedy.push_str(&format!(" --crate-graph-git {repository}"));
+            }
+        }
+        if !verus_repositories.is_empty() {
+            remedy.push_str(
+                "\nVerus's packages stay external under --verus-exec, which erases or lowers every use of vstd",
+            );
+        }
+        return Err(format!(
+            "graph crates depend on git packages whose repository no --crate-graph-git names; --crate-graph would leave them out and never emit them:{edges}{remedy}"
+        ));
     }
     if !git_repositories.is_empty() {
         // Each graph crate is emitted into `<output-dir>/<package>/`, so two
@@ -3917,5 +4074,153 @@ mod tests {
             .err()
             .expect("two graph crates named gbase were accepted");
         assert!(error.contains("share the package name 'gbase'"), "{error}");
+    }
+
+    /// [`walk_synthetic`] under `--crate-graph`'s policy.
+    fn walk_synthetic_refusing(
+        metadata: &CargoMetadataResolved,
+        tree: &str,
+        urls: &[&str],
+        verus_exec: bool,
+    ) -> Result<EffectiveGraphWalk, String> {
+        let repositories = CrateGraphGitRepositories::from_urls(
+            &urls.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        )?
+        .refusing_unnamed(verus_exec);
+        let selection = select_normal_target_packages(tree, metadata, "probe", &repositories)?;
+        let root = metadata.packages.iter().find(|package| package.id == "root").unwrap();
+        walk_effective_local_graph(
+            &metadata.packages,
+            metadata.resolve.as_ref().unwrap(),
+            &selection,
+            root,
+            &repositories,
+        )
+    }
+
+    #[test]
+    fn crate_graph_refuses_only_git_packages_of_unnamed_repositories() {
+        let lion = "git+https://github.com/stonysystems/lion?rev=d697b77#d697b779bb05314e7425b1746b5f89441e8e6712";
+        let registry = "registry+https://github.com/rust-lang/crates.io-index";
+        let lenient = CrateGraphGitRepositories::default();
+        assert!(!lenient.refuses(Some(lion)) && !lenient.refuses(Some(VERUS)));
+        let strict = CrateGraphGitRepositories::default().refusing_unnamed(false);
+        assert!(strict.refuses(Some(lion)) && strict.refuses(Some(VERUS)));
+        assert!(!strict.refuses(None) && !strict.refuses(Some(registry)));
+        let named = CrateGraphGitRepositories::from_urls(&["https://github.com/StonySystems/lion.git".to_string()])
+            .unwrap()
+            .refusing_unnamed(false);
+        assert!(!named.refuses(Some(lion)));
+        // --verus-exec exempts Verus's repository, in any spelling Cargo
+        // takes for the same repository, and nothing else.
+        let verus_exec = CrateGraphGitRepositories::default().refusing_unnamed(true);
+        assert!(!verus_exec.refuses(Some(VERUS)));
+        assert!(!verus_exec.refuses(Some("git+https://github.com/Verus-Lang/verus.git?branch=main#db81a749e8d5")));
+        assert!(verus_exec.refuses(Some(lion)));
+        assert!(verus_exec.refuses(Some("git+https://github.com/verus-lang/verus-fork?rev=db81a74#db81a749e8d5")));
+        // The lenient form of each is what every resolution outside
+        // --crate-graph uses; refusing changes nothing about admission.
+        assert!(named.admits(Some(lion)));
+        assert_eq!(strict.admits(Some(lion)), lenient.admits(Some(lion)));
+    }
+
+    #[test]
+    fn crate_graph_refuses_a_graph_crate_depending_on_an_unnamed_git_repository() {
+        let (metadata, tree) = synthetic_probe("");
+        // Nothing named: the root's edge to gcore is refused. gbase -> vstd is
+        // not, because gbase is not a graph crate.
+        let error = walk_synthetic_refusing(&metadata, &tree, &[], true)
+            .err()
+            .expect("an unnamed git dependency was accepted");
+        assert!(
+            error.starts_with("graph crates depend on git packages whose repository no --crate-graph-git names;"),
+            "{error}"
+        );
+        assert!(
+            error.contains("\n  graph-root -> gcore v0.2.0 (https://github.com/Example/Family.git)\n"),
+            "{error}"
+        );
+        assert!(error.ends_with("graph crates: --crate-graph-git https://github.com/Example/Family.git"), "{error}");
+        assert!(!error.contains("vstd") && !error.contains("Verus"), "{error}");
+
+        // The family named, without --verus-exec: gbase -> vstd is refused, and
+        // the remedy is --verus-exec, not naming Verus's repository.
+        let error = walk_synthetic_refusing(&metadata, &tree, &["https://github.com/example/family"], false)
+            .err()
+            .expect("vstd was accepted without --verus-exec");
+        assert!(error.contains("\n  gbase -> vstd v0.0.0 (https://github.com/verus-lang/verus)\n"), "{error}");
+        assert!(!error.contains("gcore") && !error.contains("--crate-graph-git https"), "{error}");
+        assert!(error.ends_with("external under --verus-exec, which erases or lowers every use of vstd"), "{error}");
+
+        // With --verus-exec the same graph is accepted, and it is exactly the
+        // lenient walk's: vstd stays external.
+        let strict = walk_synthetic_refusing(&metadata, &tree, &["https://github.com/example/family"], true).unwrap();
+        let lenient = walk_synthetic(&metadata, &tree, &["https://github.com/example/family"]).unwrap();
+        assert_eq!(strict.direct_dependencies, lenient.direct_dependencies);
+        assert_eq!(strict.extern_dependencies, lenient.extern_dependencies);
+        // Naming Verus's repository too still works: vstd becomes a graph crate.
+        let both = walk_synthetic_refusing(
+            &metadata,
+            &tree,
+            &["https://github.com/example/family", "https://github.com/verus-lang/verus"],
+            false,
+        )
+        .unwrap();
+        assert_eq!(graph_edges(&both, "/checkouts/family/0123456/gbase/Cargo.toml"), [("vstd".to_string(), vec![])]);
+
+        // The unreached-repository error comes first, as it did before.
+        let error = walk_synthetic_refusing(&metadata, &tree, &["https://github.com/example/famliy"], true)
+            .err()
+            .unwrap();
+        assert!(error.starts_with("--crate-graph-git https://github.com/example/famliy: no package"), "{error}");
+    }
+
+    #[test]
+    fn crate_graph_refuses_only_the_edges_cargo_selects() {
+        // `gwin` comes from an unnamed repository and is in the resolve graph
+        // (a dependency for another target, say), but the target's tree does
+        // not select it: it is not refused.
+        let (mut metadata, tree) = synthetic_probe("");
+        let other = "git+https://github.com/example/other?rev=89abcde#89abcdef0123456789abcdef0123456789abcdef";
+        metadata.packages.push(serde_json::from_value(serde_json::json!({
+            "id": "gwin", "name": "gwin", "version": "0.1.0",
+            "manifest_path": "/checkouts/other/89abcde/Cargo.toml", "source": other, "targets": [],
+        })).unwrap());
+        let resolve = metadata.resolve.as_mut().unwrap();
+        resolve.nodes.push(serde_json::from_value(serde_json::json!({"id": "gwin"})).unwrap());
+        let root = resolve.nodes.iter_mut().find(|node| node.id == "root").unwrap();
+        root.deps.push(serde_json::from_value(serde_json::json!({
+            "name": "gwin", "pkg": "gwin", "dep_kinds": [{"kind": null, "target": "cfg(windows)"}],
+        })).unwrap());
+        assert!(walk_synthetic_refusing(&metadata, &tree, &["https://github.com/example/family"], true).is_ok());
+        // Selected, it is refused.
+        let selected = tree.replace(
+            "2lbase v0.1.0 (/w/lbase)|\n",
+            "2lbase v0.1.0 (/w/lbase)|\n2gwin v0.1.0 (https://github.com/example/other?rev=89abcde#89abcdef)|\n",
+        );
+        let error = walk_synthetic_refusing(&metadata, &selected, &["https://github.com/example/family"], true)
+            .err()
+            .expect("a selected unnamed git dependency was accepted");
+        assert!(error.contains("graph-root -> gwin v0.1.0 (https://github.com/example/other)"), "{error}");
+        // A refused package that a non-graph crate depends on is not read.
+        let below_vstd = tree.replace(
+            "4vstd v0.0.0 (https://github.com/verus-lang/verus?rev=db81a74#db81a749)|\n",
+            "4vstd v0.0.0 (https://github.com/verus-lang/verus?rev=db81a74#db81a749)|\n5gwin v0.1.0 (https://github.com/example/other?rev=89abcde#89abcdef)|\n",
+        );
+        assert!(walk_synthetic_refusing(&metadata, &below_vstd, &["https://github.com/example/family"], true).is_ok());
+    }
+
+    #[test]
+    fn crate_graph_refusal_fails_closed_on_an_unrecognized_tree_line() {
+        // gcore's line in a spelling Cargo does not print (a 10-digit commit)
+        // must not pass as an opaque node when gcore would be refused.
+        let (metadata, tree) = synthetic_probe("");
+        let tree = tree.replace("#01234567)|default", "#0123456789)|default");
+        let error = walk_synthetic_refusing(&metadata, &tree, &[], true)
+            .err()
+            .expect("an inexact refused rendering was accepted");
+        assert!(error.contains("inexact git package identity on line 3"), "{error}");
+        // Outside --crate-graph the line stays opaque, as before.
+        assert!(walk_synthetic(&metadata, &tree, &[]).is_ok());
     }
 }

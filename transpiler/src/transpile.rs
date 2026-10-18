@@ -1135,8 +1135,11 @@ pub struct TranspileOptions {
     pub crate_graph: Option<crate::crate_graph::GraphCrateContext>,
     /// `--crate-graph-git`: git repositories whose packages are graph crates
     /// like local path packages, in every resolution of Cargo's effective
-    /// graph (see `crate::metadata::CrateGraphGitRepositories`). Empty unless
-    /// named, which leaves the graph exactly as before.
+    /// graph (see `crate::metadata::CrateGraphGitRepositories`). Under
+    /// `--crate-graph` it also refuses a graph crate's dependency on a git
+    /// package from an unnamed repository (`refusing_unnamed`). Outside
+    /// `--crate-graph` it is empty and lenient, which leaves the graph exactly
+    /// as before.
     pub crate_graph_git: crate::metadata::CrateGraphGitRepositories,
 }
 
