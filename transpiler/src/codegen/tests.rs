@@ -49597,6 +49597,155 @@ fn test_ufcs_blanket_impl_over_crate_trait_emits_constrained_marker() {
     );
 }
 
+/// Crate-mode shape for the nested-module marker tests: a child module
+/// wrapped in `--cxx-namespace`, with a user type map (srpc's
+/// `rust-type-map.toml` spells `SerializableSharedPtrHolder` as
+/// `details::SerializableSharedPtrHolder`).
+fn transpile_str_module_with_type_map(
+    rust_code: &str,
+    module_name: &str,
+    cxx_namespace: &str,
+    mappings: &[(&str, &str)],
+) -> String {
+    let mut type_map = types::UserTypeMap::default();
+    for (rust, cpp) in mappings {
+        type_map.mappings.insert((*rust).to_string(), (*cpp).to_string());
+    }
+    let file: syn::File = syn::parse_str(rust_code).unwrap();
+    let mut cg = CodeGen::with_type_map(type_map);
+    if std::env::var_os("RUSTY_CPP_TEST_TIER1").is_none() {
+        cg.set_tier1_default(false);
+    }
+    cg.set_cxx_namespace(Some(cxx_namespace.to_string()));
+    cg.emit_file(&file, Some(module_name));
+    cg.into_output()
+}
+
+#[test]
+fn test_ufcs_nested_impl_marker_takes_a_type_mapped_crate_root_path() {
+    // srpc: `SerializableSharedPtrHolder = "details::SerializableSharedPtrHolder"`
+    // made the holder's two impls inside `mod details` reach the marker as the
+    // relative `details::Holder<T>`; the Fix B guard read the bare `details`
+    // as unresolvable and skipped both markers. The spelling is the type's
+    // crate-root path, so the marker is emitted, anchored at the namespace.
+    let out = transpile_str_module_with_type_map(
+        r#"
+        pub trait Payload { fn k(&self) -> i32; }
+        pub trait Base { fn kind(&self) -> i32; }
+        pub trait Marker {}
+        pub mod details {
+            use super::{Base, Marker, Payload};
+            pub struct Holder<T> { pub v: T }
+            impl<T: Payload> Marker for Holder<T> {}
+            impl<T: Payload> Base for Holder<T> { fn kind(&self) -> i32 { self.v.k() } }
+            pub struct Cell<T> { pub v: T }
+            impl Base for Cell<i32> { fn kind(&self) -> i32 { self.v } }
+        }
+        "#,
+        "rrr.ser",
+        "rrr",
+        &[("Holder", "details::Holder"), ("Cell", "details::Cell")],
+    );
+    assert!(
+        !out.contains("implementor marker skipped"),
+        "a type-mapped crate-root path must not be skipped:\n{out}"
+    );
+    assert!(
+        out.contains("template<class T> requires (has_Payload<T>) struct impls_Base<::rrr::details::Holder<T>> : std::true_type {};"),
+        "the generic impl's marker, anchored:\n{out}"
+    );
+    assert!(
+        out.contains("template<class T> requires (has_Payload<T>) struct impls_Marker<::rrr::details::Holder<T>> : std::true_type {};"),
+        "the method-less impl's marker, anchored:\n{out}"
+    );
+    assert!(
+        out.contains("template<> struct impls_Base<::rrr::details::Cell<int32_t>> : std::true_type {};"),
+        "the concrete impl's marker, anchored:\n{out}"
+    );
+}
+
+#[test]
+fn test_ufcs_nested_impl_marker_still_skips_an_ambiguous_type_mapped_leaf() {
+    // `Dup` is declared in two unrelated modules, so its recorded module is
+    // blanked: `a::Dup<T>` is not proven to be either impl's crate-root path.
+    let out = transpile_str_module_with_type_map(
+        r#"
+        pub trait Payload { fn k(&self) -> i32; }
+        pub trait Base { fn kind(&self) -> i32; }
+        pub mod a {
+            pub struct Dup<T> { pub v: T }
+            impl<T: super::Payload> super::Base for Dup<T> { fn kind(&self) -> i32 { 1 } }
+        }
+        pub mod b {
+            pub struct Dup<T> { pub v: T }
+            impl<T: super::Payload> super::Base for Dup<T> { fn kind(&self) -> i32 { 2 } }
+        }
+        "#,
+        "rrr.ser",
+        "rrr",
+        &[("Dup", "a::Dup")],
+    );
+    assert!(
+        out.contains("// implementor marker skipped: `impl Base for a::Dup<T>` in module `a`"),
+        "{out}"
+    );
+    assert!(!out.contains("struct impls_Base<::rrr::a::Dup"), "{out}");
+    assert!(!out.contains("struct impls_Base<a::Dup"), "{out}");
+}
+
+#[test]
+fn test_ufcs_nested_impl_marker_still_skips_a_sibling_relative_path() {
+    // The map spells `Deep` relative to `outer`, where the impl is; at the
+    // crate root `inner::Deep<T>` names nothing (alloc's
+    // `into_iter::IntoIter<T>` in `vec`).
+    let out = transpile_str_module_with_type_map(
+        r#"
+        pub trait Payload { fn k(&self) -> i32; }
+        pub trait Base { fn kind(&self) -> i32; }
+        pub mod outer {
+            pub mod inner { pub struct Deep<T> { pub v: T } }
+            use self::inner::Deep;
+            impl<T: crate::Payload> crate::Base for Deep<T> { fn kind(&self) -> i32 { self.v.k() } }
+        }
+        "#,
+        "rrr.ser",
+        "rrr",
+        &[("Deep", "inner::Deep")],
+    );
+    assert!(
+        out.contains("// implementor marker skipped: `impl Base for inner::Deep<T>` in module `outer`"),
+        "{out}"
+    );
+    assert!(!out.contains("struct impls_Base<::rrr::inner::Deep"), "{out}");
+    assert!(!out.contains("struct impls_Base<inner::Deep"), "{out}");
+}
+
+#[test]
+fn test_ufcs_nested_impl_marker_skips_a_path_that_also_reads_module_relative() {
+    // Inside `details`, `details::X` also names `details::details::X`: the
+    // registry keeps the ancestor `details` as X's module, but the spelling
+    // does not prove which type it means, so the marker stays skipped.
+    let out = transpile_str_module_with_type_map(
+        r#"
+        pub trait Payload { fn k(&self) -> i32; }
+        pub trait Base { fn kind(&self) -> i32; }
+        pub mod details {
+            pub struct X<T> { pub v: T }
+            pub mod details { pub struct X<T> { pub v: T } }
+            impl<T: crate::Payload> crate::Base for X<T> { fn kind(&self) -> i32 { self.v.k() } }
+        }
+        "#,
+        "rrr.ser",
+        "rrr",
+        &[("X", "details::X")],
+    );
+    assert!(
+        out.contains("// implementor marker skipped: `impl Base for details::X<T>` in module `details`"),
+        "{out}"
+    );
+    assert!(!out.contains("struct impls_Base<::rrr::details::X"), "{out}");
+}
+
 #[test]
 fn test_ufcs_type_param_receiver_candidates_come_from_its_bound() {
     // Regime 2: a type-parameter receiver's candidates are its bounds, even

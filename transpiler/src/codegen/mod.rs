@@ -5665,6 +5665,88 @@ impl CodeGen {
         }
     }
 
+    /// Implementor markers of a nested-module impl: anchor a RELATIVE path
+    /// `m1::…::mk::Leaf` that spells a local type by its path from the crate
+    /// root, so the marker guards below see it qualified. Such a spelling
+    /// reaches the marker through a user type-map target (srpc:
+    /// `SerializableSharedPtrHolder = "details::SerializableSharedPtrHolder"`)
+    /// and names the declared type at the crate root, where the marker sits,
+    /// but its bare head is the same token as a sibling-relative path's
+    /// (alloc: `into_iter::IntoIter<T>` inside `vec`), which does not resolve
+    /// there. A path is anchored (`::details::…`; a `--cxx-namespace` close
+    /// requalifies it like any crate-root reference) only when the registries
+    /// prove the crate-root reading: its head is a declared module, the leaf's
+    /// recorded declaration module is exactly the spelled prefix (a leaf
+    /// declared in unrelated modules is blanked and never matches), and the
+    /// same spelling read relative to the impl's module names no declared
+    /// type. Everything else is returned unchanged, so the guards still skip
+    /// what they skipped; a crate-root impl is not touched at all.
+    fn anchor_crate_root_relative_local_type_paths(&self, cpp_ty: &str) -> String {
+        if self.ufcs_impl_module_path.is_empty() || self.local_type_module_path.is_empty() {
+            return cpp_ty.to_string();
+        }
+        let impl_module_raw = self.ufcs_impl_module_path.join("::");
+        let impl_module_escaped = self
+            .ufcs_impl_module_path
+            .iter()
+            .map(|segment| escape_cpp_keyword(segment))
+            .collect::<Vec<_>>()
+            .join("::");
+        let ident_byte = |b: u8| b >= 0x80 || b.is_ascii_alphanumeric() || b == b'_';
+        let bytes = cpp_ty.as_bytes();
+        let mut out = String::with_capacity(cpp_ty.len() + 2);
+        let mut i = 0;
+        while i < bytes.len() {
+            if !(bytes[i] >= 0x80 || bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
+                let ch_len = cpp_ty[i..].chars().next().map_or(1, char::len_utf8);
+                out.push_str(&cpp_ty[i..i + ch_len]);
+                i += ch_len;
+                continue;
+            }
+            // The maximal `a::b::…::c` path starting here.
+            let start = i;
+            let mut segments: Vec<&str> = Vec::new();
+            loop {
+                let seg_start = i;
+                while i < bytes.len() && ident_byte(bytes[i]) {
+                    i += 1;
+                }
+                segments.push(&cpp_ty[seg_start..i]);
+                if i + 2 < bytes.len()
+                    && bytes[i] == b':'
+                    && bytes[i + 1] == b':'
+                    && (bytes[i + 2] >= 0x80 || bytes[i + 2].is_ascii_alphabetic() || bytes[i + 2] == b'_')
+                {
+                    i += 2;
+                } else {
+                    break;
+                }
+            }
+            let path = &cpp_ty[start..i];
+            let already_qualified = start >= 2 && &cpp_ty[start - 2..start] == "::";
+            let crate_root_path = segments.len() >= 2
+                && !already_qualified
+                && self.declared_module_names.contains(segments[0])
+                && self
+                    .local_type_module_path
+                    .get(segments[segments.len() - 1])
+                    .is_some_and(|module| {
+                        !module.is_empty() && *module == segments[..segments.len() - 1].join("::")
+                    })
+                && !self
+                    .local_declared_types
+                    .contains(&format!("{}::{}", impl_module_raw, path))
+                && !self
+                    .local_declared_types
+                    .contains(&format!("{}::{}", impl_module_escaped, path));
+            if crate_root_path {
+                out.push_str("::");
+            }
+            out.push_str(path);
+        }
+        out
+    }
+
     /// serde_core Fix B (param/return positions): qualify EVERY nested-module
     /// local type name appearing anywhere in a type string — `Result<…,
     /// I8Deserializer<E>>` → `…, de::value::I8Deserializer<E>>`. Tokenizes the
@@ -22432,9 +22514,11 @@ impl CodeGen {
             return;
         }
         if type_params.is_empty() {
-            let self_cpp = self.qualify_nested_local_type_for_global_scope(
-                &self.rewrite_cpp_import_bound_type_spelling(
-                    &self.map_type(impl_block.self_ty.as_ref()),
+            let self_cpp = self.anchor_crate_root_relative_local_type_paths(
+                &self.qualify_nested_local_type_for_global_scope(
+                    &self.rewrite_cpp_import_bound_type_spelling(
+                        &self.map_type(impl_block.self_ty.as_ref()),
+                    ),
                 ),
             );
             if self.extension_self_type_mapping_is_unsupported(&self_cpp)
@@ -22447,7 +22531,8 @@ impl CodeGen {
             // Fix B ambiguity guard leaves it unqualified) cannot be named at
             // global scope; the free functions resolve it lexically inside the
             // per-module helper namespace, but an explicit specialization must
-            // sit at the primary's scope. Skip the marker, loudly.
+            // sit at the primary's scope. Skip the marker, loudly. (A relative
+            // path proven to be the type's crate-root path was anchored above.)
             let bare_local_type_inside = || -> bool {
                 // Tokens that are local type names and are not preceded by `::`
                 // (hashbrown: `std::span<const Tag>` with `Tag` in control::tag).
@@ -22561,9 +22646,11 @@ impl CodeGen {
             return;
         }
         self.push_type_param_scope(&impl_block.generics);
-        let self_cpp = self.qualify_nested_local_type_for_global_scope(
-            &self.rewrite_cpp_import_bound_type_spelling(
-                &self.map_type(impl_block.self_ty.as_ref()),
+        let self_cpp = self.anchor_crate_root_relative_local_type_paths(
+            &self.qualify_nested_local_type_for_global_scope(
+                &self.rewrite_cpp_import_bound_type_spelling(
+                    &self.map_type(impl_block.self_ty.as_ref()),
+                ),
             ),
         );
         self.pop_type_param_scope();
@@ -22641,6 +22728,8 @@ impl CodeGen {
             // Same hazard as the concrete path: a bare local type or module
             // name inside the spelling does not resolve at global scope
             // (alloc: `impls_SpecFromIter<Vec<T>>`, `impls_AsVecIntoIter<into_iter::IntoIter<T>>`).
+            // A crate-root path (srpc's type-mapped `details::SerializableSharedPtrHolder<T>`)
+            // was anchored above and passes.
             let bytes = self_cpp.as_bytes();
             let mut i = 0;
             let mut bare = false;
