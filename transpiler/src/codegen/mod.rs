@@ -8019,9 +8019,11 @@ impl CodeGen {
             nominal.extend(self.cross_file_enums.iter().map(|e| e.ident.to_string()));
             let aliases: Vec<syn::ItemType> =
                 self.cross_file_auto_trait_aliases.values().cloned().collect();
-            if crate::alias_impl_inline::inline_alias_impl_headers(&mut candidate, &aliases, &nominal)
-                > 0
-            {
+            // `<u8>::MAX` / `<u8>::from_str_radix(..)` → the plain primitive
+            // path every route lowers (primitive_qself.rs).
+            let changed = crate::alias_impl_inline::inline_alias_impl_headers(&mut candidate, &aliases, &nominal)
+                + crate::primitive_qself::rewrite_primitive_qself_paths(&mut candidate);
+            if changed > 0 {
                 alias_inlined_file = candidate;
                 &alias_inlined_file
             } else {
@@ -24339,8 +24341,13 @@ impl CodeGen {
                 // The probe must be DEPENDENT (an explicit specialization names a
                 // concrete self type, where `int8_t::NAME` is a hard error, not a
                 // false requirement): a defaulted template parameter carries it.
+                // A local struct's assoc const can be a lazily-initialized static
+                // member FUNCTION (`static const span& FLAGS() { static … }`,
+                // bitflags' `const FLAGS: &[Flag<Self>] = &[…]`): probe the
+                // call form first, naming the function uncalled would hand a
+                // function reference to the caller (`rusty::clone(B_::FLAGS)`).
                 None => out.push_str(&format!(
-                    "template<class B_ = {b}> static constexpr decltype(auto) {n}() {{ if constexpr (requires {{ B_::{n}; }}) {{ return B_::{n}; }} else {{ return {ns}::{n}(rusty::self_tag<B_>{{}}); }} }} "
+                    "template<class B_ = {b}> static constexpr decltype(auto) {n}() {{ if constexpr (requires {{ B_::{n}(); }}) {{ return B_::{n}(); }} else if constexpr (requires {{ B_::{n}; }}) {{ return B_::{n}; }} else {{ return {ns}::{n}(rusty::self_tag<B_>{{}}); }} }} "
                 )),
             }
         }

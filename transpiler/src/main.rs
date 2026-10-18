@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Output};
 
 mod alias_impl_inline;
+mod primitive_qself;
 mod cmake;
 mod codegen;
 mod cpp_abi;

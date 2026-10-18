@@ -44830,6 +44830,34 @@ fn test_known_receiver_type_not_misrouted_to_unrelated_alias() {
 }
 
 #[test]
+fn test_primitive_qself_assoc_const_spells_numeric_limits() {
+    // bitflags' `impl Bits for u8 { const ALL: u8 = <u8>::MAX; }`: a bare
+    // `<primitive>::MAX` qself path dropped its owner and emitted `::MAX`.
+    let out = transpile_str(
+        r#"
+        pub fn all() -> u8 { <u8>::MAX }
+        pub fn low() -> i32 { <i32>::MIN }
+        "#,
+    );
+    assert!(out.contains("std::numeric_limits<uint8_t>::max()"), "{out}");
+    assert!(out.contains("std::numeric_limits<int32_t>::min()"), "{out}");
+    assert!(!out.contains("::MAX"), "{out}");
+}
+
+#[test]
+fn test_primitive_qself_assoc_call_takes_the_primitive_owner_route() {
+    // bitflags' `<$u>::from_str_radix(input, 16)`: `uint8_t::from_str_radix`
+    // is not a scope; the call takes the `u8::from_str_radix` lowering.
+    let out = transpile_str(
+        r#"
+        pub fn parse(s: &str) -> u8 { <u8>::from_str_radix(s, 16).unwrap() }
+        "#,
+    );
+    assert!(out.contains("rusty::from_str_radix<uint8_t>("), "{out}");
+    assert!(!out.contains("uint8_t::from_str_radix"), "{out}");
+}
+
+#[test]
 fn test_generic_alias_impl_lowers_to_members_of_the_aliased_struct() {
     // `impl<K, V> Root<K, V>` with `type Root<K, V> = NodeRef<Owned, K, V,
     // LeafOrInternal>` (btree's Root): the alias-helper lowering left K and V
@@ -49825,7 +49853,7 @@ fn test_ufcs_step8_non_vtable_members_through_traits_map() {
     // The map: member first, keyed CPO otherwise; every item has a dispatcher.
     assert!(
         out.contains("template <class B> struct ShapeTraits {")
-            && out.contains("template<class B_ = B> static constexpr decltype(auto) SIDES() { if constexpr (requires { B_::SIDES; }) { return B_::SIDES; } else { return Shape_::SIDES(rusty::self_tag<B_>{}); } }")
+            && out.contains("template<class B_ = B> static constexpr decltype(auto) SIDES() { if constexpr (requires { B_::SIDES(); }) { return B_::SIDES(); } else if constexpr (requires { B_::SIDES; }) { return B_::SIDES; } else { return Shape_::SIDES(rusty::self_tag<B_>{}); } }")
             && out.contains("else { return Shape_::new_(rusty::self_tag<B_>{}, std::forward<A>(a)...); }"),
         "Traits map forwarders: {out}"
     );

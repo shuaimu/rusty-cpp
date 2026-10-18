@@ -1135,7 +1135,15 @@ requires(
 Result<std::remove_cvref_t<T>, std::tuple<>> from_str_radix(Input&& input, Radix radix) {
     using RawT = std::remove_cvref_t<T>;
     using RawRadix = std::remove_cvref_t<Radix>;
-    using Unsigned = std::make_unsigned_t<RawT>;
+    // Width-correct for __int128 too: std::make_unsigned and the
+    // numeric_limits specializations for the 128-bit types are GNU-mode only
+    // under strict -std=c++23 (bitflags' `impl Bits for i128`).
+    using Unsigned = wrapping_unsigned_t<RawT>;
+    constexpr Unsigned unsigned_max = static_cast<Unsigned>(~static_cast<Unsigned>(0));
+    // The signed maximum as its unsigned magnitude (`Unsigned(RawT::MAX)`).
+    constexpr Unsigned signed_max_mag = static_cast<Unsigned>(unsigned_max >> 1);
+    // std::is_signed<__int128> is false under strict -std=c++23 as well.
+    constexpr bool signed_like = std::is_signed_v<RawT> || std::is_same_v<RawT, __int128>;
 
     std::string_view text;
     if constexpr (std::is_convertible_v<Input, std::string_view>) {
@@ -1178,34 +1186,32 @@ Result<std::remove_cvref_t<T>, std::tuple<>> from_str_radix(Input&& input, Radix
         if (digit >= base) {
             return Result<RawT, std::tuple<>>::Err(std::make_tuple());
         }
-        if (value > (std::numeric_limits<Unsigned>::max() - digit) / base) {
+        if (value > (unsigned_max - digit) / base) {
             return Result<RawT, std::tuple<>>::Err(std::make_tuple());
         }
         value = static_cast<Unsigned>(value * base + digit);
     }
 
-    if constexpr (std::is_signed_v<RawT>) {
+    if constexpr (signed_like) {
         if (negative) {
-            const auto max_mag = static_cast<Unsigned>(std::numeric_limits<RawT>::max())
-                + static_cast<Unsigned>(1);
+            const auto max_mag = signed_max_mag + static_cast<Unsigned>(1);
             if (value > max_mag) {
                 return Result<RawT, std::tuple<>>::Err(std::make_tuple());
             }
             if (value == max_mag) {
-                return Result<RawT, std::tuple<>>::Ok(std::numeric_limits<RawT>::min());
+                // RawT::MIN == -(RawT::MAX) - 1, spelled without numeric_limits.
+                return Result<RawT, std::tuple<>>::Ok(
+                    static_cast<RawT>(-static_cast<RawT>(signed_max_mag) - static_cast<RawT>(1)));
             }
             const auto signed_value = static_cast<RawT>(value);
             return Result<RawT, std::tuple<>>::Ok(static_cast<RawT>(-signed_value));
         }
-        if (value > static_cast<Unsigned>(std::numeric_limits<RawT>::max())) {
+        if (value > signed_max_mag) {
             return Result<RawT, std::tuple<>>::Err(std::make_tuple());
         }
         return Result<RawT, std::tuple<>>::Ok(static_cast<RawT>(value));
     } else {
         if (negative) {
-            return Result<RawT, std::tuple<>>::Err(std::make_tuple());
-        }
-        if (value > std::numeric_limits<RawT>::max()) {
             return Result<RawT, std::tuple<>>::Err(std::make_tuple());
         }
         return Result<RawT, std::tuple<>>::Ok(static_cast<RawT>(value));
