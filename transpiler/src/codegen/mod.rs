@@ -25488,7 +25488,23 @@ impl CodeGen {
             }
             out
         } else {
-            method.sig.output.clone()
+            // A concrete impl's `Self` is its self type. The body's `using Self`
+            // alias covers emitted spellings, but a literal `Self` hint is
+            // rejected as an unbound placeholder, so expected-type threading
+            // fell back to arm inference, whose variant-constructor owner is
+            // the BARE enum name: `[&]() -> PollResult { … return
+            // PollResult{…}; }` (lion-executor-spec's `impl<T> From<StdPoll<T>>
+            // for PollResult<T>`). Inside the class template that spelling was
+            // the injected class name; in this free function it names nothing.
+            let mut out = method.sig.output.clone();
+            if let syn::ReturnType::Type(_, ty) = &mut out {
+                let mut replacer = crate::codegen::collect_passes::TypeIdentReplacer {
+                    from: "Self".to_string(),
+                    to: method_spec.self_ty.clone(),
+                };
+                syn::visit_mut::VisitMut::visit_type_mut(&mut replacer, ty);
+            }
+            out
         };
         self.push_return_type_hint(&hint_output);
         self.push_param_bindings(&method.sig.inputs);

@@ -235,7 +235,16 @@ impl CodeGen {
     /// Resolve source imports before recognizing standard task types. A local
     /// module/type/trait with the same spelling never acquires runtime semantics.
     pub(super) fn standard_future_path_is(&self, path: &syn::Path, target: &str) -> bool {
-        self.standard_future_path_is_in_scope(path, target, &self.module_stack)
+        // A UFCS lane body runs with an empty module_stack by design (#89);
+        // its imports are the impl's module's. lion-executor-spec's
+        // `use std::task::Poll as StdPoll;` inside `mod types` otherwise left
+        // the `From` lane's `StdPoll::Ready(v)` a local enum's
+        // `rusty::Poll_Ready` pattern and `rusty::Poll<T>::Ready(v)` call.
+        self.standard_future_path_is_in_scope(
+            path,
+            target,
+            &self.ufcs_call_site_rust_module_path(),
+        )
     }
 
     fn standard_future_path_is_in_scope(

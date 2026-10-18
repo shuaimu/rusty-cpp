@@ -49747,6 +49747,50 @@ fn test_ufcs_nested_impl_marker_skips_a_path_that_also_reads_module_relative() {
 }
 
 #[test]
+fn test_ufcs_lane_body_spells_a_generic_self_with_its_arguments() {
+    // lion-executor-spec: `impl<T> From<StdPoll<T>> for PollResult<T>` moved
+    // from a static member (where the bare `PollResult` is the injected class
+    // name) to a free `From_::impl_::from`, where it names nothing.
+    let out = transpile_str(
+        r#"
+        pub mod types {
+            use std::task::Poll as StdPoll;
+            pub enum PollResult<T> { Ready(T), Pending, Invalid }
+            impl<T> From<StdPoll<T>> for PollResult<T> {
+                fn from(poll: StdPoll<T>) -> Self {
+                    match poll {
+                        StdPoll::Ready(v) => PollResult::Ready(v),
+                        StdPoll::Pending => PollResult::Pending,
+                    }
+                }
+            }
+            impl<T> From<PollResult<T>> for StdPoll<T> {
+                fn from(poll: PollResult<T>) -> Self {
+                    match poll {
+                        PollResult::Ready(v) => StdPoll::Ready(v),
+                        PollResult::Pending => StdPoll::Pending,
+                        PollResult::Invalid => StdPoll::Pending,
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    let lanes = out.split("namespace __ufcs_From {").skip(1).collect::<Vec<_>>().join("\n");
+    assert!(!lanes.is_empty(), "{out}");
+    assert!(!lanes.contains("-> PollResult {") && !lanes.contains("PollResult{"), "{lanes}");
+    assert!(!lanes.contains("-> rusty::Poll {"), "{lanes}");
+    assert!(
+        lanes.contains("-> PollResult<T> {") && lanes.contains("-> rusty::Poll<T> {"),
+        "the lambdas take the concrete self type:\n{lanes}"
+    );
+    // The module's `use std::task::Poll as StdPoll;` resolves in the lane too.
+    assert!(!lanes.contains("Poll_Ready") && !lanes.contains("Poll_Pending"), "{lanes}");
+    assert!(lanes.contains(".is_ready()") && lanes.contains("::ready_with(v)"), "{lanes}");
+    assert!(!lanes.contains("::Ready(v)") && !lanes.contains("::Pending()"), "{lanes}");
+}
+
+#[test]
 fn test_ufcs_type_param_receiver_candidates_come_from_its_bound() {
     // Regime 2: a type-parameter receiver's candidates are its bounds, even
     // when another owner of the name is `use`d in the same module (rustc:
