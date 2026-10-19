@@ -6260,7 +6260,27 @@ impl CodeGen {
             ));
             self.indent += 1;
             match kind {
-                AdapterStorageKind::Owning => self.writeln(&format!("{} value_;", impl_param)),
+                AdapterStorageKind::Owning => {
+                    self.writeln(&format!("{} value_;", impl_param));
+                    // `Arc<V>` -> `Arc<dyn Tr>` (rusty::Arc's unsize
+                    // constructor, `Arc::<dyn Tr>::new_`) shares the source
+                    // Arc, so this forwarder owns a POINTER to the implementor
+                    // `V`; Box hands it `V` itself. A slot reaches the pointee,
+                    // as the retired DynAdapter's `rusty_target` did, unless
+                    // the pointer type is itself an implementor (a crate's
+                    // `impl Tr for Rc<X>` boxed as `Box<dyn Tr>`).
+                    let pointer_is_implementor = if member_dispatch(self, trait_name, trait_key) {
+                        String::new()
+                    } else {
+                        format!("!has_{}<{}> && ", escape_cpp_keyword(trait_name), impl_param)
+                    };
+                    for constness in ["", " const"] {
+                        self.writeln(&format!(
+                            "decltype(auto) rusty_target(){} {{ if constexpr ({}requires {{ value_.operator->(); *value_; }}) {{ return (*value_); }} else {{ return (value_); }} }}",
+                            constness, pointer_is_implementor
+                        ));
+                    }
+                }
                 AdapterStorageKind::ConstRef => {
                     self.writeln(&format!("const {}& value_;", impl_param))
                 }
@@ -6322,7 +6342,15 @@ impl CodeGen {
                 // what it borrows (book §3.2.2: the stub).
                 let stub = (slot.is_mut && matches!(kind, AdapterStorageKind::ConstRef))
                     || (slot.is_consuming && !matches!(kind, AdapterStorageKind::Owning));
-                let recv = if slot.is_consuming { "std::move(value_)" } else { "value_" };
+                // A consuming slot moves the value itself: `self` by value is
+                // not reachable through a shared `Arc<dyn Tr>`.
+                let recv = if slot.is_consuming {
+                    "std::move(value_)"
+                } else if matches!(kind, AdapterStorageKind::Owning) {
+                    "rusty_target()"
+                } else {
+                    "value_"
+                };
                 let prefix = if slot.return_type.trim() == "void" { "" } else { "return " };
                 let body = if stub {
                     "rusty::intrinsics::unreachable_via_const_dyn();".to_string()
@@ -6354,7 +6382,14 @@ impl CodeGen {
                     // Book §3.2.2 rule 7: the forwarders carry the keys as
                     // template parameters and pass them in every slot.
                     if self.ufcs_traits_with_ref_self_impls.contains(owner) {
-                        call_args.push(format!("rusty::self_tag<{}>{{}}", impl_param));
+                        // The key names the implementor, the pointee when the
+                        // owning forwarder holds a pointer to it.
+                        let self_ty = if recv == "rusty_target()" {
+                            "std::remove_cvref_t<decltype(rusty_target())>".to_string()
+                        } else {
+                            impl_param.to_string()
+                        };
+                        call_args.push(format!("rusty::self_tag<{}>{{}}", self_ty));
                     }
                     if owner == trait_name
                         && let Some(gparams) = self.ufcs_trait_generic_params.get(owner)

@@ -48,6 +48,27 @@ pub fn fd_total() -> u32 {
     near + dep_core::with_fd_backend(Box::new(EpollLike { closed: 10 }))
 }
 
+/// Lion's `OsInterrupt` from SRPC's `SrpcEpollBackend::interrupt`: a
+/// consumer's `Arc<T>` handed over as the dependency's `Arc<dyn Signal>`,
+/// while the consumer keeps its own clone.
+pub struct RootSignal {
+    pub v: u32,
+}
+
+impl dep_core::Signal for RootSignal {
+    fn signal(&self) -> u32 {
+        self.v
+    }
+}
+
+/// (300 + 300) through the trait object, + 300 through the kept clone,
+/// + (40 + 40) from the dependency's own implementor = 980.
+pub fn signal_total() -> u32 {
+    let shared = std::sync::Arc::new(RootSignal { v: 300 });
+    let kept = shared.clone();
+    dep_core::signal_twice(shared) + kept.v + dep_core::bell_total()
+}
+
 pub fn run() -> u32 {
     let mut widget = dep_core::Widget::new(3);
     widget.bump();
@@ -61,6 +82,7 @@ pub fn run() -> u32 {
         + dep_core::tick_total() as u32
         + dep_core::park_total() as u32
         + fd_total()
+        + signal_total()
 }
 
 /// std's `Duration`, beside `dep_core::time::Duration`.

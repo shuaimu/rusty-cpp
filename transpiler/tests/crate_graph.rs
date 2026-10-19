@@ -240,6 +240,28 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
         ),
         "{core}"
     );
+    // `Arc<T>` -> `Arc<dyn Signal>` shares the source Arc, so the owning
+    // forwarder holds the pointer and every slot probes its pointee (the
+    // dependency's `Bell` through the lane, the consumer's `RootSignal`
+    // through its member); the reference forwarders hold the implementor.
+    assert!(
+        core.contains(
+            "decltype(auto) rusty_target() const { if constexpr (!has_Signal<U> && requires { value_.operator->(); *value_; }) { return (*value_); } else { return (value_); } }"
+        ),
+        "{core}"
+    );
+    assert!(
+        core.contains(
+            "uint32_t signal() const override { if constexpr (requires { Signal_::signal(rusty_target()); }) { return Signal_::signal(rusty_target()); } else if constexpr (requires { rusty_target().rusty_Signal_signal(); }) { return rusty_target().rusty_Signal_signal(); } else { return rusty_target().signal(); } }"
+        ),
+        "{core}"
+    );
+    assert!(
+        core.contains(
+            "uint32_t signal() const override { if constexpr (requires { Signal_::signal(value_); }) { return Signal_::signal(value_); }"
+        ),
+        "{core}"
+    );
     for slots in [out.join("rusty_hand_slots.md"), out.join("dep-core/rusty_hand_slots.md")] {
         let text = std::fs::read_to_string(&slots).unwrap();
         assert!(text.contains("\n0 slot(s) requiring"), "{text}");
@@ -309,7 +331,7 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert_success(&linked, "compiling and linking the importer");
     let ran = Command::new(&binary).output().unwrap();
     assert_success(&ran, "running the graph");
-    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "10658\n");
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "11638\n");
 }
 
 #[test]

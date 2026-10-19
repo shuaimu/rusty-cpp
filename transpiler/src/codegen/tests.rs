@@ -9234,10 +9234,17 @@ fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
     assert_eq!(module.matches("namespace Layer_::impl_ {").count(), 3, "{module}");
     assert!(module.contains("using ::marked::__ufcs_Clash::value"), "{module}");
     // Book §3.2.10: per TRAIT, three generic forwarders each — not per
-    // implementor — every slot CPO-first.
+    // implementor — every slot CPO-first. The owning one probes through
+    // `rusty_target()` (the pointee of an `Arc<U>` it shares), the reference
+    // ones through the implementor they hold.
     assert_eq!(
         module.matches("{ if constexpr (requires { RootDispatch_::root_value(value_); })").count(),
-        3,
+        2,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("{ if constexpr (requires { RootDispatch_::root_value(rusty_target()); })").count(),
+        1,
         "{module}"
     );
     assert_eq!(
@@ -9247,7 +9254,12 @@ fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
     );
     assert_eq!(
         module.matches("{ if constexpr (requires { Clash_::value(value_); })").count(),
-        9,
+        6,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("{ if constexpr (requires { Clash_::value(rusty_target()); })").count(),
+        3,
         "{module}"
     );
     assert_eq!(
@@ -9257,7 +9269,12 @@ fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
     );
     assert_eq!(
         module.matches("{ if constexpr (requires { Layer_::depth(value_); })").count(),
-        6,
+        4,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("{ if constexpr (requires { Layer_::depth(rusty_target()); })").count(),
+        2,
         "{module}"
     );
 
@@ -9526,7 +9543,12 @@ pub mod external_glob {
     );
     assert_eq!(
         out.matches("{ if constexpr (requires { Clash_::value(value_); })").count(),
-        9,
+        6,
+        "{out}"
+    );
+    assert_eq!(
+        out.matches("{ if constexpr (requires { Clash_::value(rusty_target()); })").count(),
+        3,
         "{out}"
     );
 }
@@ -10187,6 +10209,44 @@ int main() {
         run.status.success(),
         "Ref-forwarder stub runtime proof failed (exit {:?}): the &mut slot through a non-const binding must trap, the RefMut forwarder must work",
         run.status.code()
+    );
+}
+
+#[test]
+fn test_owning_forwarder_reaches_an_arc_shared_implementor_through_its_pointer() {
+    // Book §3.2.10: `Arc<Bell>` -> `Arc<dyn Tone>` shares the source Arc, so
+    // the owning forwarder holds the Arc and its slots probe the pointee
+    // (Lion's `Arc<dyn OsInterrupt>` over SRPC's `Arc<SrpcEpollInterrupt>`).
+    // A boxed pointer that is itself the implementor (`impl Tone for
+    // Arc<Chime>`) keeps the pointer's own impl, as in Rust.
+    let source = r#"
+        use std::sync::Arc;
+        pub trait Tone { fn tone(&self) -> i32; }
+        pub struct Bell { pub t: i32 }
+        impl Tone for Bell { fn tone(&self) -> i32 { self.t } }
+        pub struct Chime { pub t: i32 }
+        impl Tone for Arc<Chime> { fn tone(&self) -> i32 { 1005 } }
+        pub fn exercise() -> i32 {
+            let bell = Arc::new(Bell { t: 7 });
+            let shared: Arc<dyn Tone> = bell.clone();
+            let boxed: Box<dyn Tone> = Box::new(Arc::new(Chime { t: 5 }));
+            shared.tone() * 10000 + boxed.tone() + bell.t * 100
+        }
+    "#;
+    let output = transpile_str_interface_traits(source);
+    assert!(
+        output.contains("decltype(auto) rusty_target() const { if constexpr (!has_Tone<U> && requires { value_.operator->(); *value_; }) { return (*value_); } else { return (value_); } }"),
+        "{output}"
+    );
+    assert!(
+        output.contains("int32_t tone() const override { if constexpr (requires { Tone_::tone(rusty_target()); }) { return Tone_::tone(rusty_target()); }"),
+        "{output}"
+    );
+    run_rust_and_cpp_runtime_probe(
+        source,
+        "assert_eq!(exercise(), 71705);",
+        &output,
+        "return exercise() == 71705 ? 0 : 1;",
     );
 }
 
