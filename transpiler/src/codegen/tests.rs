@@ -50545,3 +50545,63 @@ fn test_place_aliasing_guard_binding_does_not_leak_into_a_later_function() {
     assert!(!out.contains("deref_if_pointer((*g)) +="), "{out}");
     assert!(!out.contains("return rusty::detail::deref_if_pointer((*g))"), "{out}");
 }
+
+#[test]
+fn test_wrap_bridge_rewrite_keeps_a_consumer_declared_trait_namespace_bare() {
+    // serde_bytes declares its OWN `Serialize`/`Deserialize` beside serde_core's.
+    // The crate wrap's dependency-bridge rewrite (`<Tr>_` -> `<dep>::<Tr>_`,
+    // keyed by the dependency's declared leafs) used to clobber the consumer's
+    // own dispatcher DEFINITION into `namespace serde_core::Serialize_ {`,
+    // creating a nested `consumer::serde_core` shadow that captured every
+    // relative reference to the dependency's other traits. A same-leaf
+    // consumer trait keeps its bare namespace; a dependency-only trait's
+    // reference still re-qualifies to the dependency.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["Serialize".to_string(), "Serializer".to_string()],
+        declared_trait_methods: [
+            ("Serialize".to_string(), vec!["serialize".to_string()]),
+            ("Serializer".to_string(), vec!["serialize_bytes".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        method_owners: [
+            ("serialize".to_string(), vec!["Serialize".to_string()]),
+            ("serialize_bytes".to_string(), vec!["Serializer".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_crate_name("consumer");
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    let file: syn::File = syn::parse_quote! {
+        pub trait Serialize {
+            fn serialize<S>(&self, serializer: S) -> i32 where S: Serializer;
+        }
+        pub struct Bytes { pub v: Vec<u8> }
+        impl Serialize for Bytes {
+            fn serialize<S>(&self, serializer: S) -> i32 where S: Serializer {
+                serializer.serialize_bytes(&self.v)
+            }
+        }
+        impl Serialize for Vec<u8> {
+            fn serialize<S>(&self, serializer: S) -> i32 where S: Serializer {
+                serializer.serialize_bytes(self)
+            }
+        }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(out.contains("namespace Serialize_ {"), "own dispatcher stays bare: {out}");
+    assert!(
+        !out.contains("namespace serde_core::Serialize_"),
+        "no nested dependency shadow: {out}"
+    );
+    assert!(
+        out.contains("serde_core::Serializer_::serialize_bytes("),
+        "dependency-only trait reference re-qualifies: {out}"
+    );
+}

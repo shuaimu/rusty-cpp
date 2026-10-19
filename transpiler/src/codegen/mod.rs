@@ -5990,20 +5990,27 @@ impl CodeGen {
                 continue;
             }
             for tr in &m.declared_traits {
+                // A trait THIS crate declares under the same leaf (serde_bytes's
+                // own `Serialize`/`Deserialize` beside serde_core's) owns the
+                // bare `<Tr>_` spelling here: its dispatcher namespace is
+                // DEFINED in this purview, and this textual rewrite used to
+                // turn that definition into `namespace serde_core::Serialize_
+                // {` — a nested `serde_bytes::serde_core` shadow that then
+                // captured every relative `serde_core::X_` reference to the
+                // dependency's OTHER traits (measured: 19 × `no member named
+                // 'Serializer_' in namespace 'serde_bytes::serde_core'`). The
+                // consumer's calls that mean the dependency's same-named trait
+                // route through the serde runtime (`rusty::serde_rt`), not
+                // through a `<Tr>_` spelling, so nothing is lost by skipping.
+                if self.ufcs_declared_trait_names.contains(tr) {
+                    continue;
+                }
                 let bridge = format!("{}_", tr);
-                // RELATIVE on purpose: the consumer re-emits the dependency
-                // trait's dispatcher namespace and bridges its own impls into
-                // it, and that definition (`namespace serde_core::Serialize_
-                // {`) nests under the consumer (`serde_bytes::serde_core::…`)
-                // — the calls must land in the same nested shadow. The shadow
-                // makes a dependency trait the consumer never implements
-                // (serde_core's `SeqAccess`) unreachable through it (measured:
-                // `no member named 'SeqAccess_' in namespace
-                // 'serde_bytes::serde_core'`); an absolute spelling cannot
-                // fix that (`namespace ::x` is ill-formed) — the manifest step
-                // (§3.2.16 (8)) must reopen the dependency's `<Tr>_::impl_` at
-                // global scope with using-declaration bridges and re-emit no
-                // dispatchers.
+                // RELATIVE spelling: with no same-named shadow in the purview,
+                // `serde_core::SeqAccess_` from inside `namespace serde_bytes`
+                // resolves to the imported `::serde_core` (`namespace ::x` is
+                // ill-formed, so an absolute namespace DEFINITION was never an
+                // option; a reference needs none).
                 repls.push((bridge.clone(), format!("{}::{}", m.module, bridge)));
             }
             // HYGIENE-ALIAS resolution (book § 32, the .rmeta analog): a consumer references a
