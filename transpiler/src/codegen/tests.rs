@@ -50499,3 +50499,49 @@ fn test_bare_deref_of_place_aliasing_scope_guard_local_peels_the_pointer_slot() 
     );
     assert!(!out.contains("hasher(guard_shadow1,"), "{out}");
 }
+
+#[test]
+fn test_place_aliasing_guard_binding_does_not_leak_into_a_later_function() {
+    // The recorded guard local is block-scoped: a later function that binds
+    // the same name as a plain reference keeps the ordinary (collapsed)
+    // reference deref instead of the two-hop pointer-slot spelling.
+    let out = transpile_str(
+        r#"
+        use core::ops::{Deref, DerefMut};
+        pub struct ScopeGuard<T, F> where F: FnMut(&mut T) { dropfn: F, value: T }
+        pub fn guard<T, F>(value: T, dropfn: F) -> ScopeGuard<T, F> where F: FnMut(&mut T) {
+            ScopeGuard { dropfn, value }
+        }
+        impl<T, F> Deref for ScopeGuard<T, F> where F: FnMut(&mut T) {
+            type Target = T;
+            fn deref(&self) -> &T { &self.value }
+        }
+        impl<T, F> DerefMut for ScopeGuard<T, F> where F: FnMut(&mut T) {
+            fn deref_mut(&mut self) -> &mut T { &mut self.value }
+        }
+        impl<T, F> Drop for ScopeGuard<T, F> where F: FnMut(&mut T) {
+            fn drop(&mut self) { (self.dropfn)(&mut self.value) }
+        }
+        pub struct Table { items: usize }
+        impl Table {
+            pub fn rehash(&mut self, hasher: &dyn Fn(&mut Self, usize) -> u64) {
+                let mut g = guard(self, move |self_| { self_.items = 0; });
+                let hash = hasher(*g, 1);
+                g.items += hash as usize;
+                core::mem::forget(g);
+            }
+        }
+        pub fn bump(x: &mut usize, by: usize) -> usize {
+            let g = x;
+            *g += by;
+            *g
+        }
+        "#,
+    );
+    assert!(
+        out.contains("hasher(rusty::detail::deref_if_pointer((*g)), "),
+        "{out}"
+    );
+    assert!(!out.contains("deref_if_pointer((*g)) +="), "{out}");
+    assert!(!out.contains("return rusty::detail::deref_if_pointer((*g))"), "{out}");
+}

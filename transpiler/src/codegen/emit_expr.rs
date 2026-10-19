@@ -929,6 +929,7 @@ impl CodeGen {
         self.local_const_bindings.push(HashMap::new());
         self.local_item_const_names.push(HashSet::new());
         self.local_reference_bindings.push(HashSet::new());
+        self.local_place_aliasing_guard_bindings.push(HashSet::new());
         self.rebind_reference_pointer_bindings.push(HashSet::new());
         self.delayed_init_locals.push(HashSet::new());
         self.pending_uninit_let_locals.push(HashMap::new());
@@ -1190,6 +1191,7 @@ impl CodeGen {
         self.local_const_bindings.pop();
         self.local_item_const_names.pop();
         self.local_reference_bindings.pop();
+        self.local_place_aliasing_guard_bindings.pop();
         self.rebind_reference_pointer_bindings.pop();
         self.delayed_init_locals.pop();
         self.pending_uninit_let_locals.pop();
@@ -4092,6 +4094,7 @@ impl CodeGen {
                 scoped.local_shadowed_binding_types.push(HashMap::new());
                 scoped.local_const_bindings.push(local_consts);
                 scoped.local_reference_bindings.push(HashSet::new());
+                scoped.local_place_aliasing_guard_bindings.push(HashSet::new());
                 scoped
                     .rebind_reference_pointer_bindings
                     .push(HashSet::new());
@@ -4130,6 +4133,7 @@ impl CodeGen {
                         if pushed_binding_scope {
                             scoped.local_cpp_bindings.pop();
                             scoped.local_reference_bindings.pop();
+                            scoped.local_place_aliasing_guard_bindings.pop();
                             scoped.rebind_reference_pointer_bindings.pop();
                             scoped.local_const_bindings.pop();
                             scoped.local_shadowed_binding_types.pop();
@@ -4255,6 +4259,7 @@ impl CodeGen {
                         if pushed_binding_scope {
                             scoped.local_cpp_bindings.pop();
                             scoped.local_reference_bindings.pop();
+                            scoped.local_place_aliasing_guard_bindings.pop();
                             scoped.rebind_reference_pointer_bindings.pop();
                             scoped.local_const_bindings.pop();
                             scoped.local_shadowed_binding_types.pop();
@@ -4373,6 +4378,7 @@ impl CodeGen {
                             if pushed_binding_scope {
                                 scoped.local_cpp_bindings.pop();
                                 scoped.local_reference_bindings.pop();
+                                scoped.local_place_aliasing_guard_bindings.pop();
                                 scoped.rebind_reference_pointer_bindings.pop();
                                 scoped.local_const_bindings.pop();
                                 scoped.local_shadowed_binding_types.pop();
@@ -4420,6 +4426,7 @@ impl CodeGen {
             if pushed_binding_scope {
                 scoped.local_cpp_bindings.pop();
                 scoped.local_reference_bindings.pop();
+                scoped.local_place_aliasing_guard_bindings.pop();
                 scoped.rebind_reference_pointer_bindings.pop();
                 scoped.local_const_bindings.pop();
                 scoped.local_shadowed_binding_types.pop();
