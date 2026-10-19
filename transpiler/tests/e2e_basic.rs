@@ -767,7 +767,16 @@ pub fn baseline_only() -> i32 { 3 }
     let dependency_cpp =
         std::fs::read_to_string(output_dir.join("selected_dep/selected_dep.cppm")).unwrap();
     let root_cpp = std::fs::read_to_string(output_dir.join("feature_root.cppm")).unwrap();
-    assert!(dependency_cpp.contains("namespace selected_dep"), "{dependency_cpp}");
+    // Exactly ONE `namespace selected_dep {`: the universal crate wrap already
+    // namespaces a dependency, so the recursive --expand path must not also
+    // set a same-named cxx_namespace (that nested a second `namespace
+    // selected_dep` under the wrap and broke every `::selected_dep::m::T`
+    // spelling against the wrap's empty forward-declared module shells).
+    assert_eq!(
+        dependency_cpp.matches("\nnamespace selected_dep {").count(),
+        1,
+        "{dependency_cpp}"
+    );
     assert!(dependency_cpp.contains("expanded_only("), "{dependency_cpp}");
     assert!(!dependency_cpp.contains("build_only("), "{dependency_cpp}");
     assert!(!dependency_cpp.contains("baseline_only("), "{dependency_cpp}");
@@ -4094,4 +4103,82 @@ pub fn make_sink_proxy_fd(fd: i32) -> i32 { fd }
         !shadow_out.join("cross_file_cpp_name.client.cppm").exists(),
         "a rejected crate must not write output"
     );
+}
+
+#[test]
+fn crate_expand_wraps_a_local_dependency_exactly_once_under_crate_namespace_wrap() {
+    // Under `--crate-namespace-wrap` the dependency's purview is already
+    // `namespace local_dep { … }`. The recursive --expand path used to ALSO set
+    // a same-named cxx_namespace, nesting a second `namespace local_dep` under
+    // the wrap: the wrap's forward-declared module shells (`namespace m {}`)
+    // then sat empty in the outer one and every `::local_dep::m::T` spelling
+    // missed (hashbrown under the std port: 247 errors).
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("root");
+    let dependency = root.join("local_dep");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(dependency.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='wrap_root'\nversion='0.0.0'\nedition='2021'\n\
+         [dependencies]\nlocal_dep={path='local_dep'}\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn root_value() -> i32 { local_dep::m::Counter::new(7).get() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("Cargo.toml"),
+        "[package]\nname='local_dep'\nversion='0.0.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("src/lib.rs"),
+        "pub mod m;\npub use m::Counter;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("src/m.rs"),
+        "pub struct Counter { n: i32 }\n\
+         impl Counter {\n\
+             pub fn new(n: i32) -> Self { Counter { n } }\n\
+             pub fn get(&self) -> i32 { self.n }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let output_dir = fixture.path().join("cpp-out");
+    let output = transpiler_bin()
+        .arg("--crate")
+        .arg(root.join("Cargo.toml"))
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--expand")
+        .arg("--crate-namespace-wrap")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "wrapped expansion failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let dependency_cpp =
+        std::fs::read_to_string(output_dir.join("local_dep/local_dep.cppm")).unwrap();
+    assert_eq!(
+        dependency_cpp.matches("\nnamespace local_dep {").count(),
+        1,
+        "{dependency_cpp}"
+    );
+    assert_eq!(
+        dependency_cpp.matches("} // namespace local_dep").count(),
+        1,
+        "{dependency_cpp}"
+    );
+    // The module's forward-declared shell and its definition share ONE scope.
+    assert!(dependency_cpp.contains("namespace m {"), "{dependency_cpp}");
+    assert!(!dependency_cpp.contains("local_dep::local_dep::"), "{dependency_cpp}");
 }

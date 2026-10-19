@@ -2960,7 +2960,19 @@ fn transpile_crate_to_output_with_context(
             let dependency_flags =
                 dependency_cargo_resolution_flags(&dep.resolved_features, cargo_flags)?;
             let mut dependency_options = transpile_options.clone();
-            dependency_options.cxx_namespace = Some(dep.dependency_key.replace('-', "_"));
+            // Under `--crate-namespace-wrap` the dependency's purview is already
+            // `namespace <dep> { … }` (`wrap_module_purview_in_crate_namespace`,
+            // keyed on the same flag). A same-named explicit cxx_namespace on
+            // top nested a SECOND `namespace <dep>` inside the wrap, leaving the
+            // wrap's forward-declared module shells empty, so every
+            // `::<dep>::m::T` spelling missed (hashbrown under the std port:
+            // 247 errors). Without the wrap the cxx_namespace is the ONLY
+            // namespacing a dependency gets, so it stays.
+            dependency_options.cxx_namespace = if transpile_options.crate_namespace_wrap {
+                None
+            } else {
+                Some(dep.dependency_key.replace('-', "_"))
+            };
             dependency_options.auto_namespace = false;
             // Flat-import inference is declared per crate; a dependency crate
             // never inherits the root's declaration.

@@ -50454,3 +50454,48 @@ fn test_one_field_positional_struct_literal_uses_braces() {
     assert!(out.contains("W{rusty::Vec<uint8_t>::new_()}"), "{out}");
     assert!(!out.contains("W(rusty::Vec<uint8_t>::new_())"), "{out}");
 }
+
+#[test]
+fn test_bare_deref_of_place_aliasing_scope_guard_local_peels_the_pointer_slot() {
+    // `guard(self, ..)` stores the place's ADDRESS in the crate ScopeGuard's
+    // slot; method and field sites already spell
+    // `rusty::detail::deref_if_pointer((*g))`. A bare `*guard` handed to a
+    // callable (hashbrown's `hasher(*guard, i)`) collapsed to the guard
+    // object itself, which no `Fn(&mut Self, usize)` accepts.
+    let out = transpile_str(
+        r#"
+        use core::ops::{Deref, DerefMut};
+        pub struct ScopeGuard<T, F> where F: FnMut(&mut T) { dropfn: F, value: T }
+        pub fn guard<T, F>(value: T, dropfn: F) -> ScopeGuard<T, F> where F: FnMut(&mut T) {
+            ScopeGuard { dropfn, value }
+        }
+        impl<T, F> Deref for ScopeGuard<T, F> where F: FnMut(&mut T) {
+            type Target = T;
+            fn deref(&self) -> &T { &self.value }
+        }
+        impl<T, F> DerefMut for ScopeGuard<T, F> where F: FnMut(&mut T) {
+            fn deref_mut(&mut self) -> &mut T { &mut self.value }
+        }
+        impl<T, F> Drop for ScopeGuard<T, F> where F: FnMut(&mut T) {
+            fn drop(&mut self) { (self.dropfn)(&mut self.value) }
+        }
+        pub struct Table { items: usize, growth_left: usize }
+        impl Table {
+            pub fn buckets(&self) -> usize { 8 }
+            pub fn rehash(&mut self, hasher: &dyn Fn(&mut Self, usize) -> u64) {
+                let mut guard = guard(self, move |self_| { self_.growth_left = 0; });
+                for i in 0..guard.buckets() {
+                    let hash = hasher(*guard, i);
+                    guard.items += hash as usize;
+                }
+                core::mem::forget(guard);
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("hasher(rusty::detail::deref_if_pointer((*guard_shadow1)), std::move(i))"),
+        "{out}"
+    );
+    assert!(!out.contains("hasher(guard_shadow1,"), "{out}");
+}

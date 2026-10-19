@@ -9,9 +9,11 @@ hashbrown — the crate-own `mod alloc` vs extern-alloc-crate qualification
 cluster (the known "stdalloc" class): the crate's OWN `alloc` submodule
 shadows the extern alloc crate for Layout/alloc-fn refs.
 
-rusty — (a) the transpiler emits NO `import hashbrown;` for a local path dep
-and leaves the dep's glob re-exports unbridged (transpiler gap, bridged in
-text here); (b) paths.rs maps std::hash::RandomState ->
+rusty — (a) the transpiler leaves the dep's glob re-exports unbridged
+(transpiler gap, bridged in text here; it DOES emit `export import hashbrown;`
+for the local path dep since 2026-10, so the bridge lands after the import
+block and the import is only added when missing); (b) paths.rs maps
+std::hash::RandomState ->
 ::hashbrown::DefaultHashBuilder, wrong for the crate that DEFINES
 RandomState; (c) std::hash::SipHasher -> rusty::hash::SipHasher (runtime,
 include/rusty/hash.hpp); (d) TryReserveErrorKind::AllocError payload ctor ->
@@ -78,9 +80,12 @@ def patch_hashbrown(path: Path) -> None:
     # RawTable::new_/with_capacity hardcode hashbrown's own inner::Global as
     # the allocator VALUE while the generic param A may be rusty::alloc::Global
     # (the std port instantiates it so). The A param is the truth — use it.
-    t = t.replace(
-        "return RawTable<T, A>(rusty::clone(rusty::clone(RawTableInner::NEW)), raw::alloc::inner::Global{}, rusty::PhantomData<T>{});",
-        "return RawTable<T, A>(rusty::clone(rusty::clone(RawTableInner::NEW)), A{}, rusty::PhantomData<T>{});",
+    # (`RawTableInner::NEW` is spelled as a lazy static member FUNCTION
+    # `NEW()` since 2026-10 — anchor on either form.)
+    t = re.sub(
+        r"return RawTable<T, A>\(rusty::clone\(rusty::clone\(RawTableInner::NEW(\(\))?\)\), raw::alloc::inner::Global\{\}, rusty::PhantomData<T>\{\}\);",
+        r"return RawTable<T, A>(rusty::clone(rusty::clone(RawTableInner::NEW\1)), A{}, rusty::PhantomData<T>{});",
+        t,
     )
     t = t.replace(
         "return RawTable<T, A>::with_capacity_in(std::move(capacity), raw::alloc::inner::Global{});",
@@ -204,6 +209,12 @@ def patch_rusty(path: Path) -> None:
     t = t.replace(
         "read_exact(std::span<uint8_t> self_,",
         "read_exact(std::span<const uint8_t> self_,",
+    )
+    # Same receiver on the UFCS lane shape (tag parameter first; 2026-10).
+    t = re.sub(
+        r"\b(read|read_exact)\(Read_::impl_::tag, std::span<uint8_t> self_,",
+        r"\1(Read_::impl_::tag, std::span<const uint8_t> self_,",
+        t,
     )
     t = t.replace(
         "fill_buf(std::span<uint8_t> self_)",
@@ -337,9 +348,7 @@ def patch_rusty(path: Path) -> None:
     # and the TryReserveError using-declarations become self-referential. All
     # that remains genuinely missing is hash_map's glob re-export.
     if ns:
-        bridge = """export module std_port;
-import hashbrown;
-namespace hashbrown {
+        bridge = """namespace hashbrown {
     namespace hash_map {
         using namespace ::hashbrown::map;
         using namespace ::hashbrown::rustc_entry;
@@ -347,9 +356,7 @@ namespace hashbrown {
 }
 """
     else:
-        bridge = """export module std_port;
-import hashbrown;
-namespace hashbrown {
+        bridge = """namespace hashbrown {
     namespace hash_map {
         using namespace ::map;
         using namespace ::rustc_entry;
@@ -360,7 +367,27 @@ namespace hashbrown {
     using ::TryReserveError_AllocError;
 }
 """
-    t = t.replace("export module std_port;\n", bridge, 1)
+    # The transpiler now emits `export import hashbrown;` for the path dep
+    # itself (2026-10; the import half of gap (a) closed). C++ imports must
+    # immediately follow the module declaration, so the bridge lands AFTER the
+    # import block — and `import hashbrown;` is only added when still missing.
+    decl = "export module std_port;\n"
+    start = t.index(decl) + len(decl)
+    end = start
+    has_import = False
+    while True:
+        nl = t.find("\n", end)
+        if nl < 0:
+            break
+        stripped = t[end:nl].strip()
+        if stripped.startswith(("import ", "export import ")):
+            has_import = has_import or stripped.endswith(" hashbrown;")
+            end = nl + 1
+            continue
+        break
+    if not has_import:
+        bridge = "import hashbrown;\n" + bridge
+    t = t[:end] + bridge + t[end:]
 
     # --- range-for over the Rust-shaped iterators and lazy views ----------
     # std's HashSet set-algebra methods return LAZY VIEWS, and iter()/keys()/

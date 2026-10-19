@@ -14710,6 +14710,13 @@ impl CodeGen {
                             self.emit_expr_to_string(operand)
                         );
                     }
+                    // Place-aliasing ScopeGuard local: see the no-expected arm.
+                    if self.expr_is_place_aliasing_guard_local(operand) {
+                        return format!(
+                            "rusty::detail::deref_if_pointer((*{}))",
+                            self.emit_expr_to_string(operand)
+                        );
+                    }
                     if let syn::Expr::Path(path) = operand
                         && path.path.segments.len() == 1
                     {
@@ -26048,6 +26055,15 @@ impl CodeGen {
                     {
                         return format!(
                             "rusty::detail::deref_if_pointer_like({})",
+                            self.emit_expr_to_string(&un.expr)
+                        );
+                    }
+                    // A place-aliasing ScopeGuard local holds the place's
+                    // ADDRESS: `*guard` is two hops, spelled like the
+                    // member/field sites (`hasher(*guard, i)` in hashbrown).
+                    if self.expr_is_place_aliasing_guard_local(&un.expr) {
+                        return format!(
+                            "rusty::detail::deref_if_pointer((*{}))",
                             self.emit_expr_to_string(&un.expr)
                         );
                     }

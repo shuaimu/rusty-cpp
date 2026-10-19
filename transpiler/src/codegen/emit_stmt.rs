@@ -4919,6 +4919,14 @@ impl CodeGen {
                 if init_is_uncertain_guard_call && ref_suffix == "&&" {
                     self.record_local_uncertain_guard_binding(&name_str);
                 }
+                if local.init.as_ref().is_some_and(|init| {
+                    self.init_expr_is_place_aliasing_deref_guard_call(
+                        &init.expr,
+                        inferred_binding_ty.as_ref(),
+                    )
+                }) {
+                    self.record_local_place_aliasing_guard_binding(&name_str);
+                }
                 if needs_rebind_pointer_local {
                     self.record_rebind_reference_pointer_binding(&name_str);
                 }

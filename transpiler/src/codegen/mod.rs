@@ -2951,6 +2951,11 @@ pub struct CodeGen {
     /// `deref_if_pointer_like` rather than being dropped as a Rust-reference
     /// deref would be. See issue #35.
     pub(crate) local_uncertain_guard_bindings: Vec<HashSet<String>>,
+    /// Scoped Rust-local names bound from a place-aliasing `guard(self, ..)` /
+    /// `guard(&mut place, ..)` call over a crate `Deref` wrapper: the slot
+    /// holds the place's ADDRESS, so a bare `*g` spells
+    /// `rusty::detail::deref_if_pointer((*g))` like the member/field sites.
+    pub(crate) local_place_aliasing_guard_bindings: Vec<HashSet<String>>,
     /// Scoped Rust-local names lowered to pointer storage for reference
     /// rebinding (`let mut r: &T` reassigned within the same block).
     /// This is stricter than `local_reference_bindings` and is used to
@@ -3924,6 +3929,7 @@ impl CodeGen {
             iterator_impl_items: HashMap::new(),
             local_reference_bindings: Vec::new(),
             local_uncertain_guard_bindings: Vec::new(),
+            local_place_aliasing_guard_bindings: Vec::new(),
             rebind_reference_pointer_bindings: Vec::new(),
             delayed_init_locals: Vec::new(),
             pending_uninit_let_locals: Vec::new(),
@@ -8390,6 +8396,7 @@ impl CodeGen {
         self.local_item_const_names.clear();
         self.local_reference_bindings.clear();
         self.local_uncertain_guard_bindings.clear();
+        self.local_place_aliasing_guard_bindings.clear();
         self.rebind_reference_pointer_bindings.clear();
         self.delayed_init_locals.clear();
         self.pending_uninit_let_locals.clear();

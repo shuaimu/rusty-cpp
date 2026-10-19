@@ -262,6 +262,88 @@ impl CodeGen {
             .any(|scope| scope.contains(&name))
     }
 
+    /// `guard(self, |s| ..)` / `guard(&mut place, ..)` over the crate's own
+    /// `ScopeGuard`: the call lowering stores the place's ADDRESS in the guard
+    /// slot (see the `guard` arm of the call emitter), so a Rust `*g` is two
+    /// hops away in C++. Member and field sites already spell
+    /// `rusty::detail::deref_if_pointer((*g))`; this lets the bare-deref sites
+    /// (hashbrown's `hasher(*guard, i)`) do the same. The callee must return a
+    /// crate `Deref` type — a user fn merely named `guard` that returns a plain
+    /// value keeps the ordinary lowering. The callee is usually imported from a
+    /// sibling module (`use crate::scopeguard::{guard, ScopeGuard}`), so the
+    /// return type resolves through the import fallback; the let's own
+    /// inferred binding type (generic-substituted `ScopeGuard<&mut Self, _>`)
+    /// is accepted as the same evidence.
+    pub(super) fn init_expr_is_place_aliasing_deref_guard_call(
+        &self,
+        init: &syn::Expr,
+        binding_ty: Option<&syn::Type>,
+    ) -> bool {
+        let syn::Expr::Call(call) = self.peel_paren_group_expr(init) else {
+            return false;
+        };
+        let syn::Expr::Path(fp) = call.func.as_ref() else {
+            return false;
+        };
+        if !fp.path.segments.last().is_some_and(|s| s.ident == "guard") || call.args.len() != 2 {
+            return false;
+        }
+        let aliases_place = match self.peel_paren_group_expr(&call.args[0]) {
+            syn::Expr::Reference(r) => r.mutability.is_some(),
+            syn::Expr::Path(pp) => {
+                pp.qself.is_none()
+                    && pp.path.segments.len() == 1
+                    && pp.path.segments[0].ident == "self"
+            }
+            _ => false,
+        };
+        if !aliases_place {
+            return false;
+        }
+        binding_ty.is_some_and(|ty| self.type_is_user_deref_owner_type(ty))
+            || self
+                .lookup_fn_return_type_with_import_fallback(&call.func)
+                .is_some_and(|ret| self.type_is_user_deref_owner_type(&ret))
+    }
+
+    /// The type's base struct has a crate `impl Deref` (`user_deref_targets`).
+    pub(super) fn type_is_user_deref_owner_type(&self, ty: &syn::Type) -> bool {
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(ty) else {
+            return false;
+        };
+        let Some(base) = tp.path.segments.last().map(|s| s.ident.to_string()) else {
+            return false;
+        };
+        self.user_deref_targets.contains_key(&base)
+            || self.user_deref_targets.contains_key(&self.scoped_type_key(&base))
+    }
+
+    /// Record a local bound from a place-aliasing guard initializer; see
+    /// [`Self::init_expr_is_place_aliasing_deref_guard_call`].
+    pub(super) fn record_local_place_aliasing_guard_binding(&mut self, name: &str) {
+        if self.local_place_aliasing_guard_bindings.is_empty() {
+            self.local_place_aliasing_guard_bindings.push(HashSet::new());
+        }
+        if let Some(scope) = self.local_place_aliasing_guard_bindings.last_mut() {
+            scope.insert(name.to_string());
+        }
+    }
+
+    /// Is this expression a plain path naming a local recorded by
+    /// [`Self::record_local_place_aliasing_guard_binding`]?
+    pub(super) fn expr_is_place_aliasing_guard_local(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::Path(path) = self.peel_paren_group_expr(expr) else {
+            return false;
+        };
+        let Some(ident) = path.path.get_ident() else {
+            return false;
+        };
+        let name = ident.to_string();
+        self.local_place_aliasing_guard_bindings
+            .iter()
+            .any(|scope| scope.contains(&name))
+    }
+
     /// TYPED tier: the receiver's type is VISIBLE and it is a cell/lock
     /// container, so this call yields a guard BY VALUE — definitely, not
     /// maybe. The typed lowerings consult this one predicate instead of each
