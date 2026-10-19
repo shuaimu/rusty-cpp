@@ -3893,6 +3893,7 @@ const KNOWN_CPP_MARKER_NAMES: &[&str] = &[
     "cpp_no_auto_traits",
     "cpp_noexcept",
     "cpp_no_fieldwise_ctor",
+    "cpp_no_inherit",
     "cpp_trait_member_dispatch",
 ];
 
@@ -7430,6 +7431,23 @@ callable_signatures = ["void()"]
                 "source={source:?} must transpile"
             );
         }
+    }
+
+    #[test]
+    fn test_cpp_no_inherit_passes_the_marker_preflight_and_opts_out() {
+        // The per-impl tier-1 opt-out (book §3.2.16, decision (w)) is a
+        // reserved marker codegen honors, so the preflight must know it. It was
+        // missing from the roster, which rejected every inert spelling of it
+        // before codegen could see it (codegen's own test calls emit_file).
+        let source = "pub trait Fine { fn v(&self) -> i32; }\n\
+            pub struct Plain { pub x: i32 }\n\
+            #[cfg_attr(any(), cpp_no_inherit)]\n\
+            impl Fine for Plain { fn v(&self) -> i32 { self.x } }\n\
+            pub struct Dflt { pub x: i32 }\n\
+            impl Fine for Dflt { fn v(&self) -> i32 { self.x } }\n";
+        let out = transpile(source, None).expect("cpp_no_inherit must pass the marker preflight");
+        assert!(!out.contains("struct Plain : public Fine"), "the opt-out: {out}");
+        assert!(out.contains("struct Dflt : public Fine {"), "the default: {out}");
     }
 
     #[test]
