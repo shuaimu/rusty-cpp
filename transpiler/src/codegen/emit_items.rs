@@ -12619,6 +12619,9 @@ impl CodeGen {
                 || self
                     .cross_file_drop_tails
                     .contains(name.rsplit("::").next().unwrap_or(name))
+                // So is a sibling file's tier-1 implementor, which inherits
+                // its trait's interface class (BufferSink: SinkBase).
+                || self.is_cross_file_tier1_implementor(name)
                 // PhantomPinned structs emit deleted moves (user-declared) —
                 // non-aggregate, so their literals need the fieldwise ctor.
                 || self.type_has_phantom_pinned(name)

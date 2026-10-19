@@ -15608,6 +15608,50 @@ fn test_sibling_file_drop_struct_literal_uses_its_constructor() {
     assert!(plain.contains("auto g = Guard{.code = 7, .armed = true};"), "{plain}");
 }
 
+/// A tier-1 implementor in a SIBLING file (crate mode, tier 1 the default)
+/// inherits its trait's interface class there, so it is no C++ aggregate and
+/// a literal of it here must use its fieldwise constructor. The per-file
+/// collect pass saw no impl and emitted a designated initializer (SRPC's
+/// server.rs and client.rs building serializable.rs's `BufferSink { bytes }`,
+/// a `SinkBase` implementor).
+#[test]
+fn test_sibling_file_tier1_implementor_literal_uses_its_constructor() {
+    let sibling_source = "pub trait Gauge { fn reading(&self) -> u32; }\n\
+         pub struct Meter { pub level: u32, pub scale: u32 }\n\
+         impl Gauge for Meter { fn reading(&self) -> u32 { self.level * self.scale } }";
+    let sibling_file: syn::File = syn::parse_str(sibling_source).unwrap();
+    let sibling: syn::ItemStruct =
+        syn::parse_str("pub struct Meter { pub level: u32, pub scale: u32 }").unwrap();
+    let file: syn::File = syn::parse_str(
+        "use super::meters::Meter;\npub fn make() -> u32 { let m = Meter { scale: 3, level: 7 }; m.level }",
+    )
+    .unwrap();
+    let units: Vec<(Vec<String>, &syn::File)> =
+        vec![(vec!["meters".to_string()], &sibling_file), (vec!["user".to_string()], &file)];
+    let verdicts = std::sync::Arc::new(crate::tier_census::CrateTierVerdicts::from_outcome(
+        &crate::tier_census::pair_verdicts_for_units(&units),
+    ));
+    let emit = |tier1: bool, census: bool| {
+        let mut cg = test_codegen();
+        cg.set_tier1_default(tier1);
+        if census {
+            cg.set_crate_tier_verdicts(Some(verdicts.clone()));
+        }
+        cg.set_cross_file_structs(vec![sibling.clone()]);
+        cg.set_cross_file_tier1_implementors();
+        cg.emit_file(&file, Some("my_crate.user"));
+        cg.into_output()
+    };
+    let out = emit(true, true);
+    assert!(out.contains("auto m = Meter(7, 3);"), "{out}");
+    assert!(!out.contains("Meter{."), "{out}");
+    // Without the crate-wide census, or with tier 1 off (no inheritance), the
+    // literal stays an aggregate init.
+    for plain in [emit(true, false), emit(false, true)] {
+        assert!(plain.contains("auto m = Meter{.scale = 3, .level = 7};"), "{plain}");
+    }
+}
+
 /// A `pub mod` after another item used to emit its `export import` at that
 /// source position, below the declaration -- which clang rejects outright
 /// ("imports must immediately follow the module declaration"), so the unit did

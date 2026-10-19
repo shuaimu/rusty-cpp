@@ -3781,6 +3781,7 @@ fn transpile_full_with_options_impl(
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
     codegen.set_cross_file_drop_types(&options.cross_file_drop_types);
+    codegen.set_cross_file_tier1_implementors();
     codegen.cross_file_struct_qualified_paths = options.cross_file_struct_qualified_paths.clone();
     codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
     codegen.set_flat_import_type_authorizations(

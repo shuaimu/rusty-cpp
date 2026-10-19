@@ -2087,6 +2087,10 @@ pub struct CodeGen {
     /// see TranspileOptions::cross_file_drop_types), unique among the
     /// crate's struct names.
     pub(crate) cross_file_drop_tails: HashSet<String>,
+    /// Struct tails that implement a crate trait as tier 1 (crate mode;
+    /// see `set_cross_file_tier1_implementors`), unique among the crate's
+    /// struct names.
+    pub(crate) cross_file_tier1_implementor_tails: HashSet<String>,
     /// Named-field declaration order of structs a sibling file declares
     /// (crate mode; unique struct names only), for the fieldwise-constructor
     /// form of their literals.
@@ -3765,6 +3769,7 @@ impl CodeGen {
             types_with_phantom_pinned: HashSet::new(),
             cross_file_phantom_pinned_tails: HashSet::new(),
             cross_file_drop_tails: HashSet::new(),
+            cross_file_tier1_implementor_tails: HashSet::new(),
             cross_file_struct_field_order: HashMap::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
@@ -6903,6 +6908,42 @@ impl CodeGen {
             .filter(|name| self.cross_file_struct_field_types.contains_key(name.as_str()))
             .cloned()
             .collect();
+    }
+
+    /// Crate-wide tier-1 implementors (tail names), from the crate-wide tier
+    /// census: with tier 1 the default, a struct whose impl of a crate trait
+    /// passes §3.2.1 inherits that trait's interface class in the file that
+    /// declares it, so it is not a C++ aggregate there. A sibling file's
+    /// literal of it must take the fieldwise constructor, like a sibling's
+    /// Drop struct. Kept only when the crate declares the name once
+    /// (set_cross_file_structs and set_crate_tier_verdicts run first).
+    pub fn set_cross_file_tier1_implementors(&mut self) {
+        self.cross_file_tier1_implementor_tails.clear();
+        if !self.tier1_default {
+            return;
+        }
+        let Some(cv) = self.crate_tier_verdicts.clone() else {
+            return;
+        };
+        for ((_, self_written), verdict) in &cv.pairs {
+            if verdict.is_err() {
+                continue;
+            }
+            let head = self_written.split('<').next().unwrap_or(self_written);
+            let tail = head.rsplit("::").next().unwrap_or(head).trim();
+            if self.cross_file_struct_field_types.contains_key(tail) {
+                self.cross_file_tier1_implementor_tails.insert(tail.to_string());
+            }
+        }
+    }
+
+    /// A struct a SIBLING file declares that inherits a tier-1 interface
+    /// there (`set_cross_file_tier1_implementors`). A struct of this file
+    /// answers through its own collect pass (`is_cpp_inherit_type`).
+    pub(crate) fn is_cross_file_tier1_implementor(&self, struct_name: &str) -> bool {
+        let tail = struct_name.rsplit("::").next().unwrap_or(struct_name);
+        self.cross_file_tier1_implementor_tails.contains(tail)
+            && !self.local_declared_types.contains(tail)
     }
 
     /// Record the names of every C++ module produced by the current
