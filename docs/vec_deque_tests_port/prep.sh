@@ -9,3 +9,6 @@ sed -i \
   -e 's|use core::|use std::|g' \
   "$SRC"
 echo "[vec_deque_tests_port prep] normalized $SRC"
+# struct_with_counted_drop! invocations become module-level items with per-site
+# `_L<line>` names (the transpiler cannot expand alloctests' macro).
+python3 "$(dirname "${BASH_SOURCE[0]}")/prep_expand.py" "$SRC"

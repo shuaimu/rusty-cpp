@@ -26,7 +26,7 @@ from _test_port_helpers import (  # noqa
 HELPERS = """
 // The tests exercise the ALLOC consolidated module's Vec.
 template<typename T, typename A = rusty::alloc::Global>
-using VecT = ::rusty::port::vec::Vec<T, A>;
+using VecT = ::vec::Vec<T, A>;
 // vec![a, b, c] literal factories (the alloc Vec has no init-list ctor).
 template<typename T, typename... Ts>
 static auto vt_of_t(Ts&&... xs) {
@@ -553,6 +553,11 @@ def apply_patches(path: Path) -> None:
         "rusty::Rc<rusty::Mutex<VecT<size_t>>>::new_("
         "rusty::Mutex<VecT<size_t>>::new_("
         "vt_repeat(static_cast<size_t>(0), check_count)))")
+    # const_make_global(self) consumes the Vec (rust-src 1.95 regression
+    # test); the binding must not be const.
+    text = text.replace(
+        "const VecT<int32_t> empty_vec = VecT<int32_t>::new_();\nreturn empty_vec.const_make_global();",
+        "VecT<int32_t> empty_vec = VecT<int32_t>::new_();\nreturn std::move(empty_vec).const_make_global();")
     # DropCounter counters are u32 in Rust (inferred through &mut u32).
     text = re.sub(r"auto (count_\w+) = 0;", r"uint32_t \1 = 0;", text)
     # No rusty::thread runtime — panicking == active unwind.
@@ -632,6 +637,10 @@ def apply_patches(path: Path) -> None:
     text = text.replace(
         "== (rusty::array_repeat(std::make_tuple(), 12))",
         "== (std::vector<std::tuple<>>(12))")
+    # 2026-10: `vec![x; n]` lowers straight to rusty::array_repeat (a
+    # std::vector wrapper with no conversion to the alloc Vec); route the
+    # suite's repeat literals through the VecT factory.
+    text = text.replace("rusty::array_repeat(", "vt_repeat(")
     # partition_dedup as a helper.
     text = re.sub(r"(\w+)\.partition_dedup\(\)",
                   r"vt_partition_dedup(\1)", text)
@@ -776,6 +785,9 @@ def apply_patches(path: Path) -> None:
             lines[i] = f"{indent}{const_kw}auto {name} = VecT<{elem}>::new_();"
     text = "\n".join(lines)
 
+    # The hard-coded rewrites above spell `rusty::Rc`; the suite imports
+    # rc_port, not the umbrella, so the only Rc in scope is the port's.
+    text = re.sub(r"(?<![:\w])rusty::Rc<", "::rusty::port::rc::Rc<", text)
     path.write_text(text)
     print(f"vec_tests_port patches applied to {path.name}")
 

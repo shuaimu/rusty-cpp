@@ -323,6 +323,8 @@ def apply_patches(path: Path) -> None:
         "v.push_back(rusty::detail::deref_if_pointer_like(std::move(vd_v).unwrap())); }\n")
     # crate::hash helper — SipHasher-based, over the port Hash protocol.
     text = text.replace("std::hash(", "vd_hash(")
+    # 2026-10: `use crate::hash;` now lowers to the bare call `hash(x)`.
+    text = re.sub(r"(?<![\w:.>])hash\((\w+)\)", r"vd_hash(\1)", text)
     # TryReserveError: field `kind`, not a method (string-suite recipe).
     text = text.replace(".kind()", ".kind")
 

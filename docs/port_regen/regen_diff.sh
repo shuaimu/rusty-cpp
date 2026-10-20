@@ -87,9 +87,11 @@ case "$PORT" in
     # rustc's library/alloctests/tests/<name>.rs becomes src/lib.rs; the
     # port's prep.sh rewrites it in place.
     tname="${PORT%_tests_port}"
-    # rust-src names the BinaryHeap test file `heap.rs`.
-    [[ $tname == binary_heap ]] && tname=heap
-    cp "$SRC_ROOT/alloctests/tests/$tname.rs" "$WORK/crate/src/lib.rs"
+    # rust-src keeps the BinaryHeap suite (34 tests) under collections/;
+    # the top-level `heap.rs` is the 2-test overaligned-allocation file.
+    tsrc="$SRC_ROOT/alloctests/tests/$tname.rs"
+    [[ $tname == binary_heap ]] && tsrc="$SRC_ROOT/alloctests/tests/collections/binary_heap.rs"
+    cp "$tsrc" "$WORK/crate/src/lib.rs"
     [[ -f "$PREP" ]] && bash "$PREP" "$WORK/crate/src/lib.rs" >/dev/null
     mods=""
     ;;
@@ -148,7 +150,13 @@ ns_flag=()
 # btree_port is wrapped per MODULE (`namespace btree_port::btree::map {`):
 # the auto-namespace shape its patcher and the umbrella alias expect.
 [[ $PORT == btree_port ]] && ns_flag=(--auto-namespace)
-"$REPO_ROOT/target/release/rusty-cpp-transpiler" \
+# vec_tests_port: five inference gaps leak `auto` (a generic fn-local struct
+# literal typed by a later field push, `Vec::new()` typed only by `extend`, and
+# unsuffixed `&[1, 2]` slice literals); the port's patcher types those sites,
+# so let them through instead of aborting the transpile.
+dump_auto=()
+[[ $PORT == vec_tests_port ]] && dump_auto=(env RUSTY_CPP_DUMP_AUTO=1)
+"${dump_auto[@]}" "$REPO_ROOT/target/release/rusty-cpp-transpiler" \
   --crate "$WORK/crate/Cargo.toml" --in-umbrella-closure "${ns_flag[@]}" --output-dir "$WORK/out" > "$WORK/transpile.log" 2>&1
 tx=$?
 echo "transpile exit=$tx  ($(grep -c error: "$WORK/transpile.log" 2>/dev/null) error lines)"

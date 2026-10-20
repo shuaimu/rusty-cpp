@@ -352,24 +352,40 @@ def patch_stub_assert_covariance(text: str) -> str:
     emits bare `Drain<std::string_view>` — `Drain` lives in
     `rusty::port::collections::binary_heap::Drain<T, A>` and needs both
     template args. The function is unused at runtime, so an empty body
-    matches the original intent without needing to qualify Drain."""
-    import re as _re
-    pattern = _re.compile(
-        r'void assert_covariance\(\) \{[^}]*\}',
-        _re.DOTALL,
-    )
-    if not pattern.search(text):
+    matches the original intent without needing to qualify Drain.
+
+    The body is found by a brace-balanced scan: since 2026-10 the inner
+    `fn drain` lowers to a lambda, so a `[^}]*` regex stopped at the lambda's
+    close brace and left a stray `}` that unbalanced the module namespace."""
+    head = 'void assert_covariance() {'
+    start = text.find(head)
+    if start < 0:
         return text
-    return pattern.sub(
+    i = start + len(head) - 1
+    depth = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    else:
+        return text
+    if 'PATCHED: body stubbed' in text[start:i + 1]:
+        return text
+    stub = (
         'void assert_covariance() {\n'
         '    /* PATCHED: body stubbed — Rust-side this is a compile-only\n'
         '     * covariance check that names `Drain<&str>`; the transpiled\n'
         '     * `Drain<std::string_view>` lacks the allocator param and\n'
         '     * namespace qualifier, and the function is never invoked. */\n'
-        '}',
-        text,
-        count=1,
+        '}'
     )
+    return text[:start] + stub + text[i + 1:]
 
 
 def apply_patches(path: Path) -> None:
