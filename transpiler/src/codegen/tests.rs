@@ -50605,3 +50605,69 @@ fn test_wrap_bridge_rewrite_keeps_a_consumer_declared_trait_namespace_bare() {
         "dependency-only trait reference re-qualifies: {out}"
     );
 }
+
+#[test]
+fn test_move_closure_dropping_a_capture_is_mutable() {
+    // `drop(q)` consumes the capture: the lambda must be `mutable` so the
+    // emitted `std::move(q)` moves (a const capture would copy — deleted for
+    // the drop-counted move-only element, a silent clone otherwise).
+    let out = transpile_str(
+        r#"
+        use std::collections::VecDeque;
+        use std::panic::catch_unwind;
+        struct D(bool);
+        impl Drop for D {
+            fn drop(&mut self) { if self.0 { panic!("panic in drop"); } }
+        }
+        fn test_drop_panic() {
+            let mut q = VecDeque::new();
+            q.push_back(D(false));
+            q.push_front(D(true));
+            catch_unwind(move || drop(q)).ok();
+            let v = vec![D(false), D(true)];
+            catch_unwind(move || std::mem::forget(v)).ok();
+        }
+        "#,
+    );
+    assert!(
+        out.contains("catch_unwind_std([=, q = std::move(q)]() mutable {"),
+        "{out}"
+    );
+    // `forget(v)` is move-wrapped the same way, so its closure is mutable too.
+    assert!(
+        out.contains("catch_unwind_std([=, v = std::move(v)]() mutable {"),
+        "{out}"
+    );
+}
+
+
+#[test]
+fn test_rc_new_over_a_decltype_typed_mutex_takes_the_decltype_payload() {
+    // The inner `Mutex::new(vec![..])` only types through decltype, so the
+    // outer payload inferred as the bare path `Mutex` and was spelled as the
+    // bare template `rusty::Rc<rusty::Mutex>` — ill-formed C++.
+    let out = transpile_str(
+        r#"
+        use std::rc::Rc;
+        use std::sync::Mutex;
+        fn f(n: usize) -> usize {
+            let counts = Rc::new(Mutex::new(vec![0_usize; n]));
+            let boxed = Box::new(Mutex::new(vec![1_u8; n]));
+            let g = counts.lock().unwrap();
+            g.len() + boxed.lock().unwrap().len()
+        }
+        "#,
+    );
+    assert!(!out.contains("Rc<rusty::Mutex>::new_("), "{out}");
+    assert!(!out.contains("Box<rusty::Mutex>::new_("), "{out}");
+    // The recovered owner is spelled bare under the file's `using rusty::Rc;`
+    // (the leaf5146 shape); the payload is the inner constructor's decltype.
+    assert!(
+        out.contains("Rc<std::remove_cvref_t<decltype((Mutex<"),
+        "{out}"
+    );
+    assert!(
+        out.contains("rusty::Box<std::remove_cvref_t<decltype((Mutex<"),
+        "{out}"
+    );
+}

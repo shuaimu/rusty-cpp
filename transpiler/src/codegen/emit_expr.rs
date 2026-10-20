@@ -16293,6 +16293,14 @@ impl CodeGen {
             );
             return Some(format!("{}::{}({})", owner_cpp, method, value));
         }
+        // `let x = Rc::new(Mutex::new(v))` binds as the partial `Rc<Mutex>`
+        // (the inner payload only decltype knows), so the expected owner here
+        // is the bare class template `rusty::Rc<rusty::Mutex>`. There is no
+        // usable owner to spell: decline, and the call takes the generic route
+        // whose smart-pointer fallback types the payload by decltype.
+        if Self::owner_cpp_has_bare_runtime_generic_template_arg(&owner_cpp) {
+            return None;
+        }
         if self.owner_cpp_has_unusable_template_args(&owner_cpp)
             && matches!(owner_seg.arguments, syn::PathArguments::None)
         {

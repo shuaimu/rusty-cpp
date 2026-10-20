@@ -46560,6 +46560,25 @@ impl CodeGen {
         ) || ident.ends_with("_t")
     }
 
+    /// `rusty::Mutex`, `rusty::RefCell`, `::rusty::port::vec::Vec`, …: a
+    /// runtime class template with no template arguments. Only runtime
+    /// spellings qualify — a crate's own non-generic `Mutex` is spelled bare
+    /// or by its crate path, never under `rusty::`.
+    fn owner_template_arg_is_bare_runtime_generic(arg: &str) -> bool {
+        let arg = arg.trim();
+        if arg.contains('<') || !(arg.starts_with("rusty::") || arg.starts_with("::rusty::")) {
+            return false;
+        }
+        let leaf = arg.rsplit("::").next().unwrap_or(arg);
+        matches!(
+            leaf,
+            "Mutex" | "RwLock" | "RefCell" | "Cell" | "UnsafeCell" | "OnceCell" | "Vec"
+                | "VecDeque" | "LinkedList" | "BinaryHeap" | "HashMap" | "HashSet" | "BTreeMap"
+                | "BTreeSet" | "Option" | "Result" | "Box" | "Rc" | "Arc" | "Weak"
+                | "MaybeUninit" | "ManuallyDrop" | "Pin" | "Cow" | "PhantomData"
+        )
+    }
+
     fn owner_template_arg_is_value_identifier(&self, arg: &str) -> bool {
         let trimmed = arg.trim();
         Self::is_simple_ident(trimmed)
@@ -46678,6 +46697,22 @@ impl CodeGen {
             self.owner_template_arg_is_value_identifier(arg)
                 || self.owner_template_arg_looks_like_namespace_path(arg)
         })
+    }
+
+    /// `rusty::Rc<rusty::Mutex>`: an owner spelled from a PARTIAL binding type
+    /// (`let x = Rc::new(Mutex::new(v))` infers as `Rc<Mutex>` because the
+    /// inner payload only decltype knows). A bare class template is no
+    /// template argument, so such an owner cannot be emitted.
+    fn owner_cpp_has_bare_runtime_generic_template_arg(owner_cpp: &str) -> bool {
+        let Some(start) = owner_cpp.find('<') else {
+            return false;
+        };
+        let Some(end) = owner_cpp.rfind('>').filter(|idx| *idx > start) else {
+            return false;
+        };
+        Self::split_top_level_comma_args(&owner_cpp[start + 1..end])
+            .iter()
+            .any(|arg| Self::owner_template_arg_is_bare_runtime_generic(arg))
     }
 
     fn snake_ident_to_pascal_case(name: &str) -> Option<String> {
@@ -47798,10 +47833,16 @@ impl CodeGen {
                 // them is the strict-auto leak; recover via the
                 // From-conversion argument-unification instead (#79), and if
                 // that also fails keep the bare emission rather than leak.
-                if owner_args
-                    .iter()
-                    .any(|a| a == "auto" || type_string_has_auto_placeholder(a))
-                {
+                //
+                // A solved arg that is a bare runtime class template
+                // (`rusty::Mutex` for `Rc::new(Mutex::new(x))`, whose payload
+                // only decltype knows) is as unusable as `auto`: the bare
+                // emission then takes the smart-pointer decltype fallback.
+                if owner_args.iter().any(|a| {
+                    a == "auto"
+                        || type_string_has_auto_placeholder(a)
+                        || Self::owner_template_arg_is_bare_runtime_generic(a)
+                }) {
                     if !call.args.is_empty()
                         && let syn::Expr::Path(pe) = call.func.as_ref()
                         && let Some(owner_cpp) =
@@ -48283,6 +48324,14 @@ impl CodeGen {
                                     && !type_string_has_auto_placeholder(arg)
                                     && !self.owner_template_arg_is_value_identifier(arg)
                                     && !self.owner_template_arg_looks_like_namespace_path(arg)
+                                    // A runtime class template spelled without
+                                    // its arguments (`rusty::Mutex` for
+                                    // `Rc::new(Mutex::new(x))`, whose inner
+                                    // payload only decltype knows) is as
+                                    // unusable as `auto`: rejecting it here
+                                    // lets the constructor fall back to the
+                                    // decltype-typed emission.
+                                    && !Self::owner_template_arg_is_bare_runtime_generic(arg)
                             };
                             let prefer_inferred_owner_args = owner_args_omitted
                                 && owner_name == "Map"
@@ -48475,6 +48524,14 @@ impl CodeGen {
                                         mapped != "auto"
                                             && !mapped.contains("/* TODO")
                                             && !type_string_has_auto_placeholder(mapped)
+                                            // `Rc::new(Mutex::new(x))`: the argument
+                                            // infers as the bare `Mutex` (its payload
+                                            // only decltype knows) — a bare class
+                                            // template is no template argument; take
+                                            // the decltype route below.
+                                            && !Self::owner_template_arg_is_bare_runtime_generic(
+                                                mapped,
+                                            )
                                     });
                                 let inferred = inferred_from_type.or_else(|| {
                                     call.args.first().and_then(|arg| {

@@ -11970,6 +11970,35 @@ impl CodeGen {
         }
     }
 
+    /// A std generic spelled WITHOUT its arguments (`Mutex`, `RefCell`,
+    /// `Vec`, …) as an inferred expression type: it maps to a bare C++ class
+    /// template, which is ill-formed as a template argument. Crate-declared
+    /// namesakes (a port's own `Rc`) are not std generics and are left alone.
+    pub(super) fn inferred_type_is_bare_std_generic(&self, ty: &syn::Type) -> bool {
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(ty) else {
+            return false;
+        };
+        let Some(last) = tp.path.segments.last() else {
+            return false;
+        };
+        if !matches!(last.arguments, syn::PathArguments::None) {
+            return false;
+        }
+        let name = last.ident.to_string();
+        if self.struct_field_order.contains_key(&name)
+            || self.declared_type_params.contains_key(&name)
+        {
+            return false;
+        }
+        matches!(
+            name.as_str(),
+            "Mutex" | "RwLock" | "RefCell" | "Cell" | "UnsafeCell" | "OnceCell" | "Vec"
+                | "VecDeque" | "LinkedList" | "BinaryHeap" | "HashMap" | "HashSet" | "BTreeMap"
+                | "BTreeSet" | "Option" | "Result" | "Box" | "Rc" | "Arc" | "Weak"
+                | "MaybeUninit" | "ManuallyDrop" | "Pin" | "Cow" | "PhantomData"
+        )
+    }
+
     pub(super) fn infer_owner_template_args_for_call(
         &self,
         owner_path: Option<&syn::Path>,
@@ -12461,6 +12490,8 @@ impl CodeGen {
                                 .or_else(|| self.infer_local_binding_type_from_initializer(arg))
                                 .or_else(|| self.infer_simple_expr_type(arg))
                         })
+                        // Same bare-generic guard as the Rc/Arc arm below.
+                        .filter(|ty| !self.inferred_type_is_bare_std_generic(ty))
                         .map(|ty| self.map_type(&ty))
                         .filter(|mapped| {
                             mapped != "auto"
@@ -12513,6 +12544,13 @@ impl CodeGen {
                                 .or_else(|| self.infer_local_binding_type_from_initializer(arg))
                                 .or_else(|| self.infer_simple_expr_type(arg))
                         })
+                        // `Rc::new(Mutex::new(x))`: the inner constructor's
+                        // payload is itself only recoverable through decltype,
+                        // so the argument infers as the bare path `Mutex` and
+                        // would map to the bare template `rusty::Mutex` — an
+                        // ill-formed template argument. Take the decltype
+                        // fallback below instead.
+                        .filter(|ty| !self.inferred_type_is_bare_std_generic(ty))
                         .map(|ty| self.map_type(&ty))
                         .filter(|mapped| {
                             mapped != "auto"

@@ -1671,6 +1671,15 @@ impl CodeGen {
                 "rusty::panic::AssertUnwindSafe" => {
                     (arg_idx == 0).then_some(ArgPassStyle::Value)
                 }
+                // `drop(x)` takes its argument by value and the emitter
+                // move-wraps it. A capture (or binding) left const decays that
+                // move to a copy: deleted for move-only payloads, and for the
+                // rest a silent clone whose drop the test never observes
+                // (vec_deque's `catch_unwind(move || drop(q))` drop counter).
+                // `forget(x)` is move-wrapped the same way.
+                "rusty::mem::drop" | "rusty::mem::forget" => {
+                    (arg_idx == 0).then_some(ArgPassStyle::Value)
+                }
                 "rusty::ptr::read" => (arg_idx == 0).then_some(ArgPassStyle::Pointer),
                 "rusty::ptr::write" => match arg_idx {
                     0 => Some(ArgPassStyle::Pointer),
