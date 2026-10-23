@@ -18155,13 +18155,18 @@ impl CodeGen {
             // For borrowed temporaries like `&foo(...)` where the callee doesn't
             // require pointer/reference shape, prefer passing the value expression.
             // Emitting `addr_of_temp(...)` here frequently creates `T*` mismatches.
+            // A BY-VALUE callee parameter (a dependency's `&[T]` param is a
+            // `std::span` taken by value — pass style Value in its manifest) can
+            // never bind a pointer either: serde_test's `assert_tokens(&v,
+            // &[Token::…])` lowered its array literal to `addr_of_temp(std::array{…})`
+            // and matched nothing; the `std::array{…}` prvalue binds the span.
             let expected_requires_ref_shape = effective_expected_ty.is_some_and(|ty| {
                 matches!(
                     self.peel_reference_paren_group_type(ty),
                     syn::Type::Reference(_) | syn::Type::Ptr(_)
                 )
             });
-            if style.is_none()
+            if matches!(style, None | Some(ArgPassStyle::Value))
                 && r.mutability.is_none()
                 && !expected_requires_ref_shape
                 && !self.is_stable_reference_lvalue_expr(&r.expr)

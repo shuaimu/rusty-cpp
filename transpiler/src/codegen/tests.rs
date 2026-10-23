@@ -50985,3 +50985,44 @@ fn test_dependency_module_self_import_through_a_facade_shadowing_a_local_module_
         "both facade module imports are skipped as shadowing: {out}"
     );
 }
+
+#[test]
+fn test_borrowed_array_literal_to_a_by_value_dependency_parameter_passes_the_array() {
+    // serde_test's `assert_tokens(value: &T, tokens: &[Token])` takes its slice
+    // as a `std::span` BY VALUE (pass style Value in the manifest). The
+    // consumer's `&[Token::…]` argument lowered to
+    // `rusty::addr_of_temp(std::array{…})`, a pointer no span binds ("no
+    // matching function for call to 'assert_tokens'"). A borrowed temporary
+    // into a by-value parameter is the value itself.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_test".to_string(),
+        root_exported_names: vec!["assert_tokens".to_string()],
+        function_arg_pass_styles: [("assert::assert_tokens".to_string(), vec![0u8, 2u8])]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_crate_name("consumer");
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    let mut aliases = HashMap::new();
+    aliases.insert("serde_test".to_string(), "serde_test".to_string());
+    cg.set_external_crate_module_aliases(aliases);
+    let file: syn::File = syn::parse_quote! {
+        use serde_test::assert_tokens;
+        pub fn check(v: &i32) {
+            assert_tokens(v, &["a", "b"]);
+        }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(
+        !out.contains("rusty::addr_of_temp(std::array"),
+        "no pointer to the array literal: {out}"
+    );
+    assert!(
+        out.contains("assert_tokens(v, std::array{"),
+        "the array prvalue is the argument: {out}"
+    );
+}
