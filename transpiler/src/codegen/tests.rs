@@ -50671,3 +50671,317 @@ fn test_rc_new_over_a_decltype_typed_mutex_takes_the_decltype_payload() {
         "{out}"
     );
 }
+
+#[test]
+fn test_token_owner_runtime_block_lands_outside_the_crate_wrap() {
+    // The module that owns `::token` (serde_test) emits its runtime helpers as
+    // an `extern "C++"` block in the purview instead of the global module
+    // fragment. The universal crate wrap used to enclose that block, so its
+    // `namespace rusty {` became `serde_test::rusty` and shadowed `::rusty`
+    // for every `rusty::X` spelling in the module ("no template named
+    // 'Option' in namespace 'serde_test::rusty'").
+    let mut cg = test_codegen();
+    cg.set_crate_name("serde_test");
+    let file: syn::File = syn::parse_quote! {
+        pub mod token {
+            pub enum Token {
+                Bool(bool),
+                SeqEnd,
+            }
+            impl Token {
+                pub fn is_end(&self) -> bool {
+                    matches!(self, Token::SeqEnd)
+                }
+            }
+        }
+        pub fn order(a: i32, b: i32) -> std::cmp::Ordering {
+            a.cmp(&b)
+        }
+    };
+    cg.emit_file(&file, Some("serde_test"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("#define RUSTY_SERDE_TOKEN_OWNER 1"),
+        "the token owner takes the owner runtime block: {out}"
+    );
+    let wrap_open = out
+        .find("\nnamespace serde_test {\n")
+        .expect("crate wrap opens");
+    let block = out
+        .find("extern \"C++\" {\nnamespace rusty {")
+        .expect("owner runtime block");
+    assert!(
+        block < wrap_open,
+        "the owner runtime block sits before the crate wrap opens: {out}"
+    );
+    assert!(
+        !out[wrap_open..].contains("\nnamespace rusty {"),
+        "no `rusty` namespace is declared inside the crate wrap: {out}"
+    );
+}
+
+#[test]
+fn test_dependency_root_function_reexport_is_not_a_macro_import() {
+    // serde_test re-exports its assert functions at the crate root (`pub use
+    // assert::assert_tokens`). The macro classifier's not-in-surface fallback
+    // took the lowercase leaf for a stripped `macro_rules!` and dropped the
+    // import, so the consumer's calls stayed bare ("use of undeclared
+    // identifier 'assert_tokens'; did you mean 'serde_test::assert_tokens'?").
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_test".to_string(),
+        root_exported_names: vec!["assert_tokens".to_string()],
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_crate_name("consumer");
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    let mut aliases = HashMap::new();
+    aliases.insert("serde_test".to_string(), "serde_test".to_string());
+    cg.set_external_crate_module_aliases(aliases);
+    let file: syn::File = syn::parse_quote! {
+        use serde_test::assert_tokens;
+        pub fn check(v: i32) {
+            assert_tokens(v);
+        }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(
+        !out.contains("Rust-only macro import: using serde_test::assert_tokens"),
+        "a root re-exported function is not a macro: {out}"
+    );
+    assert!(
+        out.contains("using ::serde_test::assert_tokens;"),
+        "the import binds the dependency's function: {out}"
+    );
+}
+
+#[test]
+fn test_dependency_module_self_import_aliases_unless_it_shadows_a_local_module() {
+    // `use serde::de::{self, Visitor}` binds `de`, and a using-DECLARATION
+    // cannot name a namespace ("using declaration cannot refer to a
+    // namespace"). A wrapped dependency's module gets a namespace alias —
+    // except in a crate that declares a module of that name itself
+    // (serde_test's own `de`), where the alias would shadow that module for
+    // the transpiler's `de::Type` out-of-line spellings.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_modules: vec!["de".to_string(), "de::value".to_string()],
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_crate_name("serde_test");
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    let mut aliases = HashMap::new();
+    aliases.insert("serde_core".to_string(), "serde_core".to_string());
+    cg.set_external_crate_module_aliases(aliases);
+    let file: syn::File = syn::parse_quote! {
+        pub mod de {
+            use serde_core::de::{self, Visitor};
+            pub struct Deserializer {
+                pub n: i32,
+            }
+            impl Deserializer {
+                pub fn one() -> Deserializer {
+                    Deserializer { n: 1 }
+                }
+            }
+        }
+        pub mod configure {
+            use serde_core::de::value::{self};
+        }
+    };
+    cg.emit_file(&file, Some("serde_test"));
+    let out = cg.into_output();
+    assert!(
+        !out.contains("using ::serde_core::de;"),
+        "no using-declaration of a namespace: {out}"
+    );
+    assert!(
+        out.contains("// Rust-only dependency module import (shadows a local module): using serde_core::de;"),
+        "the colliding module import is skipped: {out}"
+    );
+    assert!(
+        out.contains("namespace value = ::serde_core::de::value;"),
+        "a non-colliding dependency module import is a namespace alias: {out}"
+    );
+}
+
+#[test]
+fn test_generic_seed_deserialize_bottoms_out_in_the_runtime_seed_dispatcher() {
+    // serde_core leaves `impl DeserializeSeed for PhantomData<T>` to the
+    // runtime ("phantom deserialize handled by runtime"), and
+    // `rusty::PhantomData` has no `deserialize` member, so a crate-local
+    // SeqAccess forwarding a generic seed through the UFCS dispatcher died in
+    // its member fallback ("no member named 'deserialize' in
+    // 'rusty::PhantomData<unsigned char>'"). The ladder's last rung is the
+    // runtime's seed dispatcher, which owns the PhantomData route.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["DeserializeSeed".to_string()],
+        declared_trait_methods: [("DeserializeSeed".to_string(), vec!["deserialize".to_string()])]
+            .into_iter()
+            .collect(),
+        method_owners: [("deserialize".to_string(), vec!["DeserializeSeed".to_string()])]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_crate_name("serde_test");
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    let mut aliases = HashMap::new();
+    aliases.insert("serde_core".to_string(), "serde_core".to_string());
+    cg.set_external_crate_module_aliases(aliases);
+    let file: syn::File = syn::parse_quote! {
+        use serde_core::de::DeserializeSeed;
+        pub struct Seq {
+            pub de: i32,
+        }
+        impl Seq {
+            pub fn next_element_seed<T: DeserializeSeed>(&mut self, seed: T) -> i32 {
+                seed.deserialize(self.de)
+            }
+        }
+    };
+    cg.emit_file(&file, Some("serde_test"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("serde_core::DeserializeSeed_::deserialize("),
+        "the seed call rides the dependency's UFCS dispatcher: {out}"
+    );
+    assert!(
+        out.contains("else { return ::rusty::serde_rt::de::deserialize(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }"),
+        "the ladder bottoms out in the runtime seed dispatcher: {out}"
+    );
+}
+
+#[test]
+fn test_facade_reexport_of_a_dependency_macro_stays_a_macro_import() {
+    // serde re-exports serde_core's `forward_to_deserialize_any`, a
+    // `macro_rules!` that `cargo expand` strips, so the facade's root list
+    // carries the name with no C++ entity behind it. Taking every root
+    // re-export for a function emitted `using ::serde::forward_to_deserialize_any;`
+    // ("no member named 'forward_to_deserialize_any' in namespace 'serde'").
+    // A root re-export of a dependency name the dependency's own surface
+    // lacks is a macro.
+    let facade = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde".to_string(),
+        root_exported_names: vec!["forward_to_deserialize_any".to_string()],
+        cross_crate_reexports: [(
+            "forward_to_deserialize_any".to_string(),
+            "serde_core::forward_to_deserialize_any".to_string(),
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let origin = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_modules: vec!["de".to_string()],
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_crate_name("serde_test");
+    cg.set_dependency_ufcs_trait_manifests(vec![facade, origin]);
+    let mut aliases = HashMap::new();
+    aliases.insert("serde".to_string(), "serde".to_string());
+    aliases.insert("serde_core".to_string(), "serde_core".to_string());
+    cg.set_external_crate_module_aliases(aliases);
+    let file: syn::File = syn::parse_quote! {
+        pub mod de {
+            use serde::forward_to_deserialize_any;
+            pub struct Deserializer {
+                pub n: i32,
+            }
+        }
+    };
+    cg.emit_file(&file, Some("serde_test"));
+    let out = cg.into_output();
+    assert!(
+        !out.contains("using ::serde::forward_to_deserialize_any;")
+            && !out.contains("using ::serde_core::forward_to_deserialize_any;"),
+        "a stripped macro re-export binds nothing: {out}"
+    );
+    assert!(
+        out.contains("// Rust-only macro import: using serde::forward_to_deserialize_any;"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_dependency_module_self_import_through_a_facade_shadowing_a_local_module_is_rust_only() {
+    // serde_test's `error` module does `use serde::{de, ser};` — serde is a
+    // facade whose `de`/`ser` are serde_core's modules. The same rule as the
+    // direct form applies after the facade is resolved: the crate declares
+    // its own `de` and `ser`, so neither import may become a using-declaration
+    // of a namespace or an alias that shadows the local module.
+    let facade = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde".to_string(),
+        root_exported_names: vec!["de".to_string(), "ser".to_string()],
+        cross_crate_reexports: [
+            ("de".to_string(), "serde_core::de".to_string()),
+            ("ser".to_string(), "serde_core::ser".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let origin = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_modules: vec!["de".to_string(), "ser".to_string()],
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_crate_name("serde_test");
+    cg.set_dependency_ufcs_trait_manifests(vec![facade, origin]);
+    let mut aliases = HashMap::new();
+    aliases.insert("serde".to_string(), "serde".to_string());
+    aliases.insert("serde_core".to_string(), "serde_core".to_string());
+    cg.set_external_crate_module_aliases(aliases);
+    let file: syn::File = syn::parse_quote! {
+        pub mod de {
+            pub struct Deserializer {
+                pub n: i32,
+            }
+        }
+        pub mod ser {
+            pub struct Serializer {
+                pub n: i32,
+            }
+        }
+        pub mod error {
+            use serde::{de, ser};
+            pub struct Error {
+                pub msg: String,
+            }
+        }
+    };
+    cg.emit_file(&file, Some("serde_test"));
+    let out = cg.into_output();
+    assert!(
+        !out.lines().any(|line| {
+            let line = line.trim();
+            line == "using ::serde_core::de;" || line == "using ::serde_core::ser;"
+        }),
+        "no using-declaration of a namespace: {out}"
+    );
+    assert!(
+        !out.contains("namespace de = ::serde_core::de;")
+            && !out.contains("namespace ser = ::serde_core::ser;"),
+        "no alias shadowing the crate's own modules: {out}"
+    );
+    assert_eq!(
+        out.matches("// Rust-only dependency module import (shadows a local module): using")
+            .count(),
+        2,
+        "both facade module imports are skipped as shadowing: {out}"
+    );
+}

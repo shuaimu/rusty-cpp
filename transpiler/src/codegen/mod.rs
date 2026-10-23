@@ -4198,6 +4198,27 @@ impl CodeGen {
         self.output = format!("{}{}{}", &self.output[..preamble_end], hoisted, rest);
     }
 
+    /// The token-owner runtime block that `emit_file` puts in the purview
+    /// (`runtime_path_fallback_helpers_text_for_local_token_module`: an
+    /// `extern "C++" { namespace rusty { … } #include <rusty/serde_runtime.hpp> }`
+    /// span). It lives in the purview so the header's `token` forward
+    /// declarations share the module's attachment, and inside a
+    /// linkage-specification so its `rusty::*` definitions stay global-module
+    /// entities. Cut it out of the text from `from` on and hand it back; the
+    /// caller re-inserts it ahead of the crate wrap.
+    fn take_purview_global_linkage_block(output: &mut String, from: usize) -> Option<String> {
+        const START: &str = "extern \"C++\" {\nnamespace rusty {\n";
+        const END: &str = "} // extern \"C++\"\n";
+        let start = from + output[from..].find(START)?;
+        let mut end = start + output[start..].find(END)? + END.len();
+        if output[end..].starts_with('\n') {
+            end += 1;
+        }
+        let block = output[start..end].to_string();
+        output.replace_range(start..end, "");
+        Some(block)
+    }
+
     fn wrap_module_purview_in_crate_namespace(&mut self, crate_name: String) {
         let Some(export_idx) = self.output.find("\nexport module ") else {
             return;
@@ -4227,6 +4248,16 @@ impl CodeGen {
                 continue;
             }
             break;
+        }
+        // The token owner's runtime block must stay outside the wrap: wrapped,
+        // its `namespace rusty {` becomes `<crate>::rusty`, a shadow that
+        // captures every `rusty::X` spelling in the module ("no template named
+        // 'Option' in namespace 'serde_test::rusty'"), and its column-0
+        // `namespace rusty` makes Rule 1 below re-qualify `::rusty::…` to
+        // `::<crate>::rusty::…`. Move it ahead of the brace, after the imports.
+        if let Some(block) = Self::take_purview_global_linkage_block(&mut self.output, insert_pos) {
+            self.output.insert_str(insert_pos, &block);
+            insert_pos += block.len();
         }
         let open = format!("namespace {} {{\n", crate_name);
         self.output.insert_str(insert_pos, &open);
@@ -27316,6 +27347,58 @@ impl CodeGen {
     /// Lets a `use dep::mod as alias` (or a resolved reference to one) emit a NAMESPACE alias
     /// rather than a (broken) type alias. The complete module recognition here is what keeps the
     /// crate-qualified alias resolution (record_module_path_alias) from cascading.
+    /// `use dep::module;` (the `{self}` leaf of a group included) binds the
+    /// module's leaf name, and a using-DECLARATION cannot name a namespace. A
+    /// wrapped dependency's module therefore gets a namespace alias — unless
+    /// this crate declares a module of that name itself (serde_test's `de`
+    /// importing serde's `de`): the alias would shadow the crate's own module
+    /// for the transpiler's `de::Type` out-of-line spellings, and references
+    /// into the dependency are emitted root-qualified anyway. Outer `None`:
+    /// not a dependency module import; inner `None`: skip the import.
+    fn wrapped_dep_module_import_statement(&self, using_path: &str) -> Option<Option<String>> {
+        let path = using_path.trim().trim_start_matches("::");
+        if path.is_empty() || path.contains(" = ") || path.starts_with("namespace ") {
+            return None;
+        }
+        let target = if self.target_is_wrapped_dep_module(path) {
+            path.to_string()
+        } else {
+            self.facade_module_reexport_target(path)?
+        };
+        let leaf = path.rsplit("::").next().unwrap_or(path);
+        if self.declared_module_names.contains(leaf) {
+            return Some(None);
+        }
+        let escaped_alias = self.module_import_alias_cpp_name(leaf);
+        let escaped_target = self.escape_and_rename_qualified_name(&target);
+        Some(Some(format!("namespace {} = ::{};", escaped_alias, escaped_target)))
+    }
+
+    /// `<facade>::<name>` where the facade's manifest re-exports `<name>`
+    /// from another wrapped crate that declares it as a MODULE (serde's
+    /// `pub use serde_core::{de, ser}`): the dependency module the import
+    /// really names. The crate wrap's textual pass rewrites such paths
+    /// after emission, so the emitter has to look through the facade itself
+    /// to know it is importing a namespace.
+    fn facade_module_reexport_target(&self, path: &str) -> Option<String> {
+        let (root, rest) = path.split_once("::")?;
+        if !crate::transpile::crate_is_namespace_wrapped(root) {
+            return None;
+        }
+        let facade = self.dependency_ufcs_trait_manifests.iter().find(|m| m.module == root)?;
+        let target = facade.cross_crate_reexports.get(rest)?;
+        let (target_root, target_rest) = target.split_once("::")?;
+        let origin = self
+            .dependency_ufcs_trait_manifests
+            .iter()
+            .find(|m| m.module == target_root)?;
+        origin
+            .declared_modules
+            .iter()
+            .any(|md| md == target_rest)
+            .then(|| target.clone())
+    }
+
     fn target_is_wrapped_dep_module(&self, target: &str) -> bool {
         let parts: Vec<&str> = target.split("::").collect();
         if parts.len() < 2 {
@@ -43936,6 +44019,42 @@ impl CodeGen {
         // free function, as the plain member path always did. A verified
         // allowlist: the qualified `rusty::<name>` is resolved at definition
         // time, so a name with no counterpart would break the module build.
+        // serde's `DeserializeSeed::deserialize` on a seed the UFCS tier does
+        // not implement: the dependency deliberately leaves the blanket
+        // `impl DeserializeSeed for PhantomData<T>` to the runtime ("phantom
+        // deserialize handled by runtime"), and `rusty::PhantomData` has no
+        // member either, so a crate-local SeqAccess/MapAccess forwarding a
+        // generic seed bottomed out in a member call that does not exist
+        // ("no member named 'deserialize' in 'rusty::PhantomData<unsigned
+        // char>'"). Bottom out in the runtime's seed dispatcher, which owns
+        // the PhantomData route (and tries the member itself first).
+        if callee_base.ends_with("DeserializeSeed_::deserialize") && extra_args.len() == 1 {
+            let seed_fallback = format!(
+                "::rusty::serde_rt::de::deserialize({}, {})",
+                direct_receiver, direct_arg_uses[0]
+            );
+            let (first, second) = if cpo_first {
+                (
+                    [direct_call.clone(), deref_call.clone()],
+                    [member_call_direct.clone(), member_call.clone()],
+                )
+            } else {
+                (
+                    [member_call_direct.clone(), member_call.clone()],
+                    [direct_call.clone(), deref_call.clone()],
+                )
+            };
+            return format!(
+                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                arg_param_list,
+                first[0], first[0],
+                first[1], first[1],
+                second[0], second[0],
+                second[1], second[1],
+                seed_fallback,
+                arg_call_list
+            );
+        }
         if matches!(callee_leaf, "iter" | "is_empty" | "len") {
             let iter_fallback = if deref_args.len() == 1 {
                 format!("rusty::{}({})", callee_leaf, deref_receiver)

@@ -9690,6 +9690,22 @@ impl CodeGen {
                         self.emit_namespace_alias_statement_once(&ns_alias_stmt, export_prefix);
                         continue;
                     }
+                    if let Some(dep_module_import) =
+                        self.wrapped_dep_module_import_statement(&using_path)
+                    {
+                        match dep_module_import {
+                            Some(ns_alias_stmt) => {
+                                self.emit_namespace_alias_statement_once(&ns_alias_stmt, export_prefix);
+                            }
+                            None => {
+                                self.writeln(&format!(
+                                    "// Rust-only dependency module import (shadows a local module): using {};",
+                                    resolved_path
+                                ));
+                            }
+                        }
+                        continue;
+                    }
                     // Own-crate items are already visible via `import <crate>;`
                     // in flat libtest targets. A private `using <crate>::item;`
                     // then references a nonexistent `<crate>` namespace — and is

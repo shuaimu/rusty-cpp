@@ -2029,7 +2029,34 @@ impl CodeGen {
         // manifest surface (no hygiene shell, trait, type, or module segment), it has no C++
         // entity — a (stripped) macro or otherwise unresolvable re-export. Skip it.
         if segs.len() == 2 && last.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+            // A crate-root re-exported FUNCTION (serde_test's `pub use
+            // assert::assert_tokens`) is in the surface too — unless the
+            // re-export is itself a dependency's name that the dependency's
+            // own surface lacks (serde's `pub use
+            // serde_core::forward_to_deserialize_any`, a stripped macro
+            // the facade's root list cannot tell from a function).
+            let root_reexport_has_entity = dep.root_exported_names.iter().any(|n| n == last)
+                && match dep.cross_crate_reexports.get(last) {
+                    Some(target) => target
+                        .rsplit_once("::")
+                        .and_then(|(root, leaf)| {
+                            self.dependency_ufcs_trait_manifests
+                                .iter()
+                                .find(|m| m.module == root)
+                                .map(|origin| {
+                                    origin.hygiene_aliases.contains_key(leaf)
+                                        || origin.root_exported_names.iter().any(|n| n == leaf)
+                                        || origin.declared_modules.iter().any(|m| m == leaf)
+                                        || origin.declared_traits.iter().any(|t| t == leaf)
+                                        || origin.declared_types.iter().any(|d| d.name == leaf)
+                                })
+                        })
+                        .unwrap_or(false),
+                    None => true,
+                };
             let in_surface = dep.hygiene_aliases.contains_key(last)
+                || root_reexport_has_entity
+                || dep.declared_modules.iter().any(|m| m == last)
                 || dep.declared_traits.iter().any(|t| t == last)
                 || dep.declared_types.iter().any(|d| {
                     d.name == last || d.module_path.split("::").any(|seg| seg == last)
