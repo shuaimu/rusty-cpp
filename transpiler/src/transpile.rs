@@ -948,6 +948,11 @@ pub struct TranspileOptions {
     /// Maps Rust external crate roots to transpiled C++ module namespaces available
     /// in the current compilation unit (for example `serde_core` -> `serde_core`).
     pub external_crate_module_aliases: HashMap<String, String>,
+    /// External crate roots with NO library target — proc-macro crates
+    /// (`serde_derive`). They are alias roots so paths resolve, but no module is
+    /// transpiled for them: a `use serde_derive::Serialize` is a Rust-only
+    /// import (a `using ::serde_derive::…` named a namespace that never exists).
+    pub non_library_dependency_roots: std::collections::HashSet<String>,
     /// External crate roots whose selected Cargo package identity is trusted
     /// to provide compiler-owned attributes. Empty for source-only/direct
     /// transpilation, which therefore fails closed on lookalike proc macros.
@@ -2868,6 +2873,7 @@ impl Default for TranspileOptions {
             consumer_module_map: ConsumerModuleMap::default(),
             consumer_rust_module: None,
             external_crate_module_aliases: HashMap::new(),
+            non_library_dependency_roots: std::collections::HashSet::new(),
             authenticated_cpp_inherit_roots: std::collections::HashSet::new(),
             cpp_name_trusted_cpp_inherit_provenance: false,
             authenticated_sysroot_roots: std::collections::HashSet::from([
@@ -3746,6 +3752,7 @@ fn transpile_full_with_options_impl(
     );
     codegen.set_crate_graph_mode(options.crate_graph.is_some());
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
+    codegen.set_non_library_dependency_roots(options.non_library_dependency_roots.clone());
     codegen.set_authenticated_cpp_inherit_roots(
         options.authenticated_cpp_inherit_roots.clone(),
     );

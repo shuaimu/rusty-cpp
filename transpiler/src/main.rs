@@ -12144,6 +12144,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         consumer_module_map: transpile::ConsumerModuleMap::default(),
         consumer_rust_module: None,
         external_crate_module_aliases: HashMap::new(),
+        non_library_dependency_roots: non_library_dependency_roots.clone(),
         // Root target provenance is injected per target below. Keeping the
         // shared template empty prevents an accidental package-wide fallback.
         authenticated_cpp_inherit_roots: HashSet::new(),
@@ -12477,6 +12478,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 cpp_module_symbol_index: opt_cpp_index.clone(),
                 cpp_module_symbol_index_sources: opt_cpp_index_sources.clone(),
                 external_crate_module_aliases: flattened_dependency_aliases.clone(),
+                non_library_dependency_roots: non_library_dependency_roots.clone(),
                 authenticated_cpp_inherit_roots,
                 authenticated_sysroot_roots,
                 cross_file_rust_item_import_bindings:
@@ -12882,6 +12884,7 @@ fn main() {
         consumer_module_map,
         consumer_rust_module: cli.consumer_rust_module.clone(),
         external_crate_module_aliases: HashMap::new(),
+        non_library_dependency_roots: HashSet::new(),
         authenticated_cpp_inherit_roots: HashSet::new(),
         cpp_name_trusted_cpp_inherit_provenance: false,
         authenticated_sysroot_roots: HashSet::from([

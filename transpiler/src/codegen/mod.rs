@@ -114,6 +114,17 @@ pub(crate) const ASSOC_PROJECTION_DISPATCH_PREFIX: &str = "__rusty_proj_";
 /// Marker comment written after each `<Tr>_` bridge block. The LAST one for a
 /// trait is where its dispatcher goes; all of them are stripped afterwards.
 pub(crate) const ASSOC_PROJECTION_TAIL_MARKER: &str = "__rusty_bridge_tail__";
+/// Book §3.2.16 phase 3 / (aa), step 2 completed: the sentinels around the
+/// dependency-trait witness block (a consumer impl's bridge into the
+/// dependency's `<Tr>_::impl_` + its `impls_<Tr>` marker specialization). The
+/// crate wrap relocates the block OUTSIDE its namespace at the same position
+/// (see `relocate_dependency_trait_witnesses`).
+pub(crate) const DEPENDENCY_TRAIT_WITNESSES_BEGIN: &str = "// __rusty_dependency_trait_witnesses_begin__";
+pub(crate) const DEPENDENCY_TRAIT_WITNESSES_END: &str = "// __rusty_dependency_trait_witnesses_end__";
+/// The crate-root placeholder in a dependency-trait bridge target
+/// (`using __RUSTY_CRATE_ROOT__::m::__ufcs_<Tr>__<dep>::f;`), spelled out when
+/// the block lands (see `flush_dependency_trait_witnesses`).
+pub(crate) const DEPENDENCY_WITNESS_CRATE_ROOT: &str = "__RUSTY_CRATE_ROOT__";
 #[derive(Debug, Clone)]
 pub(crate) struct AssocMethodProjection {
     pub(crate) method: String,
@@ -1752,6 +1763,9 @@ pub struct CodeGen {
     /// namespace-wrapped module with a manifest (see
     /// `unique_dependency_type_path`). Off everywhere else.
     pub(crate) crate_graph_mode: bool,
+    /// External crate roots with no library target (proc-macro crates): paths
+    /// resolve through the alias map, but an import of one is Rust-only.
+    pub(crate) non_library_dependency_roots: HashSet<String>,
     /// Declarations emitted after the whole purview, at global scope, and
     /// spelled with fully qualified names: `#[derive(Hash)]` std::hash
     /// specializations (a specialization of `std::hash` cannot be declared
@@ -1895,6 +1909,26 @@ pub struct CodeGen {
     /// parameter 0 of every function (`Some("Tr_")`); `None` for the
     /// `rusty_ext` lane and everything else.
     pub(crate) ufcs_tag_namespace: Option<String>,
+    /// Book §3.2.16 phase 3 / (aa), step 2 completed: while a consumer's impl
+    /// of a DEPENDENCY-declared trait emits its lane functions, the root that
+    /// prefixes the tag type — `::serde_core::` for a wrapped dependency, `::`
+    /// for an unwrapped one — so the tag is `::serde_core::<Tr>_::impl_::tag`,
+    /// the dependency's own, and never a bare `<Tr>_` the crate wrap would
+    /// have to requalify. `None` for a crate-declared trait's lane.
+    pub(crate) ufcs_dependency_lane_root: Option<String>,
+    /// §3.2.16 (aa): while a consumer impl of a dependency trait on a
+    /// crate-LOCAL self type emits its lane definitions, each lane function
+    /// forwards to the member (the member tier carries the body, resolved
+    /// inside the struct) instead of re-emitting the body at helper scope.
+    pub(crate) ufcs_lane_forward_to_member: bool,
+    /// The bridge (`namespace <dep>::<Tr>_::impl_ { export using …; }`) and
+    /// marker (`template<> struct ::<dep>::impls_<Tr><Self>`) lines of those
+    /// impls, rendered by the declaration pass and flushed between the
+    /// dependency-witness sentinels right after it (early: an explicit
+    /// specialization must precede any implicit instantiation of
+    /// `impls_<Tr><Self>`, and a non-template body evaluating a default's
+    /// `requires has_<Tr><Self>` is one).
+    pub(crate) pending_dependency_trait_witness_lines: Vec<String>,
     /// cpp_inherit impls keep their pre-revision `<Tr>_::m(Self&, …)` free
     /// functions as ABI companions (srpc's ratified incumbent symbols,
     /// §3.2.12): collected while the impl's `impl_` functions emit, written
@@ -3680,6 +3714,7 @@ impl CodeGen {
             is_dependency_module: false,
             emit_dyn_adapters: false,
             crate_graph_mode: false,
+            non_library_dependency_roots: HashSet::new(),
             deferred_global_scope_items: Vec::new(),
             deferred_purview_tail_items: Vec::new(),
             ufcs_method_classes: HashMap::new(),
@@ -3714,6 +3749,9 @@ impl CodeGen {
             ufcs_universal_blanket_traits: HashSet::new(),
             ufcs_traits_with_generic_impls: HashSet::new(),
             ufcs_tag_namespace: None,
+            ufcs_dependency_lane_root: None,
+            ufcs_lane_forward_to_member: false,
+            pending_dependency_trait_witness_lines: Vec::new(),
             ufcs_abi_companion_wanted: false,
             ufcs_abi_companion_only: false,
             ufcs_abi_companions_pending: Vec::new(),
@@ -4588,6 +4626,34 @@ impl CodeGen {
         // The serde runtime lives under `::rusty::serde_rt` (include/rusty/
         // serde_runtime.hpp), a root the crate wrap never requalifies, so the
         // purview's references reach it with no bridge.
+        self.relocate_dependency_trait_witnesses(&crate_name);
+    }
+
+    /// Book §3.2.16 phase 3 / (aa), step 2 completed: move the dependency-trait
+    /// witness block (bridges into `<dep>::<Tr>_::impl_`, `::<dep>::impls_<Tr>`
+    /// markers) OUTSIDE the crate namespace at the same position — an explicit
+    /// specialization must be declared in a scope enclosing the primary's, and
+    /// the dependency's namespace is reopened from global scope. The block was
+    /// requalified with the rest of the purview (Rules 1–3 spell the markers'
+    /// crate-local self types `::<crate>::…`); the bridge targets are rooted at
+    /// `DEPENDENCY_WITNESS_CRATE_ROOT`, spelled `::<crate>` here.
+    fn relocate_dependency_trait_witnesses(&mut self, crate_name: &str) {
+        let begin_line = format!("{}\n", DEPENDENCY_TRAIT_WITNESSES_BEGIN);
+        let end_line = format!("{}\n", DEPENDENCY_TRAIT_WITNESSES_END);
+        let Some(begin) = self.output.find(&begin_line) else {
+            return;
+        };
+        let Some(end_rel) = self.output[begin..].find(&end_line) else {
+            return;
+        };
+        let end = begin + end_rel + end_line.len();
+        let block = self.output[begin + begin_line.len()..begin + end_rel]
+            .replace(DEPENDENCY_WITNESS_CRATE_ROOT, &format!("::{}", crate_name));
+        let replacement = format!(
+            "}} // namespace {} (dependency trait witnesses)\n{}namespace {} {{\n",
+            crate_name, block, crate_name
+        );
+        self.output.replace_range(begin..end, &replacement);
     }
 
     /// Re-qualify bare crate-root references `::<sym>` -> `::<crate>::<sym>`.
@@ -5691,6 +5757,14 @@ impl CodeGen {
             return cpp_ty.to_string();
         }
         match self.local_type_module_path.get(base) {
+            // Fix B precedence (see lane_import_bound_type_spelling): the lane's
+            // impl module may bind this leaf through an import to another type.
+            Some(path)
+                if !path.is_empty()
+                    && let Some(bound) = self.lane_import_bound_type_spelling(base, path) =>
+            {
+                format!("{}{}{}", lead_ws, bound, rest)
+            }
             // Absolute (`::<path>`) so the qualified path can't bind to an enclosing
             // same-named namespace — serde's facade emits UFCS helpers under
             // `private_::de`, where a RELATIVE `de::value::X` resolves to the wrong
@@ -5871,6 +5945,95 @@ impl CodeGen {
         Some(format!("::{}::{}", renamed.join("::"), escape_cpp_keyword(&leaf)))
     }
 
+    /// Fix B precedence for a lane function (`ufcs_impl_module_path` set): the
+    /// spelling of `ident` when the impl's OWN module binds it through a `use`
+    /// to something other than the crate type `local_type_module_path` records
+    /// under that leaf. A crate-declared target spells absolutely (through the
+    /// import-bound qualifier); a dependency's (serde's `pub use
+    /// crate::serde_core_private::Content`) spells through its alias, which
+    /// the prologue declares ahead of every lane. `None` keeps the local stamp.
+    fn lane_import_bound_type_spelling(&self, ident: &str, local_path: &str) -> Option<String> {
+        if self.ufcs_impl_module_path.is_empty() {
+            return None;
+        }
+        let lookup = crate::transpile::nearest_rust_item_import_targets(
+            ident,
+            &self.ufcs_impl_module_path,
+            &self.rust_item_import_bindings,
+        );
+        if std::env::var_os("RUSTY_CPP_DEBUG_IMPORT_QUALIFY").is_some() {
+            eprintln!(
+                "[rusty-cpp][lane-import] ident={} local_path={} impl_module={:?} lookup={:?}",
+                ident, local_path, self.ufcs_impl_module_path, lookup
+            );
+        }
+        let (scope, targets) = lookup?;
+        // Rust does not inherit a parent's imports: only the impl module's own
+        // binding is authoritative.
+        if scope.len() != self.ufcs_impl_module_path.len() || targets.len() != 1 {
+            return None;
+        }
+        let target = targets.iter().next()?;
+        let crate_path = target.strip_prefix("@crate:").unwrap_or(target);
+        if crate_path == format!("{}::{}", local_path, ident) {
+            return None;
+        }
+        if let Some(bound) = self.import_bound_crate_type_cpp_path(ident) {
+            return Some(bound);
+        }
+        let mut segments: Vec<&str> = crate_path.split("::").collect();
+        if segments.pop() != Some(ident) || segments.is_empty() {
+            return None;
+        }
+        // A target whose head is declared by THIS crate is the local type after
+        // all (a re-export shell the registry resolved differently): keep the stamp.
+        if segments
+            .first()
+            .is_some_and(|head| self.declared_module_names.contains(*head))
+        {
+            return None;
+        }
+        let spelled = format!(
+            "{}::{}",
+            segments
+                .iter()
+                .map(|seg| escape_cpp_keyword(seg))
+                .collect::<Vec<_>>()
+                .join("::"),
+            escape_cpp_keyword(ident)
+        );
+        Some(self.rewrite_cpp_import_bound_type_spelling(&spelled))
+    }
+
+    /// Fix B for imported names on a PARAMETER (`<type> <name>` or a keyed
+    /// `rusty::tag<…> = {}`): qualify the type only — the declarator name is a
+    /// Rust binding, never a path (serde's `expecting(&self, fmt: &mut
+    /// Formatter)` beside its `lib::fmt` module re-export: `Formatter& ::lib::fmt`,
+    /// "parameter declarator cannot be qualified", measured).
+    fn qualify_import_bound_types_in_param(&self, param: &str) -> String {
+        let (decl, default) = match param.find(" = ") {
+            Some(i) => (&param[..i], &param[i..]),
+            None => (param, ""),
+        };
+        let (ty, name) = match decl.rfind(' ') {
+            Some(i)
+                if !decl[i + 1..].is_empty()
+                    && decl[i + 1..].chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !decl[..i].trim_end().ends_with(',')
+                    && !decl[..i].trim_end().ends_with("::") =>
+            {
+                (&decl[..i], &decl[i..])
+            }
+            _ => (decl, ""),
+        };
+        format!(
+            "{}{}{}",
+            self.qualify_import_bound_types_in_type_string(ty),
+            name,
+            default
+        )
+    }
+
     pub(super) fn qualify_nested_local_types_in_type_string(&self, s: &str) -> String {
         if self.local_type_module_path.is_empty() {
             return s.to_string();
@@ -5898,6 +6061,18 @@ impl CodeGen {
                 if let Some(path) = self.local_type_module_path.get(ident)
                     && !path.is_empty()
                 {
+                    // Fix B precedence: a bare name the lane's impl module binds
+                    // through an IMPORT names the import's target — serde's
+                    // `private::de::content` re-exports serde_core's `Content`
+                    // beside the crate's own `private::ser::content::Content`;
+                    // stamping the local path here spelled the ser enum into the
+                    // de visitor's signatures (measured: `no member named 'Str'`).
+                    if !already_qualified
+                        && let Some(bound) = self.lane_import_bound_type_spelling(ident, path)
+                    {
+                        out.push_str(&bound);
+                        continue;
+                    }
                     let path_prefix = format!("{}::", path);
                     if !already_qualified {
                         // Bare local type → absolute `::<path>::ident`.
@@ -6608,6 +6783,10 @@ impl CodeGen {
     ) {
         self.name_resolver
             .set_external_crate_aliases(external_crate_module_aliases);
+    }
+
+    pub fn set_non_library_dependency_roots(&mut self, roots: HashSet<String>) {
+        self.non_library_dependency_roots = roots;
     }
 
     pub fn set_authenticated_cpp_inherit_roots(
@@ -8270,6 +8449,8 @@ impl CodeGen {
         self.scope_glob_import_modules.clear();
         self.ufcs_marker_primaries_emitted.clear();
         self.ufcs_marker_specializations_emitted.clear();
+        self.ufcs_dependency_lane_root = None;
+        self.pending_dependency_trait_witness_lines.clear();
         self.ufcs_universal_blanket_traits.clear();
         self.ufcs_traits_with_generic_impls.clear();
         self.canonical_std_hash_map_import_bindings.clear();
@@ -9154,6 +9335,8 @@ impl CodeGen {
         self.emit_ufcs_trait_marker_primaries();
         self.emit_ufcs_trait_impl_free_function_decls(&file.items, &[]);
         log_emit("emit_ufcs_trait_impl_free_function_decls");
+        // §3.2.16 (aa): consumer impls of dependency traits — bridges + markers.
+        self.flush_dependency_trait_witnesses();
         // § 3.2.13: default-method templates (early declarations + `using`).
         self.emit_ufcs_trait_default_free_function_decls(&file.items, &[]);
         log_emit("emit_ufcs_trait_default_free_function_decls");
@@ -21626,8 +21809,21 @@ impl CodeGen {
         );
         // Phase 7: only an exactly resolved crate-declared trait gets UFCS free
         // functions. A foreign import sharing the leaf with a local trait must
-        // not acquire that local trait's helper surface.
+        // not acquire that local trait's helper surface. A dependency-declared
+        // trait's impl defines its lane functions in its own helper namespace
+        // (§3.2.16 (aa); the declaration pass bridged them).
         if !self.trait_declared_paths.contains(&trait_key) {
+            if let Some((dep_module, dep_root)) =
+                self.dependency_lane_for_trait(&trait_key, &written_trait_name)
+            {
+                self.emit_dependency_trait_impl_block_free_functions(
+                    impl_block,
+                    module_path,
+                    &written_trait_name,
+                    &dep_module,
+                    &dep_root,
+                );
+            }
             return;
         }
         // Book §3.2.16 phase 3 / (aa): a synthesized foreign lane carries the
@@ -21789,6 +21985,264 @@ impl CodeGen {
         }
     }
 
+    /// Book §3.2.16 phase 3 / (aa), step 2 completed: the dependency whose
+    /// manifest declares a trait this crate implements but does not declare —
+    /// `(module, tag root)`: `("serde_core", "::serde_core::")` for a wrapped
+    /// dependency, `("x", "::")` for an unwrapped one. `None` for a
+    /// crate-declared trait (its lane is local) and for a trait no consumed
+    /// manifest declares (a foreign lane, see `synthesize_foreign_trait_lanes`).
+    fn dependency_lane_for_trait(&self, trait_key: &str, leaf: &str) -> Option<(String, String)> {
+        if self.trait_declared_paths.contains(trait_key) {
+            return None;
+        }
+        let m = self
+            .dependency_ufcs_trait_manifests
+            .iter()
+            .find(|m| m.declared_traits.iter().any(|t| t == leaf))?;
+        let root = if crate::transpile::crate_is_namespace_wrapped(&m.module) {
+            format!("::{}::", m.module)
+        } else {
+            "::".to_string()
+        };
+        Some((m.module.clone(), root))
+    }
+
+    /// The helper namespace of a consumer impl of a DEPENDENCY trait, distinct
+    /// from a same-leaf crate-declared trait's `__ufcs_<Tr>` in the same module
+    /// (serde_bytes implements both its own `Serialize` and serde's).
+    fn ufcs_dependency_impl_helper_namespace_name(dep_module: &str, trait_name: &str) -> String {
+        format!("__ufcs_{}__{}", trait_name, dep_module)
+    }
+
+    /// Declaration pass of a consumer impl of a dependency-declared trait
+    /// (§3.2.16 (aa), step 2 completed). Before this step such an impl took the
+    /// member tier only, so a dependency DEFAULT method — constrained on
+    /// `has_<Tr><Self_>` and calling its siblings bare through `<Tr>_::m` —
+    /// was unreachable for the consumer's type from any crate (serde_test's
+    /// `&mut Serializer` never reached serde_core's `collect_seq`; measured).
+    /// Now: the impl's functions are declared in a per-module helper namespace
+    /// with the DEPENDENCY's tag (`::serde_core::Serializer_::impl_::tag`),
+    /// and two witness blocks are queued for the position right after this
+    /// pass, OUTSIDE the crate wrap: a bridge `namespace serde_core::Serializer_
+    /// ::impl_ { export using ::<crate>::ser::__ufcs_Serializer__serde_core::m; }`
+    /// (the dependency's dispatcher finds it by ADL on its tag; measured on
+    /// clang 22 across three modules) and the marker `template<> struct
+    /// ::serde_core::impls_Serializer<::<crate>::ser::Serializer>`.
+    fn emit_dependency_trait_impl_block_free_function_decls(
+        &mut self,
+        impl_block: &syn::ItemImpl,
+        module_path: &[String],
+        trait_name: &str,
+        dep_module: &str,
+        dep_root: &str,
+    ) {
+        // A tier-1 impl keeps its virtual-override shape (mirrors the
+        // crate-declared branch).
+        if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
+            && self.impl_is_tier1_inheriting(impl_block, module_path)
+        {
+            return;
+        }
+        let specs: Vec<ExtensionImplMethod> =
+            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods, module_path)
+                .map(|(_, specs)| specs)
+                .unwrap_or_default();
+        // The dependency's trait is its exported surface: no internal linkage.
+        self.ufcs_emitting_internal_linkage_trait = false;
+        self.ufcs_impl_module_path = module_path.to_vec();
+        self.ufcs_tag_namespace = Some(format!("{}_", trait_name));
+        self.ufcs_dependency_lane_root = Some(dep_root.to_string());
+        let dedupe_trait = format!("{}::{}", dep_module, trait_name);
+        let helper = Self::ufcs_dependency_impl_helper_namespace_name(dep_module, trait_name);
+        let segments = self.renamed_module_scope_segments(module_path);
+        let mut bridged: Vec<String> = Vec::new();
+        if !specs.is_empty() {
+            self.writeln(&format!(
+                "// UFCS trait migration: free functions for `impl {} for ...` — a dependency trait ({}), bridged into `{}{}_::impl_` outside the crate wrap",
+                trait_name, dep_module, dep_root, trait_name
+            ));
+            for seg in &segments {
+                self.writeln(&format!("namespace {} {{", seg));
+                self.indent += 1;
+            }
+            self.writeln(&format!("namespace {} {{", helper));
+            self.indent += 1;
+            self.ufcs_helper_shadowing_segments = segments.iter().skip(1).cloned().collect();
+            for spec in &specs {
+                if self.ufcs_concrete_impl_signature_is_duplicate(spec, module_path, &dedupe_trait) {
+                    continue;
+                }
+                if self.emit_extension_trait_free_function_declaration(spec) {
+                    let escaped = escape_cpp_keyword(&spec.method.sig.ident.to_string());
+                    if !bridged.contains(&escaped) {
+                        bridged.push(escaped);
+                    }
+                }
+            }
+            self.ufcs_helper_shadowing_segments.clear();
+            self.indent -= 1;
+            self.writeln("}");
+            for _ in &segments {
+                self.indent -= 1;
+                self.writeln("}");
+            }
+        }
+        let mut lines: Vec<String> = Vec::new();
+        if !bridged.is_empty() {
+            // Rooted at a placeholder the crate wrap's textual rules never
+            // match: the flush (unwrapped) or the relocation (wrapped) spells
+            // the crate root itself. A `::__ufcs_…` crate-root helper would be
+            // requalified by Rule 1 and then AGAIN by Rule 2's bridge scan in
+            // a crate that declares a module named like itself (arrayvec's
+            // `arrayvec`, where that double spelling is the right one for the
+            // module's own bridges — measured both ways).
+            let helper_path = {
+                let mut p = segments.clone();
+                p.push(helper.clone());
+                format!("{}::{}", DEPENDENCY_WITNESS_CRATE_ROOT, p.join("::"))
+            };
+            // In module mode the bridged name must be EXPORTED so a third crate
+            // resolves the dependency's `<Tr>_::m(recv)` through it.
+            let bridge_export = if self.module_name.is_some() { "export " } else { "" };
+            lines.push(format!(
+                "namespace {}{}_::impl_ {{",
+                dep_root.trim_start_matches("::"),
+                trait_name
+            ));
+            for method in &bridged {
+                lines.push(format!("    {}using {}::{};", bridge_export, helper_path, method));
+            }
+            lines.push("}".to_string());
+        }
+        // The marker, captured off the output: it is rendered at column 0 and
+        // relocated with the bridge.
+        let captured_from = self.output.len();
+        let saved_indent = self.indent;
+        self.indent = 0;
+        self.emit_ufcs_impl_marker_specialization_with(impl_block, trait_name, dep_root, false);
+        self.indent = saved_indent;
+        let captured = self.output.split_off(captured_from);
+        lines.extend(captured.lines().map(str::to_string));
+        self.pending_dependency_trait_witness_lines.extend(lines);
+        self.ufcs_dependency_lane_root = None;
+        self.ufcs_impl_module_path.clear();
+        self.ufcs_tag_namespace = None;
+    }
+
+    /// Definition pass of a consumer impl of a dependency-declared trait: the
+    /// lane functions' bodies, in the helper namespace the declaration pass
+    /// opened (see `emit_dependency_trait_impl_block_free_function_decls`).
+    fn emit_dependency_trait_impl_block_free_functions(
+        &mut self,
+        impl_block: &syn::ItemImpl,
+        module_path: &[String],
+        trait_name: &str,
+        dep_module: &str,
+        dep_root: &str,
+    ) {
+        if self.impl_uses_cpp_trait_member_dispatch(impl_block, module_path)
+            && self.impl_is_tier1_inheriting(impl_block, module_path)
+        {
+            return;
+        }
+        let Some((_, specs)) =
+            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods, module_path)
+        else {
+            return;
+        };
+        if specs.is_empty() {
+            return;
+        }
+        self.ufcs_emitting_internal_linkage_trait = false;
+        self.writeln(&format!(
+            "// UFCS trait migration: free functions for `impl {} for ...` (dependency trait, {})",
+            trait_name, dep_module
+        ));
+        self.ufcs_impl_module_path = module_path.to_vec();
+        self.ufcs_tag_namespace = Some(format!("{}_", trait_name));
+        self.ufcs_dependency_lane_root = Some(dep_root.to_string());
+        self.ufcs_abi_companion_wanted = false;
+        // A crate-local self type carries every written method as a MEMBER
+        // (the member tier; a reference self normalizes onto the struct), so
+        // the lane copy forwards to it — see emit_extension_trait_free_function.
+        self.ufcs_lane_forward_to_member =
+            self.impl_self_type_is_crate_local(impl_block, module_path);
+        let dedupe_trait = format!("{}::{}", dep_module, trait_name);
+        let helper = Self::ufcs_dependency_impl_helper_namespace_name(dep_module, trait_name);
+        let segments = self.renamed_module_scope_segments(module_path);
+        for seg in &segments {
+            self.writeln(&format!("namespace {} {{", seg));
+            self.indent += 1;
+        }
+        self.writeln(&format!("namespace {} {{", helper));
+        self.indent += 1;
+        self.ufcs_helper_shadowing_segments = segments.iter().skip(1).cloned().collect();
+        for spec in &specs {
+            if self.ufcs_concrete_impl_signature_is_duplicate(spec, module_path, &dedupe_trait) {
+                continue;
+            }
+            self.emit_extension_trait_free_function(spec);
+            self.newline();
+        }
+        self.ufcs_lane_forward_to_member = false;
+        self.ufcs_helper_shadowing_segments.clear();
+        self.ufcs_impl_module_path.clear();
+        self.ufcs_tag_namespace = None;
+        self.ufcs_dependency_lane_root = None;
+        self.indent -= 1;
+        self.writeln("}");
+        for _ in &segments {
+            self.indent -= 1;
+            self.writeln("}");
+        }
+    }
+
+    /// Write the queued dependency-trait witnesses (bridges + markers) right
+    /// after the declaration pass. Under a crate wrap they go between the
+    /// sentinels the wrap relocates (`relocate_dependency_trait_witnesses`);
+    /// otherwise this position is already global scope.
+    fn flush_dependency_trait_witnesses(&mut self) {
+        if self.pending_dependency_trait_witness_lines.is_empty() {
+            return;
+        }
+        let lines = std::mem::take(&mut self.pending_dependency_trait_witness_lines);
+        let wrapped = self.will_wrap_purview_in_crate_namespace();
+        // A `--cxx-namespace` wrap is open NOW (the ports): break it around the
+        // block the same way the crate wrap will.
+        let cxx_break = (!wrapped && self.cxx_namespace_body_open)
+            .then(|| self.cxx_namespace.clone())
+            .flatten();
+        let saved_indent = self.indent;
+        self.indent = 0;
+        if wrapped {
+            self.writeln(DEPENDENCY_TRAIT_WITNESSES_BEGIN);
+        } else {
+            self.writeln("// Dependency trait witnesses (§3.2.16 (aa)): bridges into the dependencies' `<Tr>_::impl_` lanes + implementor markers");
+            if let Some(ns) = &cxx_break {
+                self.writeln(&format!("}} // namespace {} (dependency trait witnesses)", ns));
+            }
+        }
+        // Unwrapped: the crate root is the global namespace (or the open
+        // `--cxx-namespace`). Wrapped: the relocation substitutes `::<crate>`.
+        let unwrapped_root = cxx_break
+            .as_deref()
+            .map(|ns| format!("::{}", ns))
+            .unwrap_or_default();
+        for line in &lines {
+            if wrapped {
+                self.writeln(line);
+            } else {
+                self.writeln(&line.replace(DEPENDENCY_WITNESS_CRATE_ROOT, &unwrapped_root));
+            }
+        }
+        if wrapped {
+            self.writeln(DEPENDENCY_TRAIT_WITNESSES_END);
+        } else if let Some(ns) = &cxx_break {
+            self.writeln(&format!("namespace {} {{", ns));
+        }
+        self.indent = saved_indent;
+    }
+
     fn emit_ufcs_trait_impl_block_free_function_decls(
         &mut self,
         impl_block: &syn::ItemImpl,
@@ -21811,8 +22265,23 @@ impl CodeGen {
             &written_trait_name,
         );
         // Phase 7: only an exactly resolved crate-declared trait gets UFCS
-        // declarations (mirrors the definition emitter).
+        // declarations (mirrors the definition emitter). A DEPENDENCY-declared
+        // trait's impl rides the dependency's lane (§3.2.16 (aa), step 2
+        // completed): its functions are declared here, bridged into the
+        // dependency's `<Tr>_::impl_` and witnessed by the dependency's marker
+        // outside the crate wrap.
         if !self.trait_declared_paths.contains(&trait_key) {
+            if let Some((dep_module, dep_root)) =
+                self.dependency_lane_for_trait(&trait_key, &written_trait_name)
+            {
+                self.emit_dependency_trait_impl_block_free_function_decls(
+                    impl_block,
+                    module_path,
+                    &written_trait_name,
+                    &dep_module,
+                    &dep_root,
+                );
+            }
             return;
         }
         let trait_name = trait_key
@@ -22608,7 +23077,57 @@ impl CodeGen {
         impl_block: &syn::ItemImpl,
         trait_name: &str,
     ) {
-        if !self.ufcs_marker_primaries_emitted.contains(trait_name) {
+        self.emit_ufcs_impl_marker_specialization_with(impl_block, trait_name, "", true);
+    }
+
+    /// `has_<Tr><U>` reads `impls_<Tr><std::remove_cvref_t<U>>`, so a marker
+    /// spelled with the impl's REFERENCE self type (`impl Tr for &mut X` →
+    /// `impls_Tr<X&>`) is never consulted: the witness is the referent.
+    fn strip_reference_type_spelling(ty: &str) -> String {
+        let t = ty.trim();
+        let t = t
+            .strip_suffix("&&")
+            .or_else(|| t.strip_suffix('&'))
+            .map(str::trim_end)
+            .unwrap_or(t);
+        let t = t.strip_prefix("const ").map(str::trim_start).unwrap_or(t);
+        t.to_string()
+    }
+
+    /// A bare crate-local base type (`Serializer`, `Wrap<T>`) spelled `::`-rooted
+    /// so the crate wrap's Rule 3 requalifies it to `::<crate>::…` once the
+    /// marker sits OUTSIDE the wrap (a dependency trait's witness).
+    fn root_qualify_bare_local_base(&self, ty: &str) -> String {
+        let t = ty.trim_start();
+        if t.starts_with("::") {
+            return ty.to_string();
+        }
+        let base_end = t
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(t.len());
+        let base = &t[..base_end];
+        if base.is_empty()
+            || t[base_end..].starts_with("::")
+            || !self.local_declared_types.contains(base)
+        {
+            return ty.to_string();
+        }
+        format!("::{}", t)
+    }
+
+    /// Book §3.2.16 phase 3 / (aa): the marker emitter proper. `primary_prefix`
+    /// is empty for a crate-declared trait (the primary is in this purview) and
+    /// the dependency's root (`::serde_core::`) for a dependency-declared one,
+    /// whose witness lines are captured by the caller and relocated outside the
+    /// crate wrap; `require_local_primary` is the crate-declared guard.
+    fn emit_ufcs_impl_marker_specialization_with(
+        &mut self,
+        impl_block: &syn::ItemImpl,
+        trait_name: &str,
+        primary_prefix: &str,
+        require_local_primary: bool,
+    ) {
+        if require_local_primary && !self.ufcs_marker_primaries_emitted.contains(trait_name) {
             return;
         }
         let type_params: Vec<String> = impl_block
@@ -22712,6 +23231,16 @@ impl CodeGen {
                 ));
                 return;
             }
+            // `has_<Tr>` strips cvref before reading the marker, so a reference
+            // self type (`impl Serializer for &mut Formatter`) witnesses its
+            // referent — spelled `Formatter&`, the marker was dead (measured:
+            // serde_test's `&mut Serializer` never reached a serde_core default).
+            let self_cpp = Self::strip_reference_type_spelling(&self_cpp);
+            let self_cpp = if primary_prefix.is_empty() {
+                self_cpp
+            } else {
+                self.root_qualify_bare_local_base(&self_cpp)
+            };
             // A view self type (`impl Tr for [T]`) is reached through TWO C++
             // receiver spellings — `std::span<const T>` from `&[T]`, `std::span<T>`
             // from `&mut [T]` — so witness both (book §3.2.4: view impls).
@@ -22732,8 +23261,8 @@ impl CodeGen {
                     continue;
                 }
                 self.writeln(&format!(
-                    "template<> struct impls_{}<{}> : std::true_type {{}};",
-                    trait_cpp, spelling
+                    "template<> struct {}impls_{}<{}> : std::true_type {{}};",
+                    primary_prefix, trait_cpp, spelling
                 ));
             }
             return;
@@ -22925,10 +23454,16 @@ impl CodeGen {
         }) {
             return;
         }
+        let self_cpp = if primary_prefix.is_empty() {
+            self_cpp
+        } else {
+            self.root_qualify_bare_local_base(&self_cpp)
+        };
         self.writeln(&format!(
-            "template<{}>{} struct impls_{}<{}> : std::true_type {{}};",
+            "template<{}>{} struct {}impls_{}<{}> : std::true_type {{}};",
             header.join(", "),
             requires,
+            primary_prefix,
             trait_cpp,
             self_cpp
         ));
@@ -24230,9 +24765,19 @@ impl CodeGen {
         };
 
         let mut params = vec![receiver_param];
+        // The Rust arguments by name, forwardable to a member (§3.2.16 (aa)).
+        let mut forward_args: Vec<String> = Vec::new();
         if let Some(ns) = &self.ufcs_tag_namespace {
             // Book §3.2.2 rule 2: parameter 0 of every impl / default function.
-            params.insert(0, format!("{}::impl_::tag", ns));
+            // A dependency trait's lane spells the dependency's tag (§3.2.16 (aa)).
+            params.insert(
+                0,
+                format!(
+                    "{}{}::impl_::tag",
+                    self.ufcs_dependency_lane_root.as_deref().unwrap_or(""),
+                    ns
+                ),
+            );
         }
         let typed_params_start = if receiver_opt.is_some() { 1 } else { 0 };
         for (idx, arg) in method.sig.inputs.iter().enumerate().skip(typed_params_start) {
@@ -24254,6 +24799,7 @@ impl CodeGen {
                 syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                 _ => format!("_arg{}", idx),
             };
+            forward_args.push(format!("std::forward<decltype({0})>({0})", param_name));
             params.push(format!("{} {}", ty, param_name));
         }
         let mut trailing_keys =
@@ -24263,9 +24809,10 @@ impl CodeGen {
             trailing_keys.retain(|p| !p.starts_with("rusty::self_tag<"));
         }
         params.extend(trailing_keys);
-        // Fix B for imported names (see qualify_import_bound_types_in_type_string).
+        // Fix B for imported names (see qualify_import_bound_types_in_type_string):
+        // the TYPE part only — a declarator name is never a path.
         for param in params.iter_mut() {
-            *param = self.qualify_import_bound_types_in_type_string(param);
+            *param = self.qualify_import_bound_types_in_param(param);
         }
 
         if method_name == "serialize"
@@ -25394,9 +25941,19 @@ impl CodeGen {
         };
 
         let mut params = vec![receiver_param];
+        // The Rust arguments by name, forwardable to a member (§3.2.16 (aa)).
+        let mut forward_args: Vec<String> = Vec::new();
         if let Some(ns) = &self.ufcs_tag_namespace {
             // Book §3.2.2 rule 2: parameter 0 of every impl / default function.
-            params.insert(0, format!("{}::impl_::tag", ns));
+            // A dependency trait's lane spells the dependency's tag (§3.2.16 (aa)).
+            params.insert(
+                0,
+                format!(
+                    "{}{}::impl_::tag",
+                    self.ufcs_dependency_lane_root.as_deref().unwrap_or(""),
+                    ns
+                ),
+            );
         }
         let typed_params_start = if receiver_opt.is_some() { 1 } else { 0 };
         for (idx, arg) in method.sig.inputs.iter().enumerate().skip(typed_params_start) {
@@ -25418,6 +25975,7 @@ impl CodeGen {
                 syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                 _ => format!("_arg{}", idx),
             };
+            forward_args.push(format!("std::forward<decltype({0})>({0})", param_name));
             params.push(format!("{} {}", ty, param_name));
         }
         let mut trailing_keys =
@@ -25426,9 +25984,10 @@ impl CodeGen {
             trailing_keys.retain(|p| !p.starts_with("rusty::self_tag<"));
         }
         params.extend(trailing_keys);
-        // Fix B for imported names (see qualify_import_bound_types_in_type_string).
+        // Fix B for imported names (see qualify_import_bound_types_in_type_string):
+        // the TYPE part only — a declarator name is never a path.
         for param in params.iter_mut() {
-            *param = self.qualify_import_bound_types_in_type_string(param);
+            *param = self.qualify_import_bound_types_in_param(param);
         }
 
         if method_name == "serialize"
@@ -25770,7 +26329,86 @@ impl CodeGen {
             }
         }
         let mut emitted_default_body_override = false;
-        if method.sig.inputs.len() == 2
+        if self.ufcs_lane_forward_to_member {
+            // §3.2.16 (aa): a consumer impl of a dependency trait on a
+            // crate-local self type already carries its body as a MEMBER,
+            // resolved inside the struct (field renames, field types, the
+            // module's imports). The lane copy forwards to it rather than
+            // re-emitting the body at helper scope, where those resolutions
+            // differ (serde_test: `self_.tokens.first()` as a bare member call,
+            // `self_.end` naming the method beside the renamed `end_field`;
+            // measured). The tagged `rusty_<Tr>_<m>` member is the one the
+            // member tier emits beside a same-named sibling trait method.
+            let args = forward_args.join(", ");
+            let trait_leaf = self
+                .ufcs_tag_namespace
+                .as_deref()
+                .map(|ns| ns.strip_suffix('_').unwrap_or(ns).to_string())
+                .unwrap_or_default();
+            let tagged = format!(
+                "rusty_{}_{}",
+                sanitize_collapse_trait_tag(&trait_leaf),
+                method_name
+            );
+            // The member keeps the method's OWN type parameters (a visitor's
+            // `visit_i8<E>` has `E` in the return type only): pass them
+            // explicitly. The probe runs on a dependent receiver (a generic
+            // lambda) — a requires-expression over a non-dependent operand is
+            // a hard error in a non-template lane function, not a false.
+            // Only the method's OWN parameters (the spec folds the impl's into
+            // `sig.generics`), and only when every one of them survives in the
+            // lane's template header — a parameter the header pruned as
+            // undeducible (`collect_map<K, V, I>`: `K, V` come from `I::Item`)
+            // cannot be spelled, and a partial list would bind positionally
+            // to the wrong member parameter; the member then deduces what it can.
+            let header_type_params: HashSet<String> = free_generics
+                .params
+                .iter()
+                .filter_map(|p| match p {
+                    syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                    _ => None,
+                })
+                .collect();
+            let own_type_params: Vec<String> = method
+                .sig
+                .generics
+                .params
+                .iter()
+                .filter_map(|p| match p {
+                    syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                    _ => None,
+                })
+                .filter(|name| !method_spec.impl_generic_names.contains(name))
+                .collect();
+            let method_type_args: Vec<String> = if own_type_params
+                .iter()
+                .all(|name| header_type_params.contains(name))
+            {
+                own_type_params.iter().map(|name| escape_cpp_keyword(name)).collect()
+            } else {
+                Vec::new()
+            };
+            let explicit = if method_type_args.is_empty() {
+                String::new()
+            } else {
+                format!("<{}>", method_type_args.join(", "))
+            };
+            let template_kw = if method_type_args.is_empty() { "" } else { "template " };
+            if receiver_opt.is_some() {
+                self.writeln(&format!(
+                    "return ([&](auto&& __self) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__self)>(__self).{template_kw}{tagged}{explicit}({args}); }}) {{ return std::forward<decltype(__self)>(__self).{template_kw}{tagged}{explicit}({args}); }} else {{ return std::forward<decltype(__self)>(__self).{template_kw}{m}{explicit}({args}); }} }})(self_);",
+                    m = escaped_method_name
+                ));
+            } else {
+                self.writeln(&format!(
+                    "return std::remove_cvref_t<Self>::{m}{explicit}({args});",
+                    m = escaped_method_name
+                ));
+            }
+            emitted_default_body_override = true;
+        }
+        if !emitted_default_body_override
+            && method.sig.inputs.len() == 2
             && matches!(
                 method_name.as_str(),
                 "next_key_seed" | "next_value_seed" | "next_element_seed"
@@ -37403,7 +38041,17 @@ impl CodeGen {
             syn::Expr::Reference(r) => r.expr.as_ref(),
             other => other,
         };
-        let scrutinee_cpp = self.emit_expr_to_string(scrutinee_expr);
+        // The pattern types the scrutinee as `emit_while_let` does — a tuple of
+        // unit structs (`Some((IgnoredAny, IgnoredAny)) = map.next_entry()?`)
+        // lands here, and `next_entry<K, V>` has no other source for `K, V`.
+        let scrutinee_expected_ty = self
+            .infer_while_let_some_payload_type_from_body(&let_expr.pat, body)
+            .map(|payload_ty| -> syn::Type { parse_quote!(Option<#payload_ty>) });
+        let scrutinee_cpp = if let Some(expected_ty) = scrutinee_expected_ty.as_ref() {
+            self.emit_expr_to_string_with_expected(scrutinee_expr, Some(expected_ty))
+        } else {
+            self.emit_expr_to_string(scrutinee_expr)
+        };
         let scrutinee_var = "_whilelet";
         let variant_ctx = self.infer_variant_type_context_from_expr(scrutinee_expr);
         let mut binding_stmts = Vec::new();
@@ -49490,10 +50138,20 @@ impl CodeGen {
         // imported alias (`use content::Content;`), qualify through the bound
         // target path so variant structs resolve as `content::Content_Variant`.
         let mut bound_target_cpp_override: Option<String> = None;
+        // #89: a UFCS lane body is emitted with an EMPTY module stack; its module
+        // is `ufcs_impl_module_path`. Resolving the enum's import binding against
+        // the crate root instead spelled serde's de-side `Content::Str` (the
+        // module's `pub use crate::serde_core_private::Content`) as the crate's
+        // own ser-side `Content_Str`, which does not exist (measured).
+        let scope_path: Vec<String> = if self.module_stack.is_empty() {
+            self.ufcs_impl_module_path.clone()
+        } else {
+            self.module_stack.clone()
+        };
+        let enum_name_local = enum_base_path.segments[0].ident.to_string();
         let enum_base_path = if enum_base_path.segments.len() == 1
-            && !self.current_module_declares_type_name_exact(
-                &enum_base_path.segments[0].ident.to_string(),
-            )
+            && !(self.is_local_type_name_in_scope(&enum_name_local)
+                || self.module_path_declares_type_name_exact(&scope_path, &enum_name_local))
         // The current module's OWN enum declaration wins over any use-alias
         // binding: libyaml::emitter declares `enum Error` while other files
         // import crate::error::Error — the any-scope unique-binding fallback
@@ -49502,7 +50160,7 @@ impl CodeGen {
         // libyaml::error namespace where no such variant struct exists).
         {
             let local_name = enum_base_path.segments[0].ident.to_string();
-            let scope_key = self.module_stack.join("::");
+            let scope_key = scope_path.join("::");
             let mut bound_target = self
                 .resolve_scope_import_binding_path_for_scope(&scope_key, &local_name)
                 .or_else(|| self.resolve_scope_import_binding_path_for_scope("", &local_name))

@@ -3353,7 +3353,7 @@ impl CodeGen {
                         .is_some_and(|ch| ch.is_ascii_uppercase() || ch == '_');
                     let has_scope_import_binding = self
                         .resolve_scope_import_binding_path_for_scope(
-                            &self.module_stack.join("::"),
+                            &self.ufcs_call_site_rust_module_path().join("::"),
                             &local_name,
                         )
                         .or_else(|| {

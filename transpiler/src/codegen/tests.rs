@@ -51026,3 +51026,392 @@ fn test_borrowed_array_literal_to_a_by_value_dependency_parameter_passes_the_arr
         "the array prvalue is the argument: {out}"
     );
 }
+
+fn aa_dependency_lane_manifest() -> crate::transpile::UfcsTraitManifest {
+    crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["Ser".to_string()],
+        declared_trait_methods: [("Ser".to_string(), vec!["req".to_string(), "dflt".to_string()])]
+            .into_iter()
+            .collect(),
+        trait_default_methods: [("Ser".to_string(), vec!["dflt".to_string()])]
+            .into_iter()
+            .collect(),
+        method_owners: [
+            ("req".to_string(), vec!["Ser".to_string()]),
+            ("dflt".to_string(), vec!["Ser".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    }
+}
+
+const AA_DEPENDENCY_LANE_CONSUMER: &str = r#"
+    pub mod m {
+        pub struct Mine { pub v: i32 }
+        impl Ser for &mut Mine { fn req(&self) -> i32 { self.v } }
+    }
+    pub struct Root { pub v: i32 }
+    impl Ser for Root { fn req(&self) -> i32 { self.v } }
+    pub struct Wrap<T>(pub T);
+    impl<T: Ser> Ser for Wrap<T> { fn req(&self) -> i32 { 1 } }
+    pub fn f(r: &Root) -> i32 { r.req() + r.dflt() }
+"#;
+
+#[test]
+fn test_aa_consumer_impl_of_dependency_trait_rides_the_dependency_lane_under_the_crate_wrap() {
+    // §3.2.16 phase 3 / (aa), step 2 completed. A consumer's impl of a trait a
+    // DEPENDENCY declares used to take the member tier only, so a dependency
+    // DEFAULT method — `requires has_<Tr><Self_>` on the marker, calling its
+    // siblings bare through `<Tr>_::m` — never reached the consumer's type
+    // (serde_test's `&mut Serializer` vs serde_core's `collect_seq`, measured).
+    // Now the impl also emits lane functions with the DEPENDENCY's tag in a
+    // per-module helper namespace, bridged into the dependency's `<Tr>_::impl_`
+    // and witnessed by the dependency's marker — both OUTSIDE the crate wrap,
+    // right after the declaration pass (an explicit specialization must precede
+    // any implicit instantiation of `impls_<Tr><Self>`).
+    let file: syn::File = syn::parse_str(AA_DEPENDENCY_LANE_CONSUMER).unwrap();
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![aa_dependency_lane_manifest()]);
+    cg.set_crate_name("consumer");
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    // The lane functions: the dependency's tag, the consumer's helper namespace.
+    assert!(
+        out.contains("::serde_core::Ser_::impl_::tag, "),
+        "the tag is the dependency's: {out}"
+    );
+    assert!(
+        out.matches("namespace __ufcs_Ser__serde_core {").count() >= 2,
+        "one helper namespace per impl module (root + m): {out}"
+    );
+    // The witness block sits OUTSIDE the wrap, at the declaration-pass position.
+    let close = "} // namespace consumer (dependency trait witnesses)\n";
+    let close_at = out.find(close).expect("the wrap breaks around the witnesses");
+    let reopen_at = out[close_at..]
+        .find("\nnamespace consumer {\n")
+        .map(|i| close_at + i)
+        .expect("the wrap reopens after the witnesses");
+    let block = &out[close_at..reopen_at];
+    assert!(block.contains("namespace serde_core::Ser_::impl_ {"), "bridge namespace: {block}");
+    assert!(
+        block.contains("    export using ::consumer::m::__ufcs_Ser__serde_core::req;"),
+        "nested-module bridge, crate-rooted: {block}"
+    );
+    assert!(
+        block.contains("    export using ::consumer::__ufcs_Ser__serde_core::req;"),
+        "crate-root bridge, crate-rooted: {block}"
+    );
+    assert!(
+        block.contains("template<> struct ::serde_core::impls_Ser<::consumer::m::Mine> : std::true_type {};"),
+        "the reference self type witnesses its referent (has_<Tr> strips cvref): {block}"
+    );
+    assert!(
+        block.contains("template<> struct ::serde_core::impls_Ser<::consumer::Root> : std::true_type {};"),
+        "a crate-root self type is crate-rooted: {block}"
+    );
+    assert!(
+        block.contains("template<class T> struct ::serde_core::impls_Ser<::consumer::Wrap<T>> : std::true_type {};"),
+        "a generic self type is a partial specialization: {block}"
+    );
+    let first_body = out.find("int32_t f(const Root& r) {").expect("the free function body");
+    assert!(close_at < first_body, "witnesses precede the first body: {out}");
+    assert!(!out.contains("__rusty_dependency_trait_witnesses"), "no sentinel survives: {out}");
+    // The member carrier is kept (the two older (aa) tests pin it too).
+    assert!(out.contains("int32_t Mine::req() const"), "member tier kept: {out}");
+    assert!(!out.contains("namespace Ser_::impl_ {"), "no crate-local `Ser_` is defined: {out}");
+}
+
+#[test]
+fn test_aa_consumer_impl_of_dependency_trait_without_a_crate_wrap_witnesses_in_place() {
+    // No crate wrap (single module, no crate name): the declaration-pass
+    // position is already global scope, so the bridge + marker land there as
+    // is, spelled module-relative.
+    let file: syn::File = syn::parse_str(AA_DEPENDENCY_LANE_CONSUMER).unwrap();
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![aa_dependency_lane_manifest()]);
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(out.contains("namespace serde_core::Ser_::impl_ {"), "{out}");
+    assert!(out.contains("    export using ::m::__ufcs_Ser__serde_core::req;"), "{out}");
+    assert!(out.contains("    export using ::__ufcs_Ser__serde_core::req;"), "{out}");
+    assert!(
+        out.contains("template<> struct ::serde_core::impls_Ser<::m::Mine> : std::true_type {};"),
+        "{out}"
+    );
+    assert!(
+        out.contains("template<> struct ::serde_core::impls_Ser<::Root> : std::true_type {};"),
+        "{out}"
+    );
+    assert!(!out.contains("(dependency trait witnesses)\n"), "no wrap break without a wrap: {out}");
+    assert!(!out.contains("__rusty_dependency_trait_witnesses"), "{out}");
+}
+
+#[test]
+fn test_aa_same_leaf_local_trait_keeps_the_dependency_impl_on_the_dependency_lane() {
+    // serde_bytes's shape: the consumer declares its OWN `Ser` beside the
+    // dependency's. The own impl keeps the local lane (flat `Ser_::impl_`, bare
+    // marker); the impl written against the dependency's trait rides the
+    // dependency lane under its own helper namespace, so neither acquires the
+    // other's surface.
+    let file: syn::File = syn::parse_quote! {
+        pub trait Ser { fn req(&self) -> i32; }
+        pub struct Root { pub v: i32 }
+        impl Ser for Root { fn req(&self) -> i32 { self.v } }
+        pub struct Other { pub v: i32 }
+        impl serde_core::Ser for Other { fn req(&self) -> i32 { 2 } }
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![aa_dependency_lane_manifest()]);
+    cg.set_crate_name("consumer");
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("template<> struct impls_Ser<Root> : std::true_type {};"),
+        "the own trait's marker: {out}"
+    );
+    assert!(
+        out.contains("template<> struct ::serde_core::impls_Ser<::consumer::Other> : std::true_type {};"),
+        "the dependency trait's marker: {out}"
+    );
+    assert!(out.contains("namespace __ufcs_Ser__serde_core {"), "dependency helper: {out}");
+    assert!(
+        out.contains("    export using ::consumer::__ufcs_Ser__serde_core::req;"),
+        "dependency bridge: {out}"
+    );
+    // The own impl's lane copy is suppressed by the same-name cross-crate
+    // dedupe (`extension_trait_method_provided_by_dependency`, pre-existing);
+    // its member carrier and marker stand.
+    assert!(out.contains("int32_t Root::req() const"), "the own impl's member carrier: {out}");
+    assert!(
+        out.contains("req(::serde_core::Ser_::impl_::tag, const Other& self_"),
+        "the dependency impl carries the dependency's tag: {out}"
+    );
+}
+
+#[test]
+fn test_reference_self_impl_marker_witnesses_the_referent() {
+    // `has_<Tr><U>` reads `impls_<Tr><std::remove_cvref_t<U>>`, so a marker
+    // spelled with the reference (`impls_Tr<X&>`, serde_core's `impl Serializer
+    // for &mut Formatter`) was never consulted. The witness is the referent.
+    let out = transpile_str_module(
+        r#"
+        pub trait Tr { fn m(&self) -> i32; fn d(&self) -> i32 { self.m() + 1 } }
+        pub struct Mine { pub v: i32 }
+        impl Tr for &mut Mine { fn m(&self) -> i32 { self.v } }
+        "#,
+        "consumer",
+    );
+    assert!(
+        out.contains("template<> struct impls_Tr<Mine> : std::true_type {};"),
+        "{out}"
+    );
+    assert!(!out.contains("impls_Tr<Mine&>"), "no reference-spelled marker: {out}");
+}
+
+#[test]
+fn test_while_let_unit_struct_payload_types_the_serde_accessor() {
+    // `while let Some(IgnoredAny) = seq.next_element()?` (serde_core's
+    // IgnoredAny::visit_seq): the payload is a UNIT-STRUCT pattern, not a
+    // binding, and the struct is the only source of `next_element<T>`'s `T`
+    // (C++ cannot deduce it; without it the ladder fell to a member the
+    // visitor lacks, instantiated from a consumer). The tuple form covers
+    // `next_entry`'s `Some((IgnoredAny, IgnoredAny))`.
+    let out = transpile_str(
+        r#"
+        pub struct Marker;
+        pub trait Acc {
+            fn next_element<T>(&mut self) -> Result<Option<T>, String>;
+            fn next_entry<K, V>(&mut self) -> Result<Option<(K, V)>, String>;
+        }
+        pub fn f<A: Acc>(mut seq: A) -> Result<(), String> {
+            while let Some(Marker) = seq.next_element()? {}
+            while let Some((Marker, Marker)) = seq.next_entry()? {}
+            Ok(())
+        }
+        "#,
+    );
+    assert!(out.contains("next_element<Marker>("), "the unit struct is the type argument: {out}");
+    assert!(out.contains("next_entry<Marker, Marker>("), "both tuple elements: {out}");
+}
+
+#[test]
+fn test_assignment_target_types_the_serde_accessor_through_ok_or_else() {
+    // serde_bytes's ByteArray visitor: `*byte = seq.next_element()?
+    // .ok_or_else(..)?`. The element type reaches `next_element<T>` only by
+    // flowing BACKWARD from the assignment target: `u8` → `.ok_or_else` is a
+    // `Result<u8, _>` → its receiver is an `Option<u8>` → the `?` operand is a
+    // `Result<Option<u8>, _>`. The `ok_or` link was the missing one.
+    let out = transpile_str(
+        r#"
+        pub trait Acc {
+            fn next_element<T>(&mut self) -> Result<Option<T>, String>;
+        }
+        pub fn g<A: Acc>(mut seq: A) -> Result<[u8; 4], String> {
+            let mut bytes = [0u8; 4];
+            for (idx, byte) in bytes.iter_mut().enumerate() {
+                *byte = seq.next_element()?.ok_or_else(|| format!("short at {}", idx))?;
+            }
+            Ok(bytes)
+        }
+        "#,
+    );
+    assert!(out.contains("next_element<uint8_t>("), "the target's element type is the type argument: {out}");
+}
+
+#[test]
+fn test_import_of_a_proc_macro_crate_is_rust_only() {
+    // `use serde_derive::{Deserialize, Serialize}`: the crate has no library
+    // target, so no module is transpiled for it; its root is an alias so paths
+    // resolve, but a using-declaration would name a namespace that never
+    // exists (serde_bytes's test_derive, measured).
+    let file: syn::File = syn::parse_quote! {
+        use serde_derive::{Deserialize, Serialize};
+        pub struct Mine { pub v: i32 }
+    };
+    let mut cg = test_codegen();
+    cg.set_external_crate_module_aliases(HashMap::from([
+        ("serde_derive".to_string(), "serde_derive".to_string()),
+    ]));
+    cg.set_non_library_dependency_roots(HashSet::from(["serde_derive".to_string()]));
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("// Rust-only proc-macro crate import: using serde_derive::Deserialize;"),
+        "{out}"
+    );
+    assert!(!out.contains("using ::serde_derive::"), "{out}");
+}
+
+#[test]
+fn test_lane_parameter_named_like_a_module_stays_a_plain_declarator() {
+    // serde's `impl Visitor for ContentVisitor { fn expecting(&self, fmt: &mut
+    // fmt::Formatter) }` beside its `lib::fmt` re-export (`use crate::lib::*`):
+    // the lane emitter's import qualifier ran over the whole `<type> <name>`
+    // parameter and rewrote the NAME (`Formatter& ::serde::lib::fmt`,
+    // "parameter declarator cannot be qualified"). Only the type is qualified.
+    let out = transpile_str_module(
+        r#"
+        pub mod lib { pub use core::fmt; }
+        pub trait Vis { fn expecting(&self, fmt: &mut fmt::Formatter) -> fmt::Result; }
+        pub mod m {
+            use crate::lib::*;
+            pub struct V;
+            impl crate::Vis for V {
+                fn expecting(&self, fmt: &mut fmt::Formatter) -> fmt::Result { fmt.write_str("v") }
+            }
+        }
+        "#,
+        "consumer",
+    );
+    assert!(!out.contains("& ::lib::fmt"), "the declarator name is never a path: {out}");
+    assert!(!out.contains("& ::consumer::lib::fmt"), "{out}");
+    assert!(
+        out.contains("expecting(Vis_::impl_::tag, const ::m::V& self_, rusty::fmt::Formatter& fmt"),
+        "lane declaration keeps the plain name: {out}"
+    );
+}
+
+#[test]
+fn test_lane_signature_spells_an_import_bound_type_over_a_same_leaf_local_one() {
+    // serde's `private::de::content` re-exports serde_core's `Content`
+    // (`pub use crate::serde_core_private::Content`) while the crate declares
+    // its own `private::ser::content::Content`. The lane qualifier stamped the
+    // LOCAL path onto every bare `Content` in the de visitor's signatures
+    // (`no member named 'Str' in 'ser::content::Content'`, measured). The
+    // impl module's own import names the type; the local stamp yields to it.
+    let file: syn::File = syn::parse_quote! {
+        use depcrate::__private as dp;
+        pub trait Vis { type Value; fn produce(&self) -> Self::Value; }
+        pub mod ser { pub mod content { pub struct Content { pub v: i32 } } }
+        pub mod other { pub mod content { pub struct Content { pub w: u8 } } }
+        pub mod de {
+            pub mod content {
+                pub use crate::dp::Content;
+                pub struct V;
+                impl crate::Vis for V {
+                    type Value = Content;
+                    fn produce(&self) -> Content { unimplemented!() }
+                }
+            }
+        }
+    };
+    let mut cg = test_codegen();
+    cg.set_external_crate_module_aliases(HashMap::from([(
+        "depcrate".to_string(),
+        "depcrate".to_string(),
+    )]));
+    // The dependency's manifest declares `Content` (serde_core's does): a
+    // path rooted at a known dependency is never re-resolved by its leaf.
+    cg.set_dependency_ufcs_trait_manifests(vec![crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "depcrate".to_string(),
+        declared_types: vec![crate::transpile::UfcsDeclaredType {
+            name: "Content".to_string(),
+            module_path: "private_".to_string(),
+            arity: 0,
+            args_inline: true,
+        }],
+        ..Default::default()
+    }]);
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    let lane_decl = out
+        .lines()
+        .find(|l| l.contains("produce(Vis_::impl_::tag, const ::de::content::V& self_"))
+        .unwrap_or_else(|| panic!("the lane declaration: {out}"));
+    assert!(
+        !lane_decl.contains("::ser::content::Content") && !lane_decl.contains("::other::content::Content"),
+        "a same-leaf local type is never the one: {lane_decl}"
+    );
+    assert!(
+        lane_decl.contains("dp::Content")
+            || lane_decl.contains("depcrate::")
+            || lane_decl.contains(" Content produce("),
+        "the import's target (or the module's own lexical spelling) is used: {lane_decl}"
+    );
+}
+
+#[test]
+fn test_lane_body_resolves_an_imported_enum_against_the_impl_module() {
+    // The body-position twin of the signature case above (serde's de-side
+    // `ContentDeserializer::deserialize_any` matching `Content::Str(v)`): a
+    // UFCS lane body runs with an EMPTY module stack, so the variant-struct
+    // namer resolved the enum's import binding against the crate root, found
+    // nothing, and stamped the crate's same-leaf ser-side enum
+    // (`variant_holds<::serde::private_::ser::content::Content_Str>`, measured:
+    // no such struct). The impl module's own `pub use` names the enum.
+    let file: syn::File = syn::parse_quote! {
+        use depcrate::__private as dp;
+        pub trait Vis { fn pick(&self, c: &Content) -> i32; }
+        pub mod ser { pub mod content { pub enum Content { A(i32), C } } }
+        pub mod de {
+            pub mod content {
+                pub use crate::dp::Content;
+                pub struct V;
+                impl crate::Vis for V {
+                    fn pick(&self, c: &Content) -> i32 {
+                        match c { Content::B(x) => *x, _ => 0 }
+                    }
+                }
+            }
+        }
+    };
+    let mut cg = test_codegen();
+    cg.set_external_crate_module_aliases(HashMap::from([(
+        "depcrate".to_string(),
+        "depcrate".to_string(),
+    )]));
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(
+        !out.contains("ser::content::Content_B"),
+        "the same-leaf local enum is never the imported one's owner: {out}"
+    );
+    assert!(
+        out.contains("dp::Content_B") || out.contains("depcrate::private_::Content_B"),
+        "the import's target owns the variant struct: {out}"
+    );
+}

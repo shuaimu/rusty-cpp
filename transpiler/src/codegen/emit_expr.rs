@@ -13046,6 +13046,8 @@ impl CodeGen {
                 )
             } else if method_name == "transpose" && mc.args.is_empty() {
                 self.infer_transpose_receiver_expected_type_from_call_expected(expected_ty)
+            } else if matches!(method_name.as_str(), "ok_or" | "ok_or_else") && mc.args.len() == 1 {
+                self.infer_ok_or_receiver_expected_type_from_call_expected(expected_ty)
             } else {
                 None
             };
@@ -13904,7 +13906,7 @@ impl CodeGen {
                         {
                             let visitor_cpp = format!("{}Visitor", escape_cpp_keyword(&seed_ident));
                             let seed_adapter = format!(
-                                "::rusty::serde_rt::rusty::serde_rt::de::detail::identifier_seed<{}, {}>{{}}",
+                                "::rusty::serde_rt::de::detail::identifier_seed<{}, {}>{{}}",
                                 seed_cpp, visitor_cpp
                             );
                             let seed_call = self
@@ -14611,13 +14613,14 @@ impl CodeGen {
                         syn::Expr::MethodCall(syn::ExprMethodCall { method, .. })
                             if matches!(
                                 method.to_string().as_str(),
-                                "next_element" | "next_key" | "next_value"
+                                "next_element" | "next_key" | "next_value" | "next_entry"
                             )
                     ) {
                         // Serde accessors infer their method template from the
                         // unwrapped `?` result, e.g. `while let Some(v) =
                         // seq.next_element()?` should instantiate
-                        // `next_element<T>()` from the `Option<T>` context.
+                        // `next_element<T>()` from the `Option<T>` context
+                        // (`next_entry<K, V>` from `Option<(K, V)>` likewise).
                         try_operand_expected =
                             Some(parse_quote!(Result<#ok_expected_ty, #fallback_try_err_ty>));
                     } else if matches!(
@@ -25347,7 +25350,7 @@ impl CodeGen {
                                 let visitor_cpp =
                                     format!("{}Visitor", escape_cpp_keyword(&seed_ident));
                                 let seed_adapter = format!(
-                                    "::rusty::serde_rt::rusty::serde_rt::de::detail::identifier_seed<{}, {}>{{}}",
+                                    "::rusty::serde_rt::de::detail::identifier_seed<{}, {}>{{}}",
                                     seed_cpp, visitor_cpp
                                 );
                                 let seed_call = self

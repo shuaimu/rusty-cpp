@@ -1924,7 +1924,14 @@ impl CodeGen {
     }
 
     pub(super) fn resolve_single_segment_scope_import_bound_type(&self, local_name: &str) -> Option<String> {
-        let scope_key = self.module_stack.join("::");
+        // #89 / §3.2.16 (aa): a UFCS lane runs with an EMPTY module stack; its
+        // Rust module is `ufcs_impl_module_path` (a default body's is the
+        // trait's). Keying the import lookup by the bare stack resolved a lane
+        // signature's `Content` against the crate root, missed the impl
+        // module's `pub use crate::serde_core_private::Content`, and stamped
+        // the crate's same-leaf `ser::content::Content` instead (measured).
+        let scope_path = self.ufcs_call_site_rust_module_path();
+        let scope_key = scope_path.join("::");
         let is_flat_type_leaf = self
             .flat_import_type_authorizations
             .iter()
@@ -1950,7 +1957,7 @@ impl CodeGen {
                 );
             }
             if self.current_module_declares_type_name_exact(local_name)
-                || self.module_path_declares_type_name_exact(&self.module_stack, local_name)
+                || self.module_path_declares_type_name_exact(&scope_path, local_name)
             {
                 return None;
             }
@@ -1964,9 +1971,17 @@ impl CodeGen {
             .or_else(|| self.resolve_scope_import_binding_path_for_scope("", local_name))
             .or_else(|| self.resolve_unique_scope_import_binding_path_any_scope(local_name))?;
         let mut rebound = self.rewrite_cpp_import_bound_type_spelling(&bound_target);
+        let after_alias = rebound.clone();
         rebound = self.resolve_nested_local_reexport_path(&rebound);
+        let after_reexport = rebound.clone();
         if let Some(resolved_nested) = self.try_resolve_nested_local_type_path(&rebound) {
             rebound = resolved_nested;
+        }
+        if std::env::var_os("RUSTY_CPP_DEBUG_IMPORT_QUALIFY").is_some() {
+            eprintln!(
+                "[rusty-cpp][single-segment-rebind] name={} scope={:?} target={} alias={} reexport={} nested={}",
+                local_name, scope_key, bound_target, after_alias, after_reexport, rebound
+            );
         }
         let had_global_prefix = rebound.starts_with("::");
         let renamed = self.escape_and_rename_qualified_name(rebound.trim_start_matches("::"));
@@ -4418,11 +4433,37 @@ impl CodeGen {
         })
     }
 
+    /// A UNIT-STRUCT pattern (`IgnoredAny`, `path::Marker`) names its type: in
+    /// `while let Some(IgnoredAny) = seq.next_element()?` the payload type is
+    /// the struct itself (rustc resolves the ident as a path pattern, not a
+    /// binding), which is the only source of `next_element<T>`'s `T` there.
+    fn unit_struct_pattern_type(&self, pat: &syn::Pat) -> Option<syn::Type> {
+        let path: syn::Path = match pat {
+            syn::Pat::Ident(pi) if pi.subpat.is_none() && pi.by_ref.is_none() => {
+                let ident = &pi.ident;
+                syn::parse_quote!(#ident)
+            }
+            syn::Pat::Path(pp) if pp.qself.is_none() => pp.path.clone(),
+            _ => return None,
+        };
+        if !self.is_unit_struct_path(&path) {
+            return None;
+        }
+        Some(syn::Type::Path(syn::TypePath { qself: None, path }))
+    }
+
     pub(super) fn infer_while_let_some_payload_type_from_body(
         &self,
         pat: &syn::Pat,
         body: &syn::Block,
     ) -> Option<syn::Type> {
+        if let syn::Pat::TupleStruct(ts) = pat
+            && ts.elems.len() == 1
+            && self.is_option_some_path(&ts.path)
+            && let Some(unit_ty) = self.unit_struct_pattern_type(ts.elems.first()?)
+        {
+            return Some(unit_ty);
+        }
         if let Some(binding_name) = self.simple_some_payload_binding_name(pat) {
             return self.infer_local_binding_type_from_body_usage(&binding_name, &body.stmts);
         }
@@ -4438,6 +4479,11 @@ impl CodeGen {
         };
         let mut elem_tys = Vec::with_capacity(tuple_pat.elems.len());
         for elem_pat in &tuple_pat.elems {
+            // `Some((IgnoredAny, IgnoredAny))`: a unit-struct element is its type.
+            if let Some(unit_ty) = self.unit_struct_pattern_type(elem_pat) {
+                elem_tys.push(unit_ty);
+                continue;
+            }
             let syn::Pat::Ident(pi) = elem_pat else {
                 return None;
             };
@@ -9905,6 +9951,27 @@ impl CodeGen {
             _ => {}
         }
         None
+    }
+
+    /// `opt.ok_or(e)` / `opt.ok_or_else(f)` with an expected `Result<T, E>`:
+    /// the receiver is `Option<T>`. The link that carries an assignment
+    /// target's type back through `?` to a serde accessor (`*byte =
+    /// seq.next_element()?.ok_or_else(..)?`, serde_bytes's ByteArray — without
+    /// it `next_element` had no `T` and fell to a member the visitor lacks).
+    pub(super) fn infer_ok_or_receiver_expected_type_from_call_expected(
+        &self,
+        call_expected_ty: Option<&syn::Type>,
+    ) -> Option<syn::Type> {
+        let call_expected_ty = self.peel_reference_paren_group_type(call_expected_ty?);
+        let (owner, type_args) = self.option_or_result_type_args(call_expected_ty)?;
+        if owner != "Result" {
+            return None;
+        }
+        let ok_ty = type_args.first()?.clone();
+        if self.type_contains_infer(&ok_ty) {
+            return None;
+        }
+        Some(parse_quote!(Option<#ok_ty>))
     }
 
     pub(super) fn infer_transpose_receiver_expected_type_from_call_expected(

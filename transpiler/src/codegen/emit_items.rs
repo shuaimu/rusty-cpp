@@ -9718,6 +9718,22 @@ impl CodeGen {
                         self.writeln(&format!("// Rust-only: using {};", resolved_path));
                         continue;
                     }
+                    // A proc-macro crate (`use serde_derive::{Deserialize,
+                    // Serialize}`) has no transpiled module: its root is an
+                    // alias so paths resolve, but a using-declaration would name
+                    // a namespace that never exists (serde_bytes's test_derive,
+                    // measured: `no member named 'serde_derive' in the global
+                    // namespace`). The derive is applied at expansion time.
+                    if let Some(root) = using_path.trim_start_matches("::").split("::").next()
+                        && !root.is_empty()
+                        && self.non_library_dependency_roots.contains(root)
+                    {
+                        self.writeln(&format!(
+                            "// Rust-only proc-macro crate import: using {};",
+                            resolved_path
+                        ));
+                        continue;
+                    }
                     let using_tail = using_path.trim_start_matches("::");
                     if !using_tail.is_empty()
                         && !using_tail.contains("::")
