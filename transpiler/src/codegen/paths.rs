@@ -910,6 +910,68 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 None
             };
         }
+        // The reference self type's `Self` in the RETURN position is the
+        // referent pointer (`reference_self_value_type`): serde_test's `impl
+        // Serializer for &mut Serializer { fn serialize_seq(self, ..) ->
+        // Result<Self, Error> { Ok(self) } }` returned `Result<Serializer,
+        // Error>` — a COPY of the serializer, whose token cursor then
+        // diverged from the caller's.
+        if let Some(pointer) = Self::reference_self_value_type(impl_self_ty)
+            && let syn::ReturnType::Type(_, ty) = &mut method.sig.output
+        {
+            Self::rewrite_bare_self_type(ty, &pointer);
+        }
+    }
+
+    /// The pointer a reference self type's `Self` stands for in a VALUE
+    /// position — a `-> Self` return, an assoc value `type X = Self`:
+    /// `impl Tr for &mut T` → `*mut T` (`T*`), `impl Tr for &T` → `*const T`.
+    /// A reference inside a `Result` would be decayed to a copy by the
+    /// emitter's `auto x = ({ … unwrap() })` binding, and a `&mut` argument
+    /// into a type parameter is a pointer already — the pointer is the one
+    /// representation the ladders' deref rung reaches. None for a non-reference
+    /// self type.
+    pub(super) fn reference_self_value_type(impl_self_ty: &syn::Type) -> Option<syn::Type> {
+        let mut ty = impl_self_ty;
+        loop {
+            match ty {
+                syn::Type::Paren(p) => ty = &p.elem,
+                syn::Type::Group(g) => ty = &g.elem,
+                _ => break,
+            }
+        }
+        let syn::Type::Reference(r) = ty else {
+            return None;
+        };
+        let elem = r.elem.as_ref();
+        Some(if r.mutability.is_some() {
+            syn::parse_quote!(*mut #elem)
+        } else {
+            syn::parse_quote!(*const #elem)
+        })
+    }
+
+    /// Replace every standalone single-segment `Self` type path in `ty` —
+    /// never a `Self::X` projection — with `replacement`.
+    pub(super) fn rewrite_bare_self_type(ty: &mut syn::Type, replacement: &syn::Type) {
+        struct Rewriter<'a> {
+            replacement: &'a syn::Type,
+        }
+        impl syn::visit_mut::VisitMut for Rewriter<'_> {
+            fn visit_type_mut(&mut self, ty: &mut syn::Type) {
+                if let syn::Type::Path(tp) = ty
+                    && tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "Self"
+                    && tp.path.segments[0].arguments.is_none()
+                {
+                    *ty = self.replacement.clone();
+                    return;
+                }
+                syn::visit_mut::visit_type_mut(self, ty);
+            }
+        }
+        syn::visit_mut::VisitMut::visit_type_mut(&mut Rewriter { replacement }, ty);
     }
 
     pub(super) fn normalize_variant_ctor_param_type(
@@ -2335,20 +2397,31 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     .resolve_unique_trait_bound_type_param(trait_name)
                     .is_some();
             if has_trait_static_dispatch_context {
+                // The recovered owner is a nested-name-specifier of a static
+                // CALL — an expression, never prefixed `typename` (a type-param
+                // projection owner maps as a dependent type, `typename
+                // std::remove_pointer_t<..>::Error`; serde's derive
+                // `<__A::Error as de::Error>::duplicate_field("f")` read as a type).
+                let as_owner = |spelled: String| -> String {
+                    spelled
+                        .strip_prefix("typename ")
+                        .map(|rest| rest.trim_start().to_string())
+                        .unwrap_or(spelled)
+                };
                 if let Some(type_param) =
                     self.resolve_trait_static_call_type_param_for_segments(&segments)
                 {
-                    return format!("{}::{}", type_param, method_name);
+                    return format!("{}::{}", as_owner(type_param), method_name);
                 }
                 if let Some(owner) =
                     self.resolve_trait_static_call_owner_in_current_context(&segments)
                 {
-                    return format!("{}::{}", owner, method_name);
+                    return format!("{}::{}", as_owner(owner), method_name);
                 }
                 if let Some(owner) =
                     self.resolve_trait_static_call_owner_from_return_hint(trait_name)
                 {
-                    return format!("{}::{}", owner, method_name);
+                    return format!("{}::{}", as_owner(owner), method_name);
                 }
                 if trait_name == "Error"
                     && let Some(return_hint) = self.current_return_type_hint()

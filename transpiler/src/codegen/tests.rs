@@ -13131,7 +13131,9 @@ fn test_serde_invalid_length_dependent_error_owner_uses_typename_template_arg() 
     );
 
     assert!(
-        out.contains("rusty::error::invalid_length<typename V::Error>("),
+        out.contains(
+            "rusty::error::invalid_length<typename std::remove_pointer_t<std::remove_cvref_t<V>>::Error>("
+        ),
         "dependent associated error owner must be a valid C++ template type arg:\n{}",
         out
     );
@@ -26844,15 +26846,18 @@ fn test_leaf4154333333362_runtime_fallback_formatter_exposes_error_type() {
 #[test]
 fn test_leaf10535_runtime_fallback_formatter_supports_debug_struct_field2_finish() {
     let helpers = runtime_path_fallback_helpers_text();
-    assert!(helpers.contains("static Result debug_struct_field2_finish(Args&&...)"));
+    // The derive(Debug) finish helpers write through the shim's builders (they
+    // were no-op statics that printed an empty name).
+    assert!(helpers.contains("Result debug_struct_field2_finish(Name&& name, Pairs&&... pairs) const"));
+    assert!(!helpers.contains("static Result debug_struct_field2_finish(Args&&...)"));
 }
 
 #[test]
 fn test_leaf5193_runtime_fallback_exposes_extended_debug_helpers_and_either_runtime() {
     let helpers = runtime_path_fallback_helpers_text();
-    assert!(helpers.contains("static Result debug_tuple_field2_finish(Args&&...)"));
-    assert!(helpers.contains("static Result debug_struct_field3_finish(Args&&...)"));
-    assert!(helpers.contains("static Result debug_struct_field4_finish(Args&&...)"));
+    assert!(helpers.contains("Result debug_tuple_field2_finish(Name&& name, Vals&&... vals) const"));
+    assert!(helpers.contains("Result debug_struct_field3_finish(Name&& name, Pairs&&... pairs) const"));
+    assert!(helpers.contains("Result debug_struct_field4_finish(Name&& name, Pairs&&... pairs) const"));
     assert!(helpers.contains("auto size_hint(const Iter& iter) -> decltype(iter.size_hint())"));
     assert!(helpers.contains("decltype(auto) left(Value&& value)"));
     assert!(helpers.contains("decltype(auto) right(Value&& value)"));
@@ -37547,8 +37552,9 @@ fn test_leaf5202_deserialize_method_generic_shadowing_owner_param_is_renamed() {
         out
     );
     assert!(
-        out.contains("rusty::Result<typename V_::Value,")
-            && out.contains("deserialize_bool(V_ visitor)"),
+        out.contains(
+            "rusty::Result<typename std::remove_pointer_t<std::remove_cvref_t<V_>>::Value,"
+        ) && out.contains("deserialize_bool(V_ visitor)"),
         "expected visitor Value and parameter to use renamed method generic, got:\n{}",
         out
     );
@@ -49957,7 +49963,10 @@ fn test_aa_consumer_reference_self_impl_of_dependency_trait_keeps_its_member_car
     };
     cg.emit_file(&file, Some("consumer"));
     let out = cg.into_output();
-    assert!(out.contains("Mine Mine::tap() const"), "member carrier: {out}");
+    // A reference self type's `-> Self` is the referent POINTER (paths.rs
+    // `reference_self_value_type`); the carrier is still the member tier.
+    assert!(out.contains("const Mine* Mine::tap() const"), "member carrier: {out}");
+    assert!(out.contains("return this;"), "`self` in a pointer position is `this`: {out}");
     assert!(!out.contains("rusty_ext::tap"), "no twin spelling: {out}");
 }
 
@@ -51185,10 +51194,14 @@ fn test_aa_same_leaf_local_trait_keeps_the_dependency_impl_on_the_dependency_lan
         out.contains("    export using ::consumer::__ufcs_Ser__serde_core::req;"),
         "dependency bridge: {out}"
     );
-    // The own impl's lane copy is suppressed by the same-name cross-crate
-    // dedupe (`extension_trait_method_provided_by_dependency`, pre-existing);
-    // its member carrier and marker stand.
+    // §3.2.16 (ab): the own impl keeps its OWN lane function beside the
+    // dependency impl's (two lanes, two tags — the same-name cross-crate dedupe
+    // that dropped it is gone); its member carrier stands.
     assert!(out.contains("int32_t Root::req() const"), "the own impl's member carrier: {out}");
+    assert!(
+        out.contains("req(Ser_::impl_::tag, const Root& self_"),
+        "the own impl's lane function beside the dependency's same-leaf trait: {out}"
+    );
     assert!(
         out.contains("req(::serde_core::Ser_::impl_::tag, const Other& self_"),
         "the dependency impl carries the dependency's tag: {out}"
@@ -51553,4 +51566,626 @@ fn test_as_ref_on_a_bounded_type_parameter_is_the_bound_s_slice_view() {
         "AsRef<str> is the string view: {out}"
     );
     assert!(!out.contains("__mdisp_as_ref"), "no member probe remains: {out}");
+}
+
+#[test]
+fn test_write_into_a_string_is_fmt_write() {
+    // serde_test's assert_next_token field formatter: `write!(&mut buffer, ..)
+    // .unwrap()` with `buffer: String`. A String is `fmt::Write`, not
+    // `io::Write`; the io dispatcher returned Err(Unsupported) and the unwrap
+    // panicked at runtime.
+    let out = transpile_str(
+        r#"
+        use std::fmt::Write;
+        pub fn describe(len: usize) -> String {
+            let mut buffer = String::new();
+            write!(&mut buffer, "len: {:?}, ", len).unwrap();
+            buffer
+        }
+        "#,
+    );
+    assert!(out.contains("rusty::write_fmt(buffer, "), "the fmt::Write path: {out}");
+    assert!(!out.contains("rusty::io::write_fmt("), "no io path for a String: {out}");
+}
+
+#[test]
+fn test_derive_debug_finish_helpers_write_their_fields() {
+    // `#[derive(Debug)]` expands (cargo-expand) to
+    // `Formatter::debug_tuple_fieldN_finish(f, name, &v..)` /
+    // `debug_struct_fieldN_finish(f, name, k, &v..)`; the prelude Formatter shim
+    // carried them as no-op statics, so every derived Debug printed an empty
+    // name (serde_test's Token Display forwards to it: "expected Token:: but
+    // serialized as Bool(true)"). They now drive the shim's builders.
+    let out = transpile_str_module(
+        r#"
+        use std::fmt;
+        pub enum Token {
+            Bool(bool),
+            Seq { len: Option<usize> },
+        }
+        impl fmt::Debug for Token {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                match self {
+                    Token::Bool(v) => fmt::Formatter::debug_tuple_field1_finish(f, "Bool", &v),
+                    Token::Seq { len } => fmt::Formatter::debug_struct_field1_finish(f, "Seq", "len", &len),
+                }
+            }
+        }
+        impl fmt::Display for Token {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                fmt::Debug::fmt(self, f)
+            }
+        }
+        pub fn show(t: &Token) -> String {
+            t.to_string()
+        }
+        "#,
+        "tok",
+    );
+    assert!(
+        !out.contains("static Result debug_tuple_field1_finish(Args&&...)"),
+        "no no-op static stub remains: {out}"
+    );
+    assert!(
+        out.contains("Result debug_tuple_field1_finish(Name&& name, Vals&&... vals) const"),
+        "the tuple finish helper writes through the DebugTuple builder: {out}"
+    );
+    assert!(
+        out.contains("Result debug_struct_field1_finish(Name&& name, Pairs&&... pairs) const"),
+        "the struct finish helper writes through the DebugStruct builder: {out}"
+    );
+}
+
+#[test]
+fn test_reference_self_impl_hands_out_the_referent_pointer_as_self() {
+    // serde_test / serde_yaml: `impl Serializer for &mut Serializer { type
+    // SerializeSeq = Self; fn serialize_seq(self, ..) -> Result<Self, E> {
+    // Ok(self) } }`. The member tier spelled `Self` as the struct (a COPY of
+    // the serializer, whose token cursor then diverged) and the lane skipped
+    // the method (bare `Self` mapped nowhere). The reference self type's `Self`
+    // in a value position is the referent pointer.
+    let out = transpile_str(
+        r#"
+        pub struct S {
+            pub v: i32,
+        }
+        pub trait Tr {
+            type Out;
+            fn go(self) -> Result<Self::Out, i32>;
+            fn step(&mut self);
+        }
+        impl<'a> Tr for &'a mut S {
+            type Out = Self;
+            fn go(self) -> Result<Self, i32> {
+                Ok(self)
+            }
+            fn step(&mut self) {
+                self.v += 1;
+            }
+        }
+        pub fn drive<T: Tr>(x: T) -> Result<(), i32> {
+            let _out = x.go()?;
+            Ok(())
+        }
+        "#,
+    );
+    assert!(out.contains("using Out = S*;"), "the assoc value Self is the referent pointer: {out}");
+    assert!(out.contains("rusty::Result<S*, int32_t> go("), "`-> Self` is the pointer: {out}");
+    assert!(out.contains("::Ok(this)"), "Ok(self) hands out this: {out}");
+    assert!(
+        !out.contains("unresolved signature placeholder): go"),
+        "the lane function is emitted: {out}"
+    );
+    assert!(out.contains("go(Tr_::impl_::tag, S& self_"), "the lane declaration: {out}");
+}
+
+#[test]
+fn test_lane_projection_of_a_type_parameter_looks_through_the_pointer_representation() {
+    // A Rust `&mut x` argument into a by-value type parameter arrives as a
+    // POINTER; the lane and member signatures spell the projection bare
+    // (`typename S::Ok` — the bound is stripped from their scope), which is
+    // ill-formed for `S = Serializer*`: no Serialize impl was viable for
+    // serde_test's serializer and the ladder fell to a rung that dereferenced
+    // the receiver (serde_bytes' `Bytes` serialized as a slice). The bare
+    // projection now looks through the pointer.
+    let out = transpile_str(
+        r#"
+        pub trait Sink {
+            type Ok;
+            type Error;
+            fn put(self, v: u8) -> Result<Self::Ok, Self::Error>;
+        }
+        pub trait Emit {
+            fn emit<S: Sink>(&self, sink: S) -> Result<S::Ok, S::Error>;
+        }
+        pub struct Byte(pub u8);
+        impl Emit for Byte {
+            fn emit<S: Sink>(&self, sink: S) -> Result<S::Ok, S::Error> {
+                sink.put(self.0)
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::Result<typename std::remove_pointer_t<std::remove_cvref_t<S>>::Ok, typename std::remove_pointer_t<std::remove_cvref_t<S>>::Error> emit("),
+        "the bare projection looks through a pointer S: {out}"
+    );
+    assert!(!out.contains("typename S::Ok"), "no bare `typename S::Ok` remains: {out}");
+}
+
+#[test]
+fn test_qualified_self_static_trait_call_is_an_expression_not_a_type() {
+    // serde's derive: `<__A::Error as de::Error>::duplicate_field("slice")` on a
+    // DEPENDENCY trait (no local Traits map). The qualified-self owner maps as a
+    // dependent TYPE — looking through the pointer representation, `typename
+    // std::remove_pointer_t<..>::Error` — but a callee path is an EXPRESSION
+    // and must not carry `typename`: clang read the whole path as a type ("no
+    // type named 'duplicate_field'").
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "errdep".to_string(),
+        declared_traits: vec!["Err".to_string(), "Acc".to_string()],
+        declared_trait_methods: [
+            ("Err".to_string(), vec!["custom".to_string(), "duplicate_field".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        trait_default_methods: [("Err".to_string(), vec!["duplicate_field".to_string()])]
+            .into_iter()
+            .collect(),
+        declared_trait_modules: [("Err".to_string(), "de".to_string())].into_iter().collect(),
+        trait_assoc_type_bounds: [("Acc::Error".to_string(), "Err".to_string())]
+            .into_iter()
+            .collect(),
+        method_owners: [
+            ("custom".to_string(), vec!["Err".to_string()]),
+            ("duplicate_field".to_string(), vec!["Err".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    let file: syn::File = syn::parse_quote! {
+        use errdep::{Acc, Err};
+        pub fn fail<A: Acc>(_a: A) -> Result<(), A::Error> {
+            Err(<A::Error as Err>::duplicate_field("slice"))
+        }
+        pub fn fail_qualified<A: Acc>(_a: A, seen: bool) -> Result<(), A::Error> {
+            if seen {
+                return core::result::Result::Err(<A::Error as Err>::duplicate_field("slice"));
+            }
+            Ok(())
+        }
+        pub fn fail_path<A: Acc>(_a: A) -> Result<(), A::Error> {
+            Err(Err::duplicate_field("path"))
+        }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(
+        !out.contains("typename std::remove_pointer_t<std::remove_cvref_t<A>>::Error::duplicate_field("),
+        "no type-only `typename` on a callee path: {out}"
+    );
+    // The default lives in the dependency's RuntimeHelper; the owner may
+    // override it — the member-vs-helper dispatch of the bare form, with the
+    // qualified-self owner bound as the dispatch's template default argument.
+    assert!(
+        out.contains("::errdep::de::ErrRuntimeHelper::template duplicate_field<__Owner>(\"slice\")"),
+        "the dependency default dispatch: {out}"
+    );
+    assert!(
+        out.contains("__Owner = typename std::remove_pointer_t<std::remove_cvref_t<A>>::Error>()"),
+        "the owner is the qualified self: {out}"
+    );
+    // The trait-path form (`Err::duplicate_field("path")`) takes the owner from
+    // the function's declared error type.
+    assert!(
+        out.contains("::errdep::de::ErrRuntimeHelper::template duplicate_field<__Owner>(\"path\")"),
+        "the trait-path form dispatches the same way: {out}"
+    );
+}
+
+#[test]
+fn test_reference_self_member_reborrow_argument_is_the_pointer() {
+    // serde_test: `impl SerializeStruct for &mut Serializer { fn
+    // serialize_field<T: Serialize>(&mut self, key, value: &T) {
+    // value.serialize(&mut **self) } }`. The member collapsed one reference
+    // level into `this`; `&mut **self` into the by-value `serializer: S` is
+    // the POINTER representation of the Rust reference, not the dereferenced
+    // value (a by-value `S` deduced from the lvalue copied the serializer).
+    let out = transpile_str(
+        r#"
+        pub trait Sink {
+            type Ok;
+            fn put(self, v: u8) -> Result<Self::Ok, ()>;
+        }
+        pub trait Emit {
+            fn emit<S: Sink>(&self, sink: S) -> Result<S::Ok, ()>;
+        }
+        pub struct Rec {
+            pub n: u32,
+        }
+        pub trait Field {
+            fn field<T: Emit>(&mut self, value: &T) -> Result<(), ()>;
+        }
+        impl<'a> Field for &'a mut Rec {
+            fn field<T: Emit>(&mut self, value: &T) -> Result<(), ()> {
+                value.emit(&mut **self).map(|_| ())
+            }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains(", rusty::detail::deref_if_pointer_like((*this)))")
+            && !out.contains("(value, (*this))"),
+        "the reborrow must not pass the dereferenced value: {out}"
+    );
+    assert!(
+        out.contains("&rusty::detail::deref_if_pointer_like((*this))"),
+        "the reborrow is the pointer (address of the receiver object): {out}"
+    );
+}
+
+#[test]
+fn test_reference_self_member_reborrow_into_a_dependency_trait_method_is_the_pointer() {
+    // serde_test's compound: `impl SerializeStruct for &mut Serializer { fn
+    // serialize_field<T: Serialize>(&mut self, key, value: &T) { value
+    // .serialize(&mut **self) } }` with `Serialize` a DEPENDENCY trait. The
+    // ladder for the bounded receiver passed `deref_if_pointer_like((*this))`
+    // — a Serializer lvalue a by-value `S` deduces as a COPY. `&mut **self`
+    // into a by-value type parameter is the pointer.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serdep".to_string(),
+        declared_traits: vec!["Serialize".to_string(), "Serializer".to_string()],
+        declared_trait_methods: [
+            ("Serialize".to_string(), vec!["serialize".to_string()]),
+            ("Serializer".to_string(), vec!["serialize_bool".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        method_owners: [
+            ("serialize".to_string(), vec!["Serialize".to_string()]),
+            ("serialize_bool".to_string(), vec!["Serializer".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    let file: syn::File = syn::parse_quote! {
+        use serdep::{Serialize, Serializer};
+        pub struct Rec { pub n: u32 }
+        pub trait Field {
+            fn field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), ()>;
+        }
+        impl<'a> Field for &'a mut Rec {
+            fn field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), ()> {
+                value.serialize(&mut **self)
+            }
+        }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(
+        !out.contains("(value, rusty::detail::deref_if_pointer_like((*this)))"),
+        "the reborrow must not pass the dereferenced value: {out}"
+    );
+    assert!(
+        out.contains("&rusty::detail::deref_if_pointer_like((*this))") || out.contains("(value, this)"),
+        "the reborrow is the pointer: {out}"
+    );
+}
+
+#[test]
+fn test_ab_own_trait_sharing_a_dependency_leaf_keeps_its_lane_and_its_calls() {
+    // §3.2.16 (ab): serde_bytes declares its OWN `Serialize` beside serde's.
+    // Its impls are lane functions of its own `Serialize_::impl_` (the
+    // same-name cross-crate dedupe used to drop every one of them, leaving the
+    // markers), and a call through the own trait — `Serialize::serialize(bytes,
+    // s)`, or a method call on a parameter bounded by it — reaches the own
+    // dispatcher, not the serde runtime's dispatch (serde_core's semantics).
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["Serialize".to_string()],
+        declared_trait_methods: [("Serialize".to_string(), vec!["serialize".to_string()])]
+            .into_iter()
+            .collect(),
+        method_owners: [("serialize".to_string(), vec!["Serialize".to_string()])]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    cg.set_crate_name("bytes_crate");
+    let file: syn::File = syn::parse_quote! {
+        pub mod ser {
+            pub trait Serialize {
+                fn serialize<S>(&self, serializer: S) -> i32 where S: Copy;
+            }
+            impl Serialize for [u8] {
+                fn serialize<S>(&self, serializer: S) -> i32 where S: Copy { self.len() as i32 }
+            }
+            impl Serialize for Vec<u8> {
+                fn serialize<S>(&self, serializer: S) -> i32 where S: Copy { self.len() as i32 }
+            }
+            impl<T> Serialize for Option<T> where T: Serialize {
+                fn serialize<S>(&self, serializer: S) -> i32 where S: Copy {
+                    match self { Some(b) => b.serialize(serializer), None => 0 }
+                }
+            }
+        }
+        pub use ser::Serialize;
+        pub fn serialize<T, S>(bytes: &T, serializer: S) -> i32
+        where
+            T: ?Sized + Serialize,
+            S: Copy,
+        {
+            Serialize::serialize(bytes, serializer)
+        }
+    };
+    cg.emit_file(&file, Some("bytes_crate"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("serialize(Serialize_::impl_::tag, const rusty::Option<T>& self_"),
+        "the own trait's Option impl is a lane function of the OWN lane: {out}"
+    );
+    assert!(
+        out.contains("Serialize_::impl_::tag, const rusty::Vec<uint8_t>& self_"),
+        "the own trait's Vec impl is a lane function: {out}"
+    );
+    assert!(
+        out.contains("Serialize_::serialize("),
+        "a call through the own trait reaches the own dispatcher: {out}"
+    );
+    assert!(
+        !out.contains("serde_rt::ser::serialize"),
+        "never the serde runtime's dispatch for the crate's own trait: {out}"
+    );
+}
+
+#[test]
+fn test_ab_same_self_type_witnesses_an_own_and_a_dependency_trait_of_one_leaf() {
+    // §3.2.16 (ab): the marker dedupe is keyed by the LANE. One self type
+    // implementing both the crate's `Ser` and serde_core's `Ser` (serde_bytes's
+    // `Bytes`: its own `Serialize` and serde's) witnesses both markers; the
+    // leaf-keyed dedupe dropped whichever came second.
+    let file: syn::File = syn::parse_quote! {
+        pub trait Ser { fn req(&self) -> i32; }
+        pub struct Root { pub v: i32 }
+        impl Ser for Root { fn req(&self) -> i32 { self.v } }
+        impl serde_core::Ser for Root { fn req(&self) -> i32 { 2 } }
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![aa_dependency_lane_manifest()]);
+    cg.set_crate_name("consumer");
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("template<> struct impls_Ser<Root> : std::true_type {};"),
+        "the own trait's marker: {out}"
+    );
+    assert!(
+        out.contains("template<> struct ::serde_core::impls_Ser<::consumer::Root> : std::true_type {};"),
+        "the dependency trait's marker for the same self type: {out}"
+    );
+}
+
+#[test]
+fn test_const_generic_impl_marker_and_lane_are_deducible() {
+    // `impl<const N: usize> Tr for [u8; N]`: the marker is a partial
+    // specialization over `N` and the lane's self parameter deduces `N` —
+    // both spelled `std::array<uint8_t, N>`, not through
+    // `rusty::sanitize_array_capacity<N>()`, a non-deduced context (the marker
+    // was skipped outright and the lane function could never be viable).
+    let out = transpile_str_module(
+        r#"
+        pub trait Tr { fn m(&self) -> usize; }
+        impl<const N: usize> Tr for [u8; N] { fn m(&self) -> usize { N } }
+        pub fn f(a: [u8; 4]) -> usize { a.m() }
+        "#,
+        "consumer",
+    );
+    assert!(
+        out.contains("template<size_t N> struct impls_Tr<std::array<uint8_t, N>> : std::true_type {};"),
+        "a deducible marker: {out}"
+    );
+    assert!(
+        out.contains("m(Tr_::impl_::tag, const std::array<uint8_t, N>& self_"),
+        "a deducible lane self parameter: {out}"
+    );
+    assert!(
+        !out.contains("sanitize_array_capacity<N>()>& self_"),
+        "no non-deduced capacity in a lane signature: {out}"
+    );
+}
+
+#[test]
+fn test_local_generic_struct_shadowing_an_outer_parameter_hoists_with_its_impl() {
+    // A fn-local generic struct whose parameter SHADOWS the enclosing fn's
+    // (`struct Wrap<T>(T)` inside `fn f<T>`) is a template of its own: it
+    // hoists to namespace scope with its impl (a member template, illegal in
+    // a local class). The outer-parameter reference check used to read the
+    // shadowing `T` as the outer one and leave both at block scope, where the
+    // impl was skipped outright.
+    let out = transpile_str_module(
+        r#"
+        pub trait Tr { fn m<S>(&self, s: S) -> i32 where S: Copy; }
+        impl Tr for i32 { fn m<S>(&self, s: S) -> i32 where S: Copy { *self } }
+        pub fn f<T: Tr + Copy>(x: T) -> i32 {
+            struct Wrap<T>(T);
+            impl<T: Tr> Tr for Wrap<T> {
+                fn m<S>(&self, s: S) -> i32 where S: Copy { self.0.m(s) }
+            }
+            Wrap(x).m(1u8)
+        }
+        "#,
+        "consumer",
+    );
+    assert!(
+        !out.contains("// Rust-only nested impl block skipped in local scope"),
+        "the shadowing local struct's impl is not skipped: {out}"
+    );
+    assert!(out.contains("struct Wrap"), "the local struct is emitted: {out}");
+}
+
+#[test]
+fn test_ab_lane_body_hoists_its_local_struct_and_its_member_template_impl() {
+    // §3.2.16 (ab): a lane function's body hoists its fn-local structs like a
+    // regular fn body does. serde_bytes's `impl Serialize for Option<T>`
+    // declares `struct AsBytes<T>(T)` + `impl serde::Serialize for AsBytes<T>`
+    // (a member template) in the method body; at block scope the impl was
+    // skipped and the value reached the serializer without a `serialize`.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["Serialize".to_string()],
+        declared_trait_methods: [("Serialize".to_string(), vec!["serialize".to_string()])]
+            .into_iter()
+            .collect(),
+        method_owners: [("serialize".to_string(), vec!["Serialize".to_string()])]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    cg.set_crate_name("bytes_crate");
+    let file: syn::File = syn::parse_quote! {
+        pub mod ser {
+            pub trait Serialize {
+                fn serialize<S>(&self, serializer: S) -> i32 where S: Copy;
+            }
+            impl Serialize for Vec<u8> {
+                fn serialize<S>(&self, serializer: S) -> i32 where S: Copy { 1 }
+            }
+            impl<T> Serialize for Option<T> where T: Serialize {
+                fn serialize<S>(&self, serializer: S) -> i32 where S: Copy {
+                    struct AsBytes<T>(T);
+                    impl<T> serde_core::Serialize for AsBytes<T> where T: Serialize {
+                        fn serialize<S>(&self, serializer: S) -> i32 where S: Copy {
+                            self.0.serialize(serializer)
+                        }
+                    }
+                    match self { Some(b) => AsBytes(b).serialize(serializer), None => 0 }
+                }
+            }
+        }
+    };
+    cg.emit_file(&file, Some("bytes_crate"));
+    let out = cg.into_output();
+    assert!(
+        !out.contains("// Rust-only nested impl block skipped in local scope"),
+        "the lane body's local impl is carried, not skipped: {out}"
+    );
+    assert!(out.contains("struct AsBytes"), "the local struct is hoisted: {out}");
+}
+
+#[test]
+fn test_ab_own_deserialize_sharing_a_dependency_leaf_has_a_lane_and_keyed_calls() {
+    // §3.2.16 (ab): the crate's own `Deserialize` beside serde's carries its
+    // no-receiver `deserialize` in its own lane (the dedicated serde-runtime
+    // lowering would carry serde_core's semantics), and the calls through it
+    // — `T::deserialize(d)`, `Deserialize::deserialize(d)` — are the keyed
+    // no-receiver form `Deserialize_::deserialize(rusty::self_tag<T>{}, d)`.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["Deserialize".to_string()],
+        declared_trait_methods: [("Deserialize".to_string(), vec!["deserialize".to_string()])]
+            .into_iter()
+            .collect(),
+        method_owners: [("deserialize".to_string(), vec!["Deserialize".to_string()])]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    cg.set_crate_name("bytes_crate");
+    let file: syn::File = syn::parse_quote! {
+        pub mod de {
+            pub trait Deserialize: Sized {
+                fn deserialize<D>(deserializer: D) -> Result<Self, i32> where D: Copy;
+            }
+            impl Deserialize for Vec<u8> {
+                fn deserialize<D>(deserializer: D) -> Result<Self, i32> where D: Copy { Ok(Vec::new()) }
+            }
+            impl<T> Deserialize for Option<T> where T: Deserialize {
+                fn deserialize<D>(deserializer: D) -> Result<Self, i32> where D: Copy {
+                    T::deserialize(deserializer).map(Some)
+                }
+            }
+        }
+        pub use de::Deserialize;
+        pub fn deserialize<T, D>(deserializer: D) -> Result<T, i32>
+        where
+            T: Deserialize,
+            D: Copy,
+        {
+            Deserialize::deserialize(deserializer)
+        }
+    };
+    cg.emit_file(&file, Some("bytes_crate"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("Deserialize_::impl_::tag, rusty::self_tag<rusty::Vec<uint8_t>>"),
+        "the own trait's no-receiver impl function is a lane function: {out}"
+    );
+    assert!(
+        out.contains("Deserialize_::deserialize(rusty::self_tag<T>{}, "),
+        "calls through the own trait are the keyed no-receiver form: {out}"
+    );
+    assert!(
+        !out.contains("serde_rt::de::deserialize(rusty::PhantomData<T>"),
+        "never the serde runtime's seeded dispatch for the crate's own trait: {out}"
+    );
+}
+
+#[test]
+fn test_reference_receiver_into_a_trait_method_argument_is_the_pointer() {
+    // serde_test: `impl Serializer for &mut Serializer { fn serialize_some(self,
+    // value: &T) { value.serialize(self) } }` — `self` IS the `&mut Serializer`;
+    // passed to serde's `serialize<S>(…, serializer: S)` it is the POINTER
+    // representation, `this`. `(*this)` deduced `S` as the value: a copy of
+    // the serializer whose token cursor diverged (serde_bytes's Option payload
+    // vanished behind the copy, measured).
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["Serialize".to_string(), "Serializer".to_string()],
+        declared_trait_methods: [
+            ("Serialize".to_string(), vec!["serialize".to_string()]),
+            ("Serializer".to_string(), vec!["serialize_some".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        method_owners: [
+            ("serialize".to_string(), vec!["Serialize".to_string()]),
+            ("serialize_some".to_string(), vec!["Serializer".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    cg.set_crate_name("consumer");
+    let file: syn::File = syn::parse_quote! {
+        pub struct Ser { pub n: i32 }
+        impl serde_core::Serializer for &mut Ser {
+            fn serialize_some<T>(self, value: &T) -> i32 where T: serde_core::Serialize {
+                value.serialize(self)
+            }
+        }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(out.contains("(value, this)"), "the reference receiver is passed as the pointer: {out}");
+    assert!(!out.contains("(value, (*this))"), "never the dereferenced copy: {out}");
 }

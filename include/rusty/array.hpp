@@ -2820,7 +2820,13 @@ decltype(auto) as_mut_slice(Container&& container) {
 namespace detail {
 template<typename Container>
 concept as_u8_slice_compatible =
-    std::is_pointer_v<std::remove_reference_t<Container>>
+    // An Option/Result is never a byte view (its `as_ref()` is the payload
+    // borrow, not a slice accessor): with it admitted, the serde runtime's
+    // `serialize_value` took `Option<&[u8]>` for bytes (serde_bytes'
+    // `#[serde(with)]` fields, measured) and `as_slice` then asked the
+    // Option for `data()`/`size()`.
+    !requires(Container&& container) { std::forward<Container>(container).is_some(); }
+    && (std::is_pointer_v<std::remove_reference_t<Container>>
     || requires { std::variant_size<std::remove_cvref_t<Container>>::value; }
     || requires(Container&& container) { std::forward<Container>(container)._0; }
     || requires(Container&& container) { std::forward<Container>(container).as_slice(); }
@@ -2829,7 +2835,7 @@ concept as_u8_slice_compatible =
     || requires(Container&& container) {
         std::forward<Container>(container).len();
         std::forward<Container>(container).as_ptr();
-    };
+    });
 }
 
 template<typename Container>

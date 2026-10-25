@@ -1888,6 +1888,29 @@ using __ser_result_t = rusty::Result<
     typename std::remove_cv_t<std::remove_reference_t<decltype(
         rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Error>;
 template<typename Serializer, typename BytesLike>
+concept serialize_bytes_compatible =
+    requires(Serializer&& serializer, BytesLike&& bytes) {
+        std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
+    }
+    || requires(Serializer&& serializer, BytesLike&& bytes) {
+        std::forward<Serializer>(serializer).serialize_bytes(
+            rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(
+                std::forward<BytesLike>(bytes))));
+    }
+    || (requires(Serializer&& serializer) {
+        rusty::detail::deref_if_pointer_like(std::forward<Serializer>(serializer)).next_token();
+    } && requires(BytesLike&& bytes) {
+        rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(std::forward<BytesLike>(bytes)));
+    });
+// The forward declaration carries the definition's constraint so the two are
+// ONE template: `serialize_value` calls `::rusty::serde_rt::ser::serialize_bytes`
+// QUALIFIED (no ADL, definition-time lookup), so an unconstrained forward
+// declaration was the only candidate it ever bound — a declaration with no
+// definition, `undefined reference to serialize_bytes<Serializer*, span>`
+// at link (serde_bytes' `#[serde(with)]` wrappers through serde_test's
+// serializer, measured).
+template<typename Serializer, typename BytesLike>
+requires serialize_bytes_compatible<Serializer, BytesLike>
 auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
     -> ::rusty::serde_rt::ser::__ser_result_t<Serializer>;
 struct fallback_error {
@@ -2016,21 +2039,6 @@ auto serialize(Value&& value, Serializer&& serializer)
         std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
 template<typename Serializer, typename BytesLike>
-concept serialize_bytes_compatible =
-    requires(Serializer&& serializer, BytesLike&& bytes) {
-        std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
-    }
-    || requires(Serializer&& serializer, BytesLike&& bytes) {
-        std::forward<Serializer>(serializer).serialize_bytes(
-            rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(
-                std::forward<BytesLike>(bytes))));
-    }
-    || (requires(Serializer&& serializer) {
-        rusty::detail::deref_if_pointer_like(std::forward<Serializer>(serializer)).next_token();
-    } && requires(BytesLike&& bytes) {
-        rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(std::forward<BytesLike>(bytes)));
-    });
-template<typename Serializer, typename BytesLike>
 requires serialize_bytes_compatible<Serializer, BytesLike>
 auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
     -> ::rusty::serde_rt::ser::__ser_result_t<Serializer> {
@@ -2049,7 +2057,11 @@ auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
     } else if constexpr (requires {
         rusty::detail::deref_if_pointer_like(std::forward<Serializer>(serializer)).next_token();
     }) {
-        using SerializerType = std::remove_cv_t<std::remove_reference_t<Serializer>>;
+        // The serializer may arrive as the POINTER representation of a Rust
+        // `&mut S` (a `&mut ser` into a by-value type parameter): its
+        // `Error` is the pointee's.
+        using SerializerType = std::remove_cv_t<std::remove_reference_t<decltype(
+            rusty::detail::deref_if_pointer_like(std::declval<Serializer>()))>>;
         using SerializerError = std::conditional_t<
             requires { typename SerializerType::Error; },
             typename SerializerType::Error,

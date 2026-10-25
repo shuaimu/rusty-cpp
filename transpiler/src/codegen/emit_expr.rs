@@ -6585,6 +6585,62 @@ impl CodeGen {
         Some(self.emit_expr_to_string(&syn::Expr::MethodCall(method_call)))
     }
 
+    /// The seed of `Deserialize::deserialize(d).map(Owner::method)` when the
+    /// mapper is a RECEIVER method (`ByteBuf::into_vec`, `Vec::into_boxed_slice`):
+    /// Rust infers the deserialized type from the method's `self` — the owner.
+    /// (The typed-argument lookup has no entry for `self`; without this the
+    /// call fell to the return-type hint, `Self`, and the crate's own
+    /// `Deserialize for Vec<u8>` deserialized a Vec by deserializing a Vec.)
+    /// A runtime `Vec::into_boxed_slice` takes its element from the mapped-to
+    /// `Box<[T]>`, or through the lane body's `Self` alias.
+    fn deserialize_map_mapper_receiver_seed_cpp(
+        &self,
+        mapper: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let syn::Expr::Path(p) = self.peel_paren_group_expr(mapper) else {
+            return None;
+        };
+        if p.qself.is_some()
+            || p.path.segments.len() != 2
+            || !p.path.segments.iter().all(|seg| seg.arguments.is_none())
+        {
+            return None;
+        }
+        let owner = p.path.segments[0].ident.to_string();
+        let method = p.path.segments[1].ident.to_string();
+        if owner == "Vec" && method == "into_boxed_slice" {
+            let call_expected = expected_ty.or(self.current_return_type_hint());
+            let target = self.expected_result_type_arg(call_expected, 0)?;
+            let target = self.peel_paren_group_type(target);
+            if let syn::Type::Path(tp) = target
+                && tp.qself.is_none()
+                && let Some(last) = tp.path.segments.last()
+                && last.ident == "Box"
+                && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+                && let Some(syn::GenericArgument::Type(syn::Type::Slice(slice))) = args.args.first()
+            {
+                return Some(format!("rusty::Vec<{}>", self.map_type(&slice.elem)));
+            }
+            if matches!(target, syn::Type::Path(tp) if tp.qself.is_none() && tp.path.is_ident("Self")) {
+                return Some(
+                    "rusty::Vec<typename std::remove_cvref_t<decltype(*std::declval<Self&>())>::value_type>"
+                        .to_string(),
+                );
+            }
+            return None;
+        }
+        if self.lookup_owner_method_has_receiver(&owner, &method) == Some(true) {
+            let owner_ty: syn::Type = syn::parse_str(&owner).ok()?;
+            let cpp = self.map_type(&owner_ty);
+            if cpp == "auto" || cpp.contains("/* TODO") || type_string_has_auto_placeholder(&cpp) {
+                return None;
+            }
+            return Some(cpp);
+        }
+        None
+    }
+
     pub(super) fn try_emit_deserialize_map_seed_rewrite(
         &self,
         mc: &syn::ExprMethodCall,
@@ -6609,8 +6665,10 @@ impl CodeGen {
         {
             return None;
         }
-        let seed_ty = self.lookup_function_arg_expected_type(&mc.args[0], 0)?;
-        let seed_cpp = self.map_type(seed_ty);
+        let seed_cpp = match self.lookup_function_arg_expected_type(&mc.args[0], 0) {
+            Some(seed_ty) => self.map_type(seed_ty),
+            None => self.deserialize_map_mapper_receiver_seed_cpp(&mc.args[0], expected_ty)?,
+        };
         if seed_cpp == "auto"
             || seed_cpp.contains("/* TODO")
             || type_string_has_auto_placeholder(&seed_cpp)
@@ -6621,9 +6679,18 @@ impl CodeGen {
         let mapper = self
             .try_emit_map_callable_arg_with_expected(&mc.args[0], expected_ty)
             .unwrap_or_else(|| self.emit_expr_maybe_move(&mc.args[0]));
+        let owner: String = func_path_expr
+            .path
+            .segments
+            .iter()
+            .take(func_path_expr.path.segments.len().saturating_sub(1))
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
         Some(format!(
-            "(::rusty::serde_rt::de::deserialize(rusty::PhantomData<{}>{{}}, {})).map({})",
-            seed_cpp, deserializer, mapper
+            "({}).map({})",
+            self.emit_seeded_deserialize_call(&owner, &seed_cpp, &deserializer),
+            mapper
         ))
     }
 
@@ -6633,6 +6700,60 @@ impl CodeGen {
     /// static (`::serde_core::de::ErrorRuntimeHelper::invalid_value<Owner>`).
     /// The if-constexpr keeps overridden statics (invalid_type) on the
     /// member without needing local-override bookkeeping.
+    /// The qualified-self form of `try_emit_dep_trait_static_default_call`:
+    /// `<Q as Tr>::m(args)` with `Tr` a dependency trait declaring `m` WITH a
+    /// default body (manifest `trait_default_methods`) and its module path. The
+    /// owner `Q` is any type — in serde's derive a type-parameter projection
+    /// (`__A::Error`), spelled as the dependent type it maps to (the
+    /// `typename` stays: the dispatch binds it as a template default argument).
+    fn try_emit_dep_trait_qself_default_call(&self, call: &syn::ExprCall) -> Option<String> {
+        let syn::Expr::Path(func_path) = call.func.as_ref() else {
+            return None;
+        };
+        let segs = &func_path.path.segments;
+        if segs.len() < 2 {
+            return None;
+        }
+        let method = segs.last()?.ident.to_string();
+        // `<Q as Tr>::m` names the owner `Q`; the trait path `..::Tr::m` (serde's
+        // derive: `de::Error::invalid_length(len, &exp)`) leaves the owner to
+        // the position — the error type of the function's declared `Result`.
+        let (trait_leaf, owner_cpp) = if let Some(q) = func_path.qself.as_ref() {
+            if q.position == 0 || segs.len() != q.position + 1 {
+                return None;
+            }
+            (
+                segs.get(q.position - 1)?.ident.to_string(),
+                Some(self.map_type(&q.ty)),
+            )
+        } else {
+            (segs.get(segs.len() - 2)?.ident.to_string(), None)
+        };
+        let declares_default = self.dependency_ufcs_trait_manifests.iter().any(|m| {
+            m.trait_default_methods
+                .get(&trait_leaf)
+                .is_some_and(|methods| methods.iter().any(|mm| mm == &method))
+                && m.declared_trait_modules.contains_key(&trait_leaf)
+        });
+        if !declares_default {
+            return None;
+        }
+        let owner_cpp = match owner_cpp {
+            Some(owner) => owner,
+            None => {
+                let segments: Vec<String> = segs.iter().map(|s| s.ident.to_string()).collect();
+                self.resolve_trait_static_call_owner_from_return_hint(&trait_leaf)
+                    .or_else(|| self.resolve_trait_static_call_owner_in_current_context(&segments))?
+            }
+        };
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|arg| self.emit_expr_maybe_move(arg))
+            .collect();
+        self.dep_trait_static_dispatch_call(&owner_cpp, &method, &args.join(", "))
+    }
+
     fn try_emit_dep_trait_static_default_call(&self, call: &syn::ExprCall) -> Option<String> {
         let syn::Expr::Path(func_path) = call.func.as_ref() else {
             return None;
@@ -7014,6 +7135,116 @@ impl CodeGen {
     /// receiver's bounds (or their supertraits), that declares `method` —
     /// `None` for any other receiver, for a `cpp_trait_member_dispatch` owner
     /// (members only), and when no bound or more than one declares it.
+    /// §3.2.16 (ab): a trait path at a call site names the CRATE's own trait
+    /// when the crate declares a trait of that leaf and the written path
+    /// resolves to it — not an explicit dependency path (`serde::Serialize`).
+    /// serde_bytes declares its own `Serialize`/`Deserialize` beside serde's;
+    /// its impls force the bytes form, so a call through them takes the own
+    /// lane, never the serde runtime's dispatch (which carries serde_core's
+    /// semantics — a `Vec<u8>` as a sequence).
+    pub(super) fn trait_owner_path_is_crate_declared(&self, owner_path: &str) -> bool {
+        let leaf = owner_path.rsplit("::").next().unwrap_or(owner_path);
+        if leaf.is_empty() || !self.ufcs_declared_trait_names.contains(leaf) {
+            return false;
+        }
+        // Resolve the WRITTEN path through the module's imports: a bare
+        // `Deserialize` in serde_bytes's bytes.rs is serde's (`use serde::de::
+        // Deserialize`), the bare `Deserialize` in de.rs the crate's own. A
+        // lane body is emitted module-relative without the module stack —
+        // its impl's module stands in.
+        let Ok(path) = syn::parse_str::<syn::Path>(owner_path) else {
+            return false;
+        };
+        let module_path: &[String] =
+            if self.module_stack.is_empty() && !self.ufcs_impl_module_path.is_empty() {
+                &self.ufcs_impl_module_path
+            } else {
+                &self.module_stack
+            };
+        let key = self.resolve_trait_scoped_key_for_impl(&path, module_path);
+        self.trait_declared_paths.contains(&key)
+    }
+
+    /// The owner path of a `Trait::method` function path (`serde::Serialize`
+    /// of `serde::Serialize::serialize`); empty for a bare name.
+    pub(super) fn function_path_owner(function_path: &str) -> &str {
+        function_path.rsplit_once("::").map(|(owner, _)| owner).unwrap_or("")
+    }
+
+    /// The method-syntax twin of `trait_owner_path_is_crate_declared`: a
+    /// type-parameter receiver whose bound declaring `method` is the crate's
+    /// own trait of this leaf (`T: Serialize` with the crate's `Serialize`).
+    pub(super) fn method_receiver_is_bound_by_crate_declared_trait(
+        &self,
+        receiver: &syn::Expr,
+        trait_leaf: &str,
+        method: &str,
+    ) -> bool {
+        self.ufcs_declared_trait_names.contains(trait_leaf)
+            && self
+                .bound_owner_for_type_param_receiver(receiver, method)
+                .is_some_and(|owner| {
+                    owner.rsplit("::").next().unwrap_or(&owner) == trait_leaf
+                        && self.trait_owner_path_is_crate_declared(&owner)
+                })
+    }
+
+    /// A type parameter in scope bounded by the crate's own trait of this
+    /// leaf (`T: Deserialize<'de>` with the crate's `Deserialize`), for the
+    /// associated-call form `T::deserialize(d)`.
+    pub(super) fn type_param_is_bound_by_crate_declared_trait(
+        &self,
+        type_param: &str,
+        trait_leaf: &str,
+    ) -> bool {
+        self.ufcs_declared_trait_names.contains(trait_leaf)
+            && self.trait_bound_type_param_scopes.iter().rev().any(|scope| {
+                scope.iter().any(|(bound_trait, param)| {
+                    param == type_param
+                        && bound_trait.rsplit("::").next().unwrap_or(bound_trait) == trait_leaf
+                        && self.trait_owner_path_is_crate_declared(bound_trait)
+                })
+            })
+    }
+
+    /// The seeded `Deserialize::deserialize(d)` call (§3.2.16 (ab)): through
+    /// the crate's OWN lane when the named trait is the crate's —
+    /// `Deserialize_::deserialize(rusty::self_tag<Seed>{}, d)`, the keyed
+    /// no-receiver form — else the serde runtime's dispatch,
+    /// `::rusty::serde_rt::de::deserialize(PhantomData<Seed>{}, d)`. `owner`
+    /// is the written trait path (`Deserialize`, `serde::Deserialize`) or the
+    /// type parameter of a `T::deserialize(d)` call.
+    pub(super) fn emit_seeded_deserialize_call(
+        &self,
+        owner: &str,
+        seed_cpp: &str,
+        deserializer: &str,
+    ) -> String {
+        // The own lane carries a no-receiver `deserialize` only beside a
+        // dependency's same-leaf trait (`own_lane_carries_dedicated_lowerings`);
+        // a crate-local `Deserialize` with no such dependency keeps the shipped
+        // seeded dispatch, whose `Target::deserialize` rung reaches the member.
+        let own = self.dependency_declares_trait("Deserialize")
+            && if self.is_type_param_in_scope(owner) {
+                self.type_param_is_bound_by_crate_declared_trait(owner, "Deserialize")
+            } else {
+                self.trait_owner_path_is_crate_declared(owner)
+            };
+        if own {
+            format!(
+                "{}::deserialize(rusty::self_tag<{}>{{}}, {})",
+                self.ufcs_trait_namespace("Deserialize"),
+                seed_cpp,
+                deserializer
+            )
+        } else {
+            format!(
+                "::rusty::serde_rt::de::deserialize(rusty::PhantomData<{}>{{}}, {})",
+                seed_cpp, deserializer
+            )
+        }
+    }
+
     pub(super) fn bound_owner_for_type_param_receiver(
         &self,
         receiver: &syn::Expr,
@@ -7233,6 +7464,61 @@ impl CodeGen {
             None,
             std::slice::from_ref(&trailing),
         ))
+    }
+
+    /// See the argument loop of `emit_method_call_expr_to_string`: a bare
+    /// `self` whose binding is a reference, handed to a crate or dependency
+    /// TRAIT method whose parameter is not declared a reference.
+    fn method_call_arg_is_reference_receiver_into_trait_method(
+        &self,
+        method_name: &str,
+        idx: usize,
+        arg: &syn::Expr,
+    ) -> bool {
+        if !matches!(
+            self.peel_paren_group_expr(arg),
+            syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("self")
+        ) || self.current_self_path_override().is_some()
+        {
+            return false;
+        }
+        // The receiver binding is a reference, or the impl's self type is one
+        // (`impl Serializer for &mut Serializer { fn serialize_some(self, ..) }`:
+        // a by-value `self` of a reference self type IS the reference).
+        let binding_is_reference = self
+            .lookup_local_binding_type("self")
+            .is_some_and(|ty| matches!(self.peel_paren_group_type(&ty), syn::Type::Reference(_)));
+        let impl_self_is_reference = self
+            .current_impl_method_self_tys
+            .last()
+            .and_then(|ty| ty.as_ref())
+            .is_some_and(|ty| matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_)));
+        if !(binding_is_reference || impl_self_is_reference) {
+            return false;
+        }
+        if !self.method_name_is_trait_method(method_name) {
+            return false;
+        }
+        if matches!(
+            self.lookup_method_arg_pass_style(method_name, idx),
+            Some(ArgPassStyle::Reference)
+        ) {
+            return false;
+        }
+        !self
+            .lookup_method_arg_expected_type(method_name, idx)
+            .is_some_and(|ty| matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_)))
+    }
+
+    /// The method is declared by a crate trait or by a dependency's trait.
+    fn method_name_is_trait_method(&self, method: &str) -> bool {
+        self.ufcs_method_trait_owners.contains_key(method)
+            || self.dependency_ufcs_trait_manifests.iter().any(|m| {
+                m.method_owners.contains_key(method)
+                    || m.declared_trait_methods
+                        .values()
+                        .any(|methods| methods.iter().any(|x| x == method))
+            })
     }
 
     pub(super) fn emit_method_call_expr_to_string(
@@ -7470,8 +7756,39 @@ impl CodeGen {
                     self.bound_owner_for_type_param_receiver(&mc.receiver, &method_name)
             {
                 let receiver = self.emit_expr_to_string(&mc.receiver);
-                let args: Vec<String> =
-                    mc.args.iter().map(|a| self.emit_expr_to_string(a)).collect();
+                // A `&mut x` argument is the POINTER representation of the Rust
+                // reference: the trait method's parameter may be a by-value type
+                // parameter (`serialize<S: Serializer>(&self, serializer: S)`),
+                // which deduced from the dereferenced lvalue would COPY —
+                // serde_test's compound `value.serialize(&mut **self)` copied
+                // the serializer. The ladder's deref rungs reach a reference
+                // parameter through the pointer just the same.
+                // A bare `self` that IS a reference (a reference receiver, or
+                // a by-value `self` of a reference self type — serde_test's
+                // `impl Serializer for &mut Serializer { fn serialize_some(self,
+                // value) { value.serialize(self) } }`) is the pointer too: `this`.
+                let args: Vec<String> = mc
+                    .args
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, a)| match self.peel_paren_group_expr(a) {
+                        syn::Expr::Reference(r)
+                            if r.mutability.is_some()
+                                && self.is_stable_reference_lvalue_expr(&r.expr) =>
+                        {
+                            self.emit_explicit_reference_call_arg(r, None)
+                        }
+                        _ if self.method_call_arg_is_reference_receiver_into_trait_method(
+                            &method_name,
+                            idx,
+                            a,
+                        ) =>
+                        {
+                            "this".to_string()
+                        }
+                        _ => self.emit_expr_to_string(a),
+                    })
+                    .collect();
                 let escaped = escape_cpp_keyword_in_member_position(&method_name);
                 let callee = format!("{}::{}", self.ufcs_trait_namespace(&owner), escaped);
                 let recv_ty = self.infer_simple_expr_type(&mc.receiver);
@@ -7528,7 +7845,18 @@ impl CodeGen {
                     let args: Vec<String> = mc
                         .args
                         .iter()
-                        .map(|a| {
+                        .enumerate()
+                        .map(|(arg_idx, a)| {
+                            // A bare `self` that IS a reference into a trait
+                            // method's parameter is the pointer, `this` (see
+                            // the bound-owner route above).
+                            if self.method_call_arg_is_reference_receiver_into_trait_method(
+                                &method_name,
+                                arg_idx,
+                                a,
+                            ) {
+                                return "this".to_string();
+                            }
                             if !seed_positional_params.is_empty()
                                 && Self::expr_is_bare_phantom_data(a)
                             {
@@ -7542,6 +7870,14 @@ impl CodeGen {
                                 {
                                     return self.emit_expr_to_string_with_expected(a, Some(&pty));
                                 }
+                            }
+                            // A `&mut x` argument is the pointer representation of
+                            // the Rust reference (see the bound-owner route above).
+                            if let syn::Expr::Reference(r) = self.peel_paren_group_expr(a)
+                                && r.mutability.is_some()
+                                && self.is_stable_reference_lvalue_expr(&r.expr)
+                            {
+                                return self.emit_explicit_reference_call_arg(r, None);
                             }
                             self.emit_expr_to_string(a)
                         })
@@ -10226,6 +10562,19 @@ impl CodeGen {
         }
         let mut args = Vec::with_capacity(mc.args.len());
         for (idx, arg) in mc.args.iter().enumerate() {
+            // A reference receiver (`&self` / `&mut self`) passed to a TRAIT
+            // method (`value.serialize(self)` in serde_test's `serialize_some`)
+            // is the POINTER representation of the Rust reference, `this`:
+            // the callee's by-value type parameter deduces the pointer and
+            // the ladders dereference it. `(*this)` deduced the VALUE — a
+            // copy of the serializer, whose token cursor then diverged from
+            // the caller's (measured: the payload of serde_bytes's `Option`
+            // field vanished behind the copy). A reference parameter, or an
+            // inherent method, keeps `(*this)`.
+            if self.method_call_arg_is_reference_receiver_into_trait_method(&method_name, idx, arg) {
+                args.push("this".to_string());
+                continue;
+            }
             let style = self
                 .lookup_method_arg_pass_style(&method_name, idx)
                 .or_else(|| {
@@ -10795,6 +11144,28 @@ impl CodeGen {
             }
             if has_receiver_write || has_receiver_write_all {
                 return format!("rusty::io::write_fmt({}, {})", receiver, args[0]);
+            }
+            // `write!(&mut s, ..)` with `s: String` is `fmt::Write`, not
+            // `io::Write`: a String has no io write, so the io dispatcher
+            // answered `Err(Unsupported)` and serde_test's `write!(&mut
+            // buffer, ..).unwrap()` (the assert_next_token field formatter)
+            // panicked at runtime. The module-level `rusty::write_fmt`
+            // reaches `String::write_str`.
+            if let syn::Expr::Reference(r) = self.peel_paren_group_expr(&mc.receiver)
+                && self
+                    .infer_simple_expr_type(&r.expr)
+                    .as_ref()
+                    .map(|ty| self.peel_reference_paren_group_type(ty))
+                    .is_some_and(|ty| {
+                        matches!(ty, syn::Type::Path(tp)
+                            if tp.qself.is_none()
+                                && tp.path.segments.last().is_some_and(|seg| {
+                                    seg.ident == "String" && seg.arguments.is_none()
+                                }))
+                    })
+            {
+                let inner = self.emit_expr_to_string(&r.expr);
+                return format!("rusty::write_fmt({}, {})", inner, args[0]);
             }
             if matches!(
                 self.peel_paren_group_expr(&mc.receiver),
@@ -12836,7 +13207,14 @@ impl CodeGen {
                 receiver, receiver, arg
             );
         }
-        if method_name == "serialize" && args.len() == 1 {
+        if method_name == "serialize"
+            && args.len() == 1
+            && !self.method_receiver_is_bound_by_crate_declared_trait(
+                &mc.receiver,
+                "Serialize",
+                "serialize",
+            )
+        {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return self.emit_serialize_dispatch_call(&receiver, &args[0]);
         }
@@ -13180,6 +13558,13 @@ impl CodeGen {
         if owner_seg.ident != "Error" {
             return None;
         }
+        // A method with a DEDICATED lowering (`invalid_length` →
+        // `rusty::error::invalid_length<Owner>(len, expected)`) keeps it: the
+        // projection owner now maps (`std::remove_pointer_t<std::remove_cvref_t<V>>::Error`,
+        // pointer-robust), so this static spelling would pre-empt the route.
+        if Self::nonvtable_fn_has_dedicated_lowering(&method_seg.ident.to_string()) {
+            return None;
+        }
         if !matches!(owner_seg.arguments, syn::PathArguments::None)
             || !matches!(method_seg.arguments, syn::PathArguments::None)
         {
@@ -13450,6 +13835,35 @@ impl CodeGen {
         // Known owner: the runtime core wrappers, or a locally-declared type.
         let owner_is_known = matches!(owner.as_str(), "Option" | "Result" | "Box")
             || self.simple_ident_is_known_type_name(&owner);
+        // A runtime COLLECTION owner (`.map(Vec::into_boxed_slice)`,
+        // serde_bytes's `Box<[u8]>` impl): its instance methods forward as a
+        // member call on the mapped value — the bare `rusty::Vec::m` spelling
+        // names a class template without arguments. Its constructors stay
+        // on the shipped route (a member call would look them up wrongly).
+        let owner_is_runtime_collection = matches!(
+            owner.as_str(),
+            "Vec" | "String" | "VecDeque" | "BTreeMap" | "BTreeSet" | "HashMap" | "HashSet"
+                | "Rc" | "Arc" | "Cow"
+        );
+        if owner_is_runtime_collection
+            && !owner_is_known
+            && !matches!(
+                method.as_str(),
+                "new" | "from" | "from_iter" | "with_capacity" | "default" | "from_utf8"
+                    | "from_utf8_lossy" | "from_str" | "from_raw_parts" | "try_from"
+            )
+        {
+            // A method reference the dedicated lowering already wraps
+            // (`String::as_str`) keeps that shape.
+            if let Some(lambda) = self.try_emit_method_reference_lambda(&path_expr.path) {
+                return Some(lambda);
+            }
+            let escaped_method = escape_cpp_keyword_in_member_position(&method);
+            return Some(format!(
+                "[](auto&& _v) -> decltype(auto) {{ return rusty::detail::deref_if_pointer_like(std::forward<decltype(_v)>(_v)).{}(); }}",
+                escaped_method
+            ));
+        }
         if !owner_is_known {
             return None;
         }
@@ -14502,6 +14916,20 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if let Some(mapped) = self.try_emit_standard_future_pending(expr, expected_ty) { return mapped; }
+        // A reference self type's `Self` is the referent POINTER (paths.rs
+        // `reference_self_value_type`): `self` handed out where that pointer is
+        // expected (`return self`, `Ok(self)`, a pointer field) is `this`, not
+        // a copy of `*this`.
+        if let Some(expected) = expected_ty
+            && matches!(
+                self.peel_paren_group_expr(expr),
+                syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("self")
+            )
+            && self.current_self_path_override().is_none()
+            && self.map_type(expected).trim_end().ends_with('*')
+        {
+            return "this".to_string();
+        }
         // A value-position `const { EXPR }` (a struct field init, a `let`
         // initializer) IS its tail expression, evaluated at compile time;
         // only a fence-shaped block (a macro tail such as `assert!`) has
@@ -15276,6 +15704,9 @@ impl CodeGen {
                 // Step 8: `<X as Tr>::NAME` keeps its `qself` on this route too.
                 if let Some(assoc_const) = self.try_emit_trait_assoc_const_qself_expr(path) {
                     return assoc_const;
+                }
+                if let Some(spelled) = self.try_emit_dependency_qself_static_path(path) {
+                    return spelled;
                 }
                 if let Some(clone_expr) =
                     self.try_emit_self_path_clone_for_expected_value(&path.path, expected_ty)
@@ -16210,6 +16641,24 @@ impl CodeGen {
         let owner_seg = func_path.segments.iter().nth_back(1)?;
         let expected_last = self.expected_type_last_ident(expected_ty)?;
         if owner_seg.ident != expected_last.as_str() {
+            return None;
+        }
+        // The expected type's spelling is the OWNER only for a class template
+        // instantiation (`Owner<Args>::new()`), never for a type-parameter
+        // PROJECTION (`V::Error`, now mapped pointer-robustly WITH angle
+        // brackets, `std::remove_pointer_t<std::remove_cvref_t<V>>::Error`),
+        // and never for a method with a dedicated lowering (`invalid_length`
+        // → `rusty::error::invalid_length<Owner>(..)`).
+        if Self::nonvtable_fn_has_dedicated_lowering(
+            &func_path.segments.last()?.ident.to_string(),
+        ) {
+            return None;
+        }
+        if let syn::Type::Path(expected_tp) = self.peel_reference_paren_group_type(expected_ty)
+            && expected_tp.qself.is_none()
+            && expected_tp.path.segments.len() == 2
+            && self.is_type_param_in_scope(&expected_tp.path.segments[0].ident.to_string())
+        {
             return None;
         }
         // A contextual return type may have lost its module qualification
@@ -19494,6 +19943,17 @@ impl CodeGen {
     ) -> String {
         if let Some(mapped) = self.try_emit_standard_future_call(call, expected_ty) { return mapped; }
         let emitted = self.emit_call_expr_to_string_lowered(call, expected_ty);
+        // A call is an EXPRESSION: whichever route spelled the callee, a
+        // qualified-self owner mapped as a dependent TYPE (`<__A::Error as
+        // de::Error>::duplicate_field("f")` → `typename std::remove_pointer_t<
+        // ..>::Error::duplicate_field("f")`, the type-parameter projection's
+        // pointer-robust spelling) must not carry the type-only `typename`:
+        // clang read the whole callee as a type ("no type named
+        // 'duplicate_field'"; serde's derive, 51 sites in one test target).
+        let emitted = emitted
+            .strip_prefix("typename ")
+            .map(|rest| rest.trim_start().to_string())
+            .unwrap_or(emitted);
         // Book §3.2.2 rule 7: `Box::new(r)` into `Box<dyn Tr>` with `r: &T`
         // boxes the REFERENCE (`impl Tr for &T`). Every lowering path funnels
         // through here as `rusty::Box<Tr>::new_(…)`; spell the owning forwarder
@@ -19566,6 +20026,16 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // `<Q as DepTr>::m(args)` where `m` is a DEFAULT method of a dependency
+        // trait (serde's derive: `<__A::Error as de::Error>::duplicate_field(
+        // "f")`): the owner may override it (a member) or rely on the trait's
+        // default, which lives in the dependency's exported RuntimeHelper —
+        // the same member-vs-helper dispatch the bare `Owner::m(args)` form
+        // takes. Tried first: later routes spelled a plain `Owner::m(args)`,
+        // and the default is no member of serde_test's `Error`.
+        if let Some(emitted) = self.try_emit_dep_trait_qself_default_call(call) {
+            return emitted;
+        }
         // C6 (checkpoint contract 6) — boxed callable coercion. This must
         // precede every owner-recovery path below: those infer `Box::new`'s
         // owner from the ARGUMENT (a closure → `std::function<…>`) and emit
@@ -21094,7 +21564,12 @@ impl CodeGen {
                         _ => self.emit_expr_maybe_move(a),
                     })
                     .collect();
-                if ufcs.method_name == "serialize" && args.len() == 1 {
+                if ufcs.method_name == "serialize"
+                    && args.len() == 1
+                    && !self.trait_owner_path_is_crate_declared(Self::function_path_owner(
+                        &ufcs.function_path,
+                    ))
+                {
                     return self.emit_serialize_dispatch_call(&receiver, &args[0]);
                 }
                 if ufcs.method_name == "deserialize_any" && args.len() == 1 {
@@ -21273,7 +21748,11 @@ impl CodeGen {
                     .to_string();
                 let owner_is_serialize_trait =
                     owner_tail == "Serialize" || owner_path.ends_with("::Serialize");
-                if owner_is_serialize_trait && method_name == "serialize" && call.args.len() == 2 {
+                if owner_is_serialize_trait
+                    && method_name == "serialize"
+                    && call.args.len() == 2
+                    && !self.trait_owner_path_is_crate_declared(&owner_path)
+                {
                     let value = self.emit_expr_to_string(&call.args[0]);
                     let serializer = self.emit_expr_maybe_move(&call.args[1]);
                     return self.emit_serialize_dispatch_call(&value, &serializer);
@@ -22043,6 +22522,7 @@ impl CodeGen {
             || func == "Serialize::serialize"
             || func.ends_with("::Serialize::serialize"))
             && call.args.len() == 2
+            && !self.trait_owner_path_is_crate_declared(Self::function_path_owner(&func))
         {
             let value = self.emit_expr_maybe_move(&call.args[0]);
             let serializer = self.emit_expr_maybe_move(&call.args[1]);
@@ -22098,10 +22578,7 @@ impl CodeGen {
                 && !type_string_has_auto_placeholder(&ok_cpp)
             {
                 let deserializer = self.emit_deserializer_call_arg(&call.args[0]);
-                return format!(
-                    "::rusty::serde_rt::de::deserialize(rusty::PhantomData<{}>{{}}, {})",
-                    ok_cpp, deserializer
-                );
+                return self.emit_seeded_deserialize_call(&func_owner_path, &ok_cpp, &deserializer);
             }
         }
         // `V::default()` on a TYPE-PARAM owner: a c-like enum-class V has no
@@ -22184,7 +22661,9 @@ impl CodeGen {
             && call.args.len() == 1
             && !func_owner_path.is_empty()
         {
-            let owner = func_owner_path.clone();
+            // The owner is used as a nested-name-specifier of a static call —
+            // an expression, never prefixed `typename`.
+            let owner = func_owner_path.trim_start_matches("typename ").trim().to_string();
             let field_arg = self.emit_expr_maybe_move(&call.args[0]);
             return format!(
                 "([&]() -> decltype(auto) {{ auto&& __field = {}; if constexpr (requires {{ {}::duplicate_field(__field); }}) {{ return {}::duplicate_field(__field); }} else {{ return {}::custom(std::format(\"duplicate field `{{0}}`\", rusty::to_string(__field))); }} }})()",
@@ -22195,7 +22674,7 @@ impl CodeGen {
             && call.args.len() == 1
             && !func_owner_path.is_empty()
         {
-            let owner = func_owner_path.clone();
+            let owner = func_owner_path.trim_start_matches("typename ").trim().to_string();
             let field_arg = self.emit_expr_maybe_move(&call.args[0]);
             return format!(
                 "([&]() -> decltype(auto) {{ auto&& __field = {}; if constexpr (requires {{ {}::missing_field(__field); }}) {{ return {}::missing_field(__field); }} else {{ return {}::custom(std::format(\"missing field `{{0}}`\", rusty::to_string(__field))); }} }})()",
@@ -23497,6 +23976,19 @@ impl CodeGen {
             };
             let arg = self.maybe_move_owned_pattern_binding_value(&call.args[0], arg);
             let arg = self.rewrite_current_assoc_error_paths(&arg);
+            // A reference self type's `Self` is the referent pointer
+            // (paths.rs `reference_self_value_type`): `Ok(self)` in such an
+            // impl hands out `this`, not a copy of `*this`.
+            let arg = if ok_expected_ty
+                .is_some_and(|ty| self.map_type(ty).trim_end().ends_with('*'))
+                && matches!(
+                    self.peel_paren_group_expr(&call.args[0]),
+                    syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("self")
+                ) {
+                "this".to_string()
+            } else {
+                arg
+            };
             if let Some(expected) = ctor_expected_hint {
                 let expected_cpp = self.rewrite_current_assoc_error_paths(&self.map_type(expected));
                 if expected_cpp.starts_with("rusty::Result<")
@@ -23674,7 +24166,11 @@ impl CodeGen {
                 .unwrap_or_default();
             let owner_is_serialize_trait =
                 owner_tail == "Serialize" || owner_path.ends_with("::Serialize");
-            if owner_is_serialize_trait && method_name == "serialize" && call.args.len() == 2 {
+            if owner_is_serialize_trait
+                && method_name == "serialize"
+                && call.args.len() == 2
+                && !self.trait_owner_path_is_crate_declared(&owner_path)
+            {
                 let value = self.emit_expr_to_string(&call.args[0]);
                 let serializer = self.emit_expr_maybe_move(&call.args[1]);
                 return self.emit_serialize_dispatch_call(&value, &serializer);
@@ -24185,6 +24681,15 @@ impl CodeGen {
         if guarded_callable {
             return format!("(*{})({})", func, args.join(", "));
         }
+        // A callee path is an EXPRESSION: a qualified-self owner mapped as a
+        // dependent type (`<__A::Error as de::Error>::duplicate_field`, the
+        // owner spelled `typename std::remove_pointer_t<..>::Error` by the
+        // projection rule) must not carry the type-only `typename` — clang reads
+        // the whole path as a type ("no type named 'duplicate_field'").
+        let func = func
+            .strip_prefix("typename ")
+            .map(|rest| rest.trim_start().to_string())
+            .unwrap_or(func);
         format!("{}({})", func, args.join(", "))
     }
 
@@ -25247,10 +25752,7 @@ impl CodeGen {
         {
             let receiver = self.emit_deserializer_call_arg(call.args.first()?);
             let seed_cpp = escape_cpp_keyword(&owner_leaf);
-            return Some(format!(
-                "::rusty::serde_rt::de::deserialize(rusty::PhantomData<{}>{{}}, {})",
-                seed_cpp, receiver
-            ));
+            return Some(self.emit_seeded_deserialize_call(&owner_leaf, &seed_cpp, &receiver));
         }
         if method_name == "deserialize"
             && call.args.len() == 1
@@ -25259,10 +25761,7 @@ impl CodeGen {
         {
             let receiver = self.emit_deserializer_call_arg(call.args.first()?);
             let seed_cpp = escape_cpp_keyword(&seed);
-            return Some(format!(
-                "::rusty::serde_rt::de::deserialize(rusty::PhantomData<{}>{{}}, {})",
-                seed_cpp, receiver
-            ));
+            return Some(self.emit_seeded_deserialize_call(&owner_path, &seed_cpp, &receiver));
         }
         if is_runtime_helper_method && receiver_is_self_path {
             return None;
@@ -25471,7 +25970,10 @@ impl CodeGen {
                 receiver, place
             ));
         }
-        if method_name == "serialize" && call.args.len() == 2 {
+        if method_name == "serialize"
+            && call.args.len() == 2
+            && !self.trait_owner_path_is_crate_declared(&owner_path)
+        {
             let value = emit_receiver_arg(call.args.first()?);
             let serializer = self.emit_expr_maybe_move(call.args.iter().nth(1)?);
             return Some(self.emit_serialize_dispatch_call(&value, &serializer));
@@ -25485,10 +25987,18 @@ impl CodeGen {
         // runtime-helper (assoc-const) traits have no `<Trait>_::m`, so
         // qualifying them is a HARD error; fall through to the member call.
         // Placed AFTER the serde/Display/Debug special-cases above.
+        // A DEPENDENCY trait takes the same ladder: its dispatcher namespace
+        // names every declared method (the crate wrap requalifies the bare
+        // `<Tr>_` spelling to the dependency's), and the ladder's deref rungs
+        // reach a receiver that is the POINTER representation of a Rust
+        // reference — serde's derive binds `let mut state =
+        // serializer.serialize_struct(..)?` to a reference self type's `Self`
+        // (serde_test), where the raw member call spelled `(&state)->m(..)`.
         if self
             .ufcs_method_trait_owners
             .get(&method_name)
             .is_some_and(|owners| owners.contains(&owner_leaf))
+            || self.dependency_declares_trait(&owner_leaf)
         {
             let recv = match self.peel_paren_group_expr(call.args.first()?) {
                 syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
@@ -25766,6 +26276,43 @@ impl CodeGen {
         Some(format!("{}::new_({})", expected_cpp_ty, args.join(", ")))
     }
 
+    /// `<X as Tr>::f` on a DEPENDENCY trait (no local Traits map): the owner
+    /// is `X`, spelled as the dependent type it maps to. Dropping the qself
+    /// spelled the TRAIT as the owner (`Err::duplicate_field`, measured on
+    /// serde's derive against serde_core's `de::Error`). A callee path is an
+    /// expression, so no type-only `typename`. None for a crate trait's
+    /// non-vtable item (its Traits-map route) and for anything else.
+    fn try_emit_dependency_qself_static_path(&self, path: &syn::ExprPath) -> Option<String> {
+        let q = path.qself.as_ref()?;
+        if q.position == 0 || path.path.segments.len() != q.position + 1 {
+            return None;
+        }
+        let trait_name = path.path.segments.get(q.position - 1)?.ident.to_string();
+        let item = path.path.segments.last()?.ident.to_string();
+        if !self.dependency_declares_trait(&trait_name) {
+            return None;
+        }
+        if self
+            .nonvtable_trait_key(&trait_name)
+            .is_some_and(|key| self.trait_declares_nonvtable(&key, &item, false))
+        {
+            return None;
+        }
+        let owner = self.map_type(&q.ty);
+        let owner = owner
+            .strip_prefix("typename ")
+            .map(|rest| rest.trim_start().to_string())
+            .unwrap_or(owner);
+        if owner == "auto" || owner.contains("/* TODO") || type_string_has_auto_placeholder(&owner) {
+            return None;
+        }
+        Some(format!(
+            "{}::{}",
+            self.normalize_qself_base_for_assoc(&owner),
+            escape_cpp_keyword_in_member_position(&item)
+        ))
+    }
+
     /// Step 8: `<X as Tr>::NAME` for an associated const of a crate trait —
     /// `<Tr>Traits<X>::NAME()` (the shipped path dropped the `qself` and
     /// routed `Tr::NAME` to the runtime helper, which has no such member).
@@ -25956,6 +26503,9 @@ impl CodeGen {
                 }
                 if let Some(assoc_const) = self.try_emit_trait_assoc_const_qself_expr(path) {
                     return assoc_const;
+                }
+                if let Some(spelled) = self.try_emit_dependency_qself_static_path(path) {
+                    return spelled;
                 }
                 if let Some(_qself) = &path.qself {
                     if path.path.segments.len() == 1 {

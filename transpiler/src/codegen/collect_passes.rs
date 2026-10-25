@@ -3582,6 +3582,15 @@ impl CodeGen {
                             }
                         }
                         let mut collected_item = impl_item.clone();
+                        // A reference self type's `type X = Self` is the
+                        // referent pointer (paths.rs reference_self_value_type;
+                        // the method signatures get the same rewrite below).
+                        if let syn::ImplItem::Type(assoc) = &mut collected_item
+                            && let Some(pointer) =
+                                Self::reference_self_value_type(impl_block.self_ty.as_ref())
+                        {
+                            Self::rewrite_bare_self_type(&mut assoc.ty, &pointer);
+                        }
                         if let syn::ImplItem::Fn(method) = impl_item {
                             let mut merged = method.clone();
                             // Cluster C: if this absorbed method is part of a
@@ -5235,6 +5244,10 @@ impl CodeGen {
             let is_drop_trait = trait_name.as_deref() == Some("Drop");
             let impl_is_automatically_derived = impl_block_is_automatically_derived(impl_block);
             let is_default_trait = trait_name.as_deref() == Some("Default");
+            // The data traits too: the serde runtime's dispatch probes the
+            // value's `serialize(s)` member and the seed's static
+            // `deserialize(d)` (serde_bytes's fn-local `AsBytes<T>` inside its
+            // `impl Serialize for Option<T>`, hoisted with the struct).
             let is_local_serde_trait_impl = matches!(
                 trait_name.as_deref(),
                 Some(
@@ -5244,6 +5257,8 @@ impl CodeGen {
                         | "MapAccess"
                         | "EnumAccess"
                         | "VariantAccess"
+                        | "Serialize"
+                        | "Deserialize"
                 )
             );
             // fmt-family impls absorb as members too: the runtime's

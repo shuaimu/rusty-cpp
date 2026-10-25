@@ -2852,6 +2852,23 @@ impl CodeGen {
             syn::Expr::Field(field) => self.is_stable_reference_lvalue_expr(&field.base),
             syn::Expr::Index(index) => self.is_stable_reference_lvalue_expr(&index.expr),
             syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+                // A deref chain rooted at `self` (`*self`, `**self`) denotes the
+                // receiver object itself: a reference self type's member
+                // collapsed one reference level into `this` (`self: &mut &mut
+                // Serializer` is `Serializer&`), so serde_test's
+                // `value.serialize(&mut **self)` takes the pointer like `&mut
+                // ser` does — not a copy of the serializer.
+                let mut root = self.peel_paren_group_expr(&unary.expr);
+                while let syn::Expr::Unary(inner) = root
+                    && matches!(inner.op, syn::UnOp::Deref(_))
+                {
+                    root = self.peel_paren_group_expr(&inner.expr);
+                }
+                if matches!(root, syn::Expr::Path(p)
+                    if p.qself.is_none() && p.path.is_ident("self"))
+                {
+                    return true;
+                }
                 // `&*x` is stable for raw pointers/references. For value-like
                 // deref receivers (for example `SmallVec`/`Box` operator*), use
                 // temporary materialization at call sites instead of taking
@@ -2865,10 +2882,36 @@ impl CodeGen {
                 self.infer_simple_expr_type(&unary.expr)
                     .as_ref()
                     .is_some_and(|ty| {
-                        matches!(
-                            self.peel_reference_paren_group_type(ty),
-                            syn::Type::Reference(_) | syn::Type::Ptr(_)
-                        )
+                        let peeled = self.peel_reference_paren_group_type(ty);
+                        if matches!(peeled, syn::Type::Reference(_) | syn::Type::Ptr(_)) {
+                            return true;
+                        }
+                        // A deref of a plain VALUE lvalue (no `operator*`
+                        // wrapper, no crate Deref) is the deref-tolerant
+                        // identity — the same lvalue. A reference self type's
+                        // member collapsed one reference level into `this`
+                        // (`self: &mut &mut Serializer` is `Serializer&`), so
+                        // serde_test's `value.serialize(&mut **self)` must take
+                        // the pointer like `&mut ser` does, not a copy.
+                        match peeled {
+                            syn::Type::Path(tp) if tp.qself.is_none() => {
+                                let leaf = tp
+                                    .path
+                                    .segments
+                                    .last()
+                                    .map(|s| s.ident.to_string())
+                                    .unwrap_or_default();
+                                !matches!(
+                                    leaf.as_str(),
+                                    "Box" | "Rc" | "Arc" | "Weak" | "NonNull" | "Unique" | "Pin"
+                                        | "Cow" | "Cell" | "RefCell" | "ManuallyDrop" | "Vec"
+                                        | "String" | "SmallVec" | "ArrayVec" | "MutexGuard"
+                                        | "RwLockReadGuard" | "RwLockWriteGuard" | "Ref" | "RefMut"
+                                ) && !self.user_deref_targets.contains_key(&leaf)
+                                    && self.is_local_type_name_in_scope(&leaf)
+                            }
+                            _ => false,
+                        }
                     })
             }
             syn::Expr::Reference(r) => self.is_stable_reference_lvalue_expr(&r.expr),

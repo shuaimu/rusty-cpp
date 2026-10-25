@@ -10591,7 +10591,12 @@ impl CodeGen {
         // stub below would be a dead `#if 0` duplicate whose
         // `(*this)` bodies read as live bugs to anyone grepping. Skip it.
         if let Some((written_trait_name, _)) =
-            Self::ufcs_trait_impl_specs(i, &self.ufcs_trait_default_methods, &self.module_stack)
+            Self::ufcs_trait_impl_specs(
+                i,
+                &self.ufcs_trait_default_methods,
+                &self.module_stack,
+                self.own_lane_carries_dedicated_lowerings(i, &self.module_stack),
+            )
             && let Some((_, trait_path, _)) = i.trait_.as_ref()
             && {
                 let trait_key = self.resolve_trait_scoped_key_for_impl(

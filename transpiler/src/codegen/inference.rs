@@ -6527,6 +6527,23 @@ impl CodeGen {
                 .infer_local_binding_type_from_initializer(&try_expr.expr)
                 .or_else(|| self.infer_simple_expr_type(&try_expr.expr))
                 .and_then(|ty| self.try_unwrap_try_operand_type(&ty)),
+            // serde_core's `tri!(expr)` (and `r#try!`) is `expr?`: without a type
+            // the local it initializes (`let mut serializer = tri!(self
+            // .serialize_seq(..))`) is opaque to every receiver rule downstream.
+            syn::Expr::Macro(mac_expr)
+                if mac_expr.mac.path.segments.last().is_some_and(|seg| {
+                    let name = seg.ident.to_string();
+                    name == "tri" || name.trim_start_matches("r#") == "try"
+                }) =>
+            {
+                syn::parse2::<syn::Expr>(mac_expr.mac.tokens.clone())
+                    .ok()
+                    .and_then(|inner| {
+                        self.infer_local_binding_type_from_initializer(&inner)
+                            .or_else(|| self.infer_simple_expr_type(&inner))
+                            .and_then(|ty| self.try_unwrap_try_operand_type(&ty))
+                    })
+            }
             syn::Expr::If(if_expr) => self
                 .infer_constructor_expected_type_from_if(if_expr)
                 .or_else(|| self.infer_common_value_type_from_if(if_expr)),

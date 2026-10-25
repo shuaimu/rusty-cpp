@@ -973,7 +973,9 @@ pub fn poll_pinned<F: Future>(f: F, cx: &mut Context<'_>) -> Poll<F::Output> {
     );
     assert!(cpp.contains("auto& future_shadow1 = rusty::pin::new_unchecked(future);"), "{cpp}");
     assert!(
-        cpp.contains("std::optional<rusty::Result<typename F::Output, JoinError>> _let_if_value;"),
+        cpp.contains(
+            "std::optional<rusty::Result<typename std::remove_pointer_t<std::remove_cvref_t<F>>::Output, JoinError>> _let_if_value;"
+        ),
         "{cpp}"
     );
     assert!(!cpp.contains("Result<JoinError, JoinError>"), "{cpp}");

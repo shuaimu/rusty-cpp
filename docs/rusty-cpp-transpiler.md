@@ -2520,6 +2520,49 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   probe); production is masked because the emitter does not emit the blanket's overrides of defaulted
   methods at all (serde_core's `impl SeqAccess for &mut A` emits only `next_element_seed`), so a
   `&mut A` receiver's `size_hint` is the default's `None` — a silent drop to classify.
+- *2026-10-25 — (ab) the crate's own trait beside a dependency's same-leaf trait:* serde_bytes declares
+  its own `Serialize`/`Deserialize` (ser.rs / de.rs) beside serde's. Its impls had markers but NO lane
+  functions: the same-name cross-crate dedupe (`extension_trait_method_provided_by_dependency`, 92a436e4,
+  written for the one shared global `<Trait>_` namespace) dropped every method a dependency's same-name
+  trait also declares — dead since per-crate lanes and universal wrapping (the own `Serialize_::impl_` and
+  `::serde_core::Serialize_::impl_` never collide), so it was pure impl loss. Removed at the impl and
+  default emitters; the marker dedupe is keyed by the lane (primary prefix + trait). A call through the
+  own trait takes the own lane: every serde special-case (`x.serialize(s)`, `Serialize::serialize(x, s)`,
+  `T::deserialize(d)`, `Deserialize::deserialize(d)`) yields when the WRITTEN owner path resolves — through
+  the module's imports (`resolve_trait_scoped_key_for_impl`; a lane body resolves against its impl's module)
+  — to a crate-declared trait; the seeded de call is then `Deserialize_::deserialize(rusty::self_tag<Seed>{},
+  d)` (the keyed no-receiver form), else the serde runtime's dispatch as before. The own trait sharing a
+  dependency leaf also carries the no-receiver functions the dedicated lowering used to own (`deserialize`),
+  for impls whose trait RESOLVES to the crate's (a same-leaf `impl serde::Deserialize for ByteArray<N>` keeps
+  the dedicated route). Four general faults surfaced behind it: (a) `extension_method_type_param_is_used`
+  skipped the first input as "the receiver" — a no-receiver fn lost `D` and was skipped as unresolved; (b)
+  a const-generic impl's self type spelled `std::array<uint8_t, rusty::sanitize_array_capacity<N>()>` — a
+  non-deduced context — so its lane was never viable and its marker skipped outright: deduced positions
+  (lane self parameter, marker partial specialization) spell `std::array<uint8_t, N>`; (c) a lane body
+  did not hoist its fn-local structs the way a regular fn body does (a local class cannot hold a member
+  template, so `AsBytes<T>`'s `impl Serialize` was skipped and the value reached the serializer without a
+  `serialize`), and the hoist gate read an item's OWN generics (`struct AsBytes<T>` inside `impl<T>`,
+  `fn visit_some<D>` inside `fn deserialize<D>`) as references to the outer parameters — shadowing now
+  counts; fn-local `impl Serialize`/`Deserialize` absorb as members like the visitor family; (d) the
+  map-form seed: `Deserialize::deserialize(d).map(ByteBuf::into_vec)` found no typed argument for a
+  receiver method and fell to the return hint `Self` — `impl Deserialize for Vec<u8>` deserialized a Vec by
+  deserializing a Vec; the mapper's receiver type is the seed (`Vec::into_boxed_slice` takes its element
+  from the mapped-to `Box<[T]>`). The erased `rusty::Cow` (a `std::variant` of text payloads) gained its
+  `Deref`: `operator*` yields a `CowDeref` converting to `std::span<const uint8_t>` and `std::string_view`
+  (serde_bytes's `serializer.serialize_bytes(self)` over a `Cow<[u8]>`), and `Cow_Owned` is copyable by
+  clone (a `&Cow` match-ergonomics binding is held by value — the binding type machinery records `b: T`
+  for `Some(b)` over `&Option<T>`, an open general gap). And the runtime fault the row measured once
+  everything compiled: serde_test's `impl Serializer for &mut Serializer { fn serialize_some(self, value)
+  { value.serialize(self) } }` passed `(*this)` — the by-value `S` deduced the VALUE, a copy of the
+  serializer whose token cursor advanced while the caller's did not (`expected BorrowedBytes but serialized
+  as Str("opt_vec")`): a bare `self` that IS a reference (a reference receiver, or a by-value `self` of a
+  reference self type) handed to a trait method whose parameter is not declared a reference is the pointer,
+  `this` — in the method-call argument loop and in the two type-parameter-receiver ladder routes, which
+  build their arguments themselves. Result: the serde_bytes row runs 4/4 (test_serde 3, test_derive 1 —
+  serialize and deserialize), the first time test_derive has been green. Still open there: the own
+  `Deserialize` lanes for REFERENCE self types (`&'a [u8]`, `&'de [u8; N]`, `&'a ByteArray<N>`) are skipped
+  as unresolved (`Self` → `*const [u8]` maps to `auto`; the key would be spelled `const X&`), and
+  `Cow<[u8]>` / `Cow<Bytes>` collapse to one `rusty::Cow` lane.
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
   needs a pointer or reference-wrapper element spelling; phase 0, the `dyn` coercion family) and the

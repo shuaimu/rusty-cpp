@@ -6715,40 +6715,6 @@ impl CodeGen {
         self.dependency_ufcs_trait_manifests = manifests;
     }
 
-    /// True when an IMPORTED dependency module already provides this trait's
-    /// lowered extension free function (same trait + method name), per its UFCS
-    /// manifest. The local crate must then SUPPRESS its own duplicate emission:
-    /// the `rusty_ext` / `<Trait>_` namespaces are shared across all modules, so
-    /// two crates that each own a same-named trait would declare the same C++
-    /// entity (`rusty_ext::<m>`) attached to two modules — a C++20-module ODR
-    /// error. Call sites resolve the global `::rusty_ext::<m>` to the imported
-    /// definition (already pulled in via `export import <dep>`), and the imported
-    /// trait is the canonical one (e.g. the `equivalent` crate's `Equivalent`,
-    /// re-declared by hashbrown), so suppression is behavior-preserving.
-    pub(crate) fn extension_trait_method_provided_by_dependency(
-        &self,
-        trait_name: &str,
-        method: &str,
-    ) -> bool {
-        // METHOD-AWARE: a dependency suppresses THIS crate's copy only if it
-        // declares a trait of the same NAME that also provides the same METHOD
-        // (`declared_trait_methods` — captures both required + default methods, so
-        // it catches blanket-impl extension traits like `Equivalent` that
-        // `method_owners`, restricted to CONCRETE `<Trait>_::m` impls, misses),
-        // or a concrete impl owner records it. The bare-name check this replaces
-        // wrongly suppressed an unrelated dependency trait of the SAME name — the
-        // ubiquitous private `Sealed` (anyhow/indexmap/itoa/quote/syn all declare
-        // one), which silently dropped ryu's `Sealed::is_nonfinite/...` free fns.
-        self.dependency_ufcs_trait_manifests.iter().any(|m| {
-            m.declared_trait_methods
-                .get(trait_name)
-                .is_some_and(|methods| methods.iter().any(|x| x == method))
-                || m.method_owners
-                    .get(method)
-                    .is_some_and(|owners| owners.iter().any(|t| t == trait_name))
-        })
-    }
-
     pub fn set_cpp_module_member_symbols(
         &mut self,
         cpp_module_member_symbols: HashMap<String, HashSet<String>>,
@@ -18308,14 +18274,23 @@ impl CodeGen {
                 // dereference their argument keep pointer-like call semantics.
                 return self.emit_explicit_reference_call_arg(r, effective_expected_ty);
             }
+            // A `&mut x` into a parameter the callee takes BY VALUE (its
+            // manifest pass style) can only be a generic instantiated as the
+            // reference: the pointer representation (serde_test's
+            // `value.serialize(&mut **self)` into `serializer: S`).
             if r.mutability.is_some()
-                && style.is_none()
+                && (style.is_none() || matches!(style, Some(ArgPassStyle::Value)))
                 && effective_expected_ty.is_none()
                 && self.is_stable_reference_lvalue_expr(&r.expr)
             {
                 return self.emit_explicit_reference_call_arg(r, None);
             }
-            if style.is_none()
+            // A `&x` / `&mut x` into a by-VALUE type-parameter parameter is the
+            // POINTER representation of the Rust reference (the callee's
+            // ladders dereference it; a by-value `S` deduced from the lvalue
+            // would COPY — serde_test's `value.serialize(&mut **self)`, whose
+            // manifest pass style is Value, copied the serializer).
+            if (style.is_none() || matches!(style, Some(ArgPassStyle::Value)))
                 && effective_expected_ty
                     .is_some_and(|expected|
                         !matches!(self.peel_paren_group_type(expected), syn::Type::Reference(_))
@@ -20319,25 +20294,50 @@ impl CodeGen {
         if names.is_empty() {
             return false;
         }
-        let mut collector = KnownTypeReferenceCollector::new(names);
+        // An item's OWN generic parameters shadow same-named outer ones
+        // (serde_bytes: `struct AsBytes<T>(T)` + `impl<T> Serialize for
+        // AsBytes<T>` inside the `impl<T> Serialize for Option<T>` method):
+        // a mention of the shadowing name is not a reference to the outer
+        // parameter, and the item hoists as a template of its own.
+        let references = |generics: &syn::Generics, visit: &dyn Fn(&mut KnownTypeReferenceCollector)| {
+            let own = Self::generic_type_or_const_param_names(generics);
+            let effective: HashSet<String> = names.difference(&own).cloned().collect();
+            if effective.is_empty() {
+                return false;
+            }
+            let mut collector = KnownTypeReferenceCollector::new(&effective);
+            visit(&mut collector);
+            !collector.into_referenced_type_names().is_empty()
+        };
         for stmt in &block.stmts {
-            match stmt {
+            let referenced = match stmt {
                 syn::Stmt::Item(syn::Item::Struct(s)) if s.ident == type_name => {
-                    collector.visit_item_struct(s);
+                    references(&s.generics, &|c| c.visit_item_struct(s))
                 }
                 syn::Stmt::Item(syn::Item::Enum(e)) if e.ident == type_name => {
-                    collector.visit_item_enum(e);
+                    references(&e.generics, &|c| c.visit_item_enum(e))
                 }
                 syn::Stmt::Item(syn::Item::Impl(impl_block))
                     if Self::local_impl_target_type_name(impl_block)
                         .is_some_and(|target| target == type_name) =>
                 {
-                    collector.visit_item_impl(impl_block);
+                    // The impl's methods' own generics shadow as well
+                    // (`fn visit_some<D>` inside the lane of `fn deserialize<D>`).
+                    let mut generics = impl_block.generics.clone();
+                    for item in &impl_block.items {
+                        if let syn::ImplItem::Fn(f) = item {
+                            generics.params.extend(f.sig.generics.params.iter().cloned());
+                        }
+                    }
+                    references(&generics, &|c| c.visit_item_impl(impl_block))
                 }
-                _ => {}
+                _ => false,
+            };
+            if referenced {
+                return true;
             }
         }
-        !collector.into_referenced_type_names().is_empty()
+        false
     }
 
 
@@ -21599,6 +21599,35 @@ impl CodeGen {
         )
     }
 
+    /// §3.2.16 (ab): the crate's own trait sharing a dependency trait's leaf
+    /// (serde_bytes's `Deserialize` beside serde's) carries its no-receiver
+    /// functions in its own lane — `Deserialize_::deserialize(self_tag<T>{}, d)`
+    /// — where the shipped dedicated lowering (the serde runtime's seeded
+    /// dispatch) would carry serde_core's semantics instead (a `Vec<u8>` as a
+    /// sequence, not bytes).
+    pub(super) fn own_lane_carries_dedicated_lowerings(
+        &self,
+        impl_block: &syn::ItemImpl,
+        module_path: &[String],
+    ) -> bool {
+        let Some((_, trait_path, _)) = impl_block.trait_.as_ref() else {
+            return false;
+        };
+        let Some(leaf) = trait_path.segments.last().map(|s| s.ident.to_string()) else {
+            return false;
+        };
+        if !(self.ufcs_declared_trait_names.contains(&leaf) && self.dependency_declares_trait(&leaf)) {
+            return false;
+        }
+        // The impl's trait must RESOLVE to the crate's (`impl Deserialize for
+        // Vec<u8>` in de.rs); an impl of the same-leaf dependency trait
+        // (`impl serde::Deserialize for ByteArray<N>`, imported) keeps the
+        // dedicated lowering — its lane would forward to a member through a
+        // dependent `Self`.
+        let key = self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+        self.trait_declared_paths.contains(&key)
+    }
+
     /// Step 8: no-receiver functions with a DEDICATED lowering keep the shipped
     /// skip in the impl lane and the shipped call-site route: serde's
     /// `Deserialize::deserialize` / `deserialize_in_place` — their primitive
@@ -21625,6 +21654,7 @@ impl CodeGen {
         impl_block: &syn::ItemImpl,
         trait_default_methods: &std::collections::BTreeMap<String, Vec<String>>,
         module_path: &[String],
+        own_lane_carries_dedicated: bool,
     ) -> Option<(String, Vec<ExtensionImplMethod>)> {
         let (_, trait_path, _) = impl_block.trait_.as_ref()?;
         let trait_name = trait_path.segments.last().map(|s| s.ident.to_string())?;
@@ -21643,9 +21673,19 @@ impl CodeGen {
         };
 
         let mut associated_type_bindings: HashMap<String, syn::Type> = HashMap::new();
+        // A reference self type's `type X = Self` is the referent pointer
+        // (`reference_self_value_type`); a bare `Self` mapped nowhere in the
+        // lane and skipped every method naming it ("unresolved signature
+        // placeholder": serde_test's serialize_seq/_struct/_map).
+        let reference_self_pointer =
+            Self::reference_self_value_type(impl_block.self_ty.as_ref());
         for impl_item in &impl_block.items {
             if let syn::ImplItem::Type(assoc) = impl_item {
-                associated_type_bindings.insert(assoc.ident.to_string(), assoc.ty.clone());
+                let mut value = assoc.ty.clone();
+                if let Some(pointer) = &reference_self_pointer {
+                    Self::rewrite_bare_self_type(&mut value, pointer);
+                }
+                associated_type_bindings.insert(assoc.ident.to_string(), value);
             }
         }
         let impl_generic_names: Vec<String> = impl_block
@@ -21669,6 +21709,7 @@ impl CodeGen {
                         let has_receiver =
                             matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_)));
                         if !has_receiver
+                            && !own_lane_carries_dedicated
                             && Self::nonvtable_fn_has_dedicated_lowering(&method.sig.ident.to_string())
                         {
                             continue;
@@ -21792,7 +21833,12 @@ impl CodeGen {
         // `using namespace <Tr>_;`. Do not re-add a cpp_inherit skip here —
         // it silently deletes provider-owned strong symbols.
         let Some((written_trait_name, specs)) =
-            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods, module_path)
+            Self::ufcs_trait_impl_specs(
+                impl_block,
+                &self.ufcs_trait_default_methods,
+                module_path,
+                self.own_lane_carries_dedicated_lowerings(impl_block, module_path),
+            )
         else {
             return;
         };
@@ -21859,19 +21905,12 @@ impl CodeGen {
             }
             self.ufcs_abi_companion_only = true;
         }
-        // Cross-crate dedup: drop methods an imported dependency already provides
-        // (the shared `<Trait>_` namespace would otherwise declare the same C++
-        // entity in two modules — hashbrown's own `Equivalent` vs the `equivalent`
-        // crate's). See extension_trait_method_provided_by_dependency.
-        let specs: Vec<_> = specs
-            .into_iter()
-            .filter(|spec| {
-                !self.extension_trait_method_provided_by_dependency(
-                    &trait_name,
-                    &spec.method.sig.ident.to_string(),
-                )
-            })
-            .collect();
+        // §3.2.16 (ab): a crate-declared trait's impls are its OWN lane's
+        // (`<Tr>_::impl_` inside the crate wrap); a dependency trait of the
+        // same leaf has a lane of its own (`__ufcs_<Tr>__<dep>`, (aa)), so no
+        // C++ entity is declared twice. The same-name cross-crate dedupe that
+        // stood here dated from the one shared global `<Trait>_` namespace and
+        // silently dropped EVERY impl of serde_bytes's own `Serialize`.
         if specs.is_empty() {
             return;
         }
@@ -22044,7 +22083,12 @@ impl CodeGen {
             return;
         }
         let specs: Vec<ExtensionImplMethod> =
-            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods, module_path)
+            Self::ufcs_trait_impl_specs(
+                impl_block,
+                &self.ufcs_trait_default_methods,
+                module_path,
+                self.own_lane_carries_dedicated_lowerings(impl_block, module_path),
+            )
                 .map(|(_, specs)| specs)
                 .unwrap_or_default();
         // The dependency's trait is its exported surface: no internal linkage.
@@ -22146,7 +22190,12 @@ impl CodeGen {
             return;
         }
         let Some((_, specs)) =
-            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods, module_path)
+            Self::ufcs_trait_impl_specs(
+                impl_block,
+                &self.ufcs_trait_default_methods,
+                module_path,
+                self.own_lane_carries_dedicated_lowerings(impl_block, module_path),
+            )
         else {
             return;
         };
@@ -22301,7 +22350,12 @@ impl CodeGen {
             return;
         }
         let Some((_, specs)) =
-            Self::ufcs_trait_impl_specs(impl_block, &self.ufcs_trait_default_methods, module_path)
+            Self::ufcs_trait_impl_specs(
+                impl_block,
+                &self.ufcs_trait_default_methods,
+                module_path,
+                self.own_lane_carries_dedicated_lowerings(impl_block, module_path),
+            )
         else {
             // Book §3.2.6 (2026-10-07): an impl block with no methods of its
             // own (`impl A for u8 {}`, every method defaulted) still makes its
@@ -22338,18 +22392,8 @@ impl CodeGen {
             // by the definition pass in companion-only mode.
             return;
         }
-        // Cross-crate dedup (mirrors the definition emitter): drop methods an
-        // imported dependency already provides — see
-        // extension_trait_method_provided_by_dependency.
-        let specs: Vec<_> = specs
-            .into_iter()
-            .filter(|spec| {
-                !self.extension_trait_method_provided_by_dependency(
-                    &trait_name,
-                    &spec.method.sig.ident.to_string(),
-                )
-            })
-            .collect();
+        // §3.2.16 (ab): no same-name cross-crate dedupe (see the definition
+        // emitter) — the own lane carries every impl.
         if specs.is_empty() {
             // An EMPTY impl (`impl Super for Sc {}` — every method defaulted)
             // still witnesses its self type: the defaults are constrained by
@@ -23120,6 +23164,25 @@ impl CodeGen {
     /// the dependency's root (`::serde_core::`) for a dependency-declared one,
     /// whose witness lines are captured by the caller and relocated outside the
     /// crate wrap; `require_local_primary` is the crate-declared guard.
+    /// A const generic's array capacity is spelled plainly in a DEDUCED
+    /// position (`std::array<uint8_t, N>`). `rusty::sanitize_array_capacity<N>()`
+    /// clamps `usize::MAX` capacities in type positions, but as a call it is a
+    /// non-deduced context: an impl function parameter or a marker's partial
+    /// specialization spelled through it can never deduce `N` — the lane
+    /// function is unviable and the marker unusable (serde_bytes's
+    /// `impl<const N: usize> Serialize for [u8; N]`). The two spellings name
+    /// the same type for every capacity but `usize::MAX`.
+    fn despell_const_generic_array_capacities(cpp: &str, generics: &syn::Generics) -> String {
+        let mut out = cpp.to_string();
+        for p in &generics.params {
+            if let syn::GenericParam::Const(cp) = p {
+                let needle = format!("rusty::sanitize_array_capacity<{}>()", cp.ident);
+                out = out.replace(&needle, &cp.ident.to_string());
+            }
+        }
+        out
+    }
+
     fn emit_ufcs_impl_marker_specialization_with(
         &mut self,
         impl_block: &syn::ItemImpl,
@@ -23140,19 +23203,16 @@ impl CodeGen {
             })
             .collect();
         let trait_cpp = escape_cpp_keyword(trait_name);
-        // A const generic (`impl<const N: usize> Tr for [u8; N]`) is a
-        // template parameter the partial specialization cannot deduce through
-        // `sanitize_array_capacity<N>()` (serde_bytes: `use of undeclared
-        // identifier 'N'` on the would-be explicit specialization) — no marker.
-        if impl_block
+        // A const generic (`impl<const N: usize> Tr for [u8; N]`) is a template
+        // parameter: the marker is a partial specialization (below), spelled
+        // deducibly (`std::array<uint8_t, N>`, see
+        // despell_const_generic_array_capacities) — not an explicit one.
+        let has_const_params = impl_block
             .generics
             .params
             .iter()
-            .any(|p| matches!(p, syn::GenericParam::Const(_)))
-        {
-            return;
-        }
-        if type_params.is_empty() {
+            .any(|p| matches!(p, syn::GenericParam::Const(_)));
+        if type_params.is_empty() && !has_const_params {
             let self_cpp = self.qualify_import_bound_types_in_type_string(
                 &self.qualify_nested_local_type_for_global_scope(
                     &self.rewrite_cpp_import_bound_type_spelling(
@@ -23254,9 +23314,11 @@ impl CodeGen {
                 // canonical spelling the free-function emitters use, or the
                 // second impl is a `redefinition of impls_<Tr><…>` (serde_core).
                 let canonical = self.canonicalize_extension_overload_type_for_dedupe(&spelling);
+                // §3.2.16 (ab): keyed by the LANE (the primary's prefix) — the
+                // own `impls_Serialize<Bytes>` and serde_core's are two markers.
                 if !self
                     .ufcs_marker_specializations_emitted
-                    .insert((trait_name.to_string(), canonical))
+                    .insert((format!("{}{}", primary_prefix, trait_name), canonical))
                 {
                     continue;
                 }
@@ -23302,6 +23364,7 @@ impl CodeGen {
             ),
         );
         self.pop_type_param_scope();
+        let self_cpp = Self::despell_const_generic_array_capacities(&self_cpp, &impl_block.generics);
         if self.extension_self_type_mapping_is_unsupported(&self_cpp)
             || type_string_has_auto_placeholder(&self_cpp)
         {
@@ -23410,7 +23473,7 @@ impl CodeGen {
             }
         }
         let key = (
-            trait_name.to_string(),
+            format!("{}{}", primary_prefix, trait_name),
             self.canonicalize_extension_overload_type_for_dedupe(&self_cpp),
         );
         if !self.ufcs_marker_specializations_emitted.insert(key) {
@@ -23651,16 +23714,8 @@ impl CodeGen {
                                 self.ufcs_emitting_internal_linkage_trait =
                         self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
                     self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
-                    // Suppress methods an imported dependency already provides — the
-                    // shared `<Trait>_` namespace would otherwise declare the same
-                    // C++ entity in two modules (e.g. hashbrown's own `Equivalent`
-                    // vs the `equivalent` crate's). Call sites bind the imported def.
-                    specs.retain(|spec| {
-                        !self.extension_trait_method_provided_by_dependency(
-                            &trait_name,
-                            &spec.method.sig.ident.to_string(),
-                        )
-                    });
+                    // §3.2.16 (ab): the own lane carries the trait's defaults too
+                    // (no same-name cross-crate dedupe; see the impl emitter).
                     if specs.is_empty() {
                         continue;
                     }
@@ -23765,15 +23820,8 @@ impl CodeGen {
                                 self.ufcs_emitting_internal_linkage_trait =
                         self.ufcs_layer_uses_internal_linkage(&trait_name, &trait_key);
                     self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
-                    // Suppress methods an imported dependency already provides (see
-                    // extension_trait_method_provided_by_dependency): avoids the
-                    // cross-module `<Trait>_` / `rusty_ext` ODR clash.
-                    specs.retain(|spec| {
-                        !self.extension_trait_method_provided_by_dependency(
-                            &trait_name,
-                            &spec.method.sig.ident.to_string(),
-                        )
-                    });
+                    // §3.2.16 (ab): no same-name cross-crate dedupe (see the impl
+                    // emitter).
                     if specs.is_empty() {
                         continue;
                     }
@@ -24779,6 +24827,8 @@ impl CodeGen {
             // and flag-off.
             self.qualify_nested_local_type_for_global_scope(&mapped)
         };
+        let self_cpp_ty =
+            Self::despell_const_generic_array_capacities(&self_cpp_ty, &free_generics);
         if method_name == "deserialize" && self_cpp_ty.contains("PhantomData<") {
             self.pop_type_param_scope();
             self.in_forward_decl_signature = prev_forward_decl_signature;
@@ -25953,6 +26003,8 @@ impl CodeGen {
             // and flag-off.
             self.qualify_nested_local_type_for_global_scope(&mapped)
         };
+        let self_cpp_ty =
+            Self::despell_const_generic_array_capacities(&self_cpp_ty, &free_generics);
         if method_name == "deserialize" && self_cpp_ty.contains("PhantomData<") {
             self.in_forward_decl_signature = prev_forward_decl_signature;
             self.pop_type_param_scope();
@@ -26140,13 +26192,46 @@ impl CodeGen {
                 &outer_free_generic_params,
             )
         });
-        let hoisted_body_alias_names: HashSet<String> = hoisted_body_aliases
+        // §3.2.16 (ab): a lane body's fn-local generic structs and enums, and
+        // the local structs whose trait impls carry member templates
+        // (serde_bytes's `AsBytes<T>` with its `impl Serialize`, a `CowVisitor`
+        // with `visit_bytes<E>`), hoist to namespace scope exactly as the
+        // regular-fn emitter does: a local class cannot hold a member template,
+        // so at block scope their impls were skipped outright and the value
+        // reached the serializer without a `serialize` member.
+        let mut hoisted_body_enums = self.collect_hoistable_local_enums_in_block(&method.block);
+        hoisted_body_enums.retain(|e| {
+            !Self::local_type_items_reference_names(
+                &method.block,
+                &e.ident.to_string(),
+                &outer_free_generic_params,
+            )
+        });
+        let mut hoisted_body_structs =
+            self.collect_hoistable_local_generic_structs_in_block(&method.block);
+        hoisted_body_structs.retain(|st| {
+            !Self::local_type_items_reference_names(
+                &method.block,
+                &st.ident.to_string(),
+                &outer_free_generic_params,
+            )
+        });
+        let mut hoisted_body_alias_names: HashSet<String> = hoisted_body_aliases
             .iter()
             .map(|t| t.ident.to_string())
             .collect();
-        if !hoisted_body_aliases.is_empty() {
+        hoisted_body_alias_names.extend(hoisted_body_enums.iter().map(|e| e.ident.to_string()));
+        hoisted_body_alias_names.extend(hoisted_body_structs.iter().map(|st| st.ident.to_string()));
+        if !hoisted_body_alias_names.is_empty() {
+            self.declared_item_names
+                .extend(hoisted_body_alias_names.iter().cloned());
             self.push_type_param_scope(&free_generics);
+            self.hoisted_local_type_name_scopes
+                .push(hoisted_body_alias_names.clone());
             self.emit_hoisted_local_generic_type_aliases(&hoisted_body_aliases);
+            self.emit_hoisted_local_enums_for_block(&method.block, &hoisted_body_enums);
+            self.emit_hoisted_local_generic_structs_for_block(&method.block, &hoisted_body_structs);
+            self.hoisted_local_type_name_scopes.pop();
             self.pop_type_param_scope();
         }
         let export_prefix = if self.module_name.is_some() {
@@ -27300,7 +27385,11 @@ impl CodeGen {
             }
         }
 
-        method.sig.inputs.iter().skip(1).any(|arg| match arg {
+        // Every typed input counts — a no-receiver fn's FIRST input is a
+        // parameter (`fn deserialize<D>(deserializer: D)`), not a receiver;
+        // skipping it dropped `D` from the lane and skipped the function as
+        // "unresolved" whenever the return type did not spell `D` too.
+        method.sig.inputs.iter().any(|arg| match arg {
             syn::FnArg::Typed(pt) => self.type_references_name(&pt.ty, type_param_name),
             syn::FnArg::Receiver(_) => false,
         })
@@ -43891,6 +43980,21 @@ impl CodeGen {
         {
             return format!("(**{}).{}({})", receiver, method_call, args.join(", "));
         }
+        // A receiver whose declared type is an associated projection of a type
+        // parameter or `Self` (`serializer: Self::SerializeSeq` in serde_core's
+        // `collect_seq` default) may be the POINTER representation of a Rust
+        // reference — a reference self type's `Self` (paths.rs
+        // `reference_self_value_type`: serde_test's `type SerializeSeq = Self`
+        // on `impl Serializer for &mut Serializer`). `.m()` on the pointer is
+        // ill-formed; look through it (identity for every value receiver).
+        if self.receiver_type_is_type_param_assoc_projection(receiver_expr) {
+            return format!(
+                "rusty::detail::deref_if_pointer({}).{}({})",
+                receiver,
+                method_call,
+                args.join(", ")
+            );
+        }
         let member_op = if self.method_receiver_uses_pointer_member_access(receiver_expr)
             || self.method_receiver_uses_wrapper_autoderef_member_access(receiver_expr, method_name)
         {
@@ -43919,6 +44023,27 @@ impl CodeGen {
             method_call,
             args.join(", ")
         )
+    }
+
+    /// `expr`'s declared type is an associated projection of an in-scope type
+    /// parameter or of `Self` (`Self::SerializeSeq`, `S::Ok`, `<S as Tr>::X`):
+    /// its C++ value may be the pointer representation of a Rust reference
+    /// (see `reference_self_value_type`).
+    pub(super) fn receiver_type_is_type_param_assoc_projection(&self, expr: &syn::Expr) -> bool {
+        let Some(ty) = self.infer_simple_expr_type(self.peel_paren_group_expr(expr)) else {
+            return false;
+        };
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(&ty) else {
+            return false;
+        };
+        if tp.qself.is_some() {
+            return true;
+        }
+        if tp.path.segments.len() < 2 {
+            return false;
+        }
+        let first = tp.path.segments[0].ident.to_string();
+        first == "Self" || first == "Self_" || self.is_type_param_in_scope(&first)
     }
 
     /// `expr`'s inferred type is a borrow/lock guard over a Box/Rc/Arc
@@ -44606,6 +44731,28 @@ impl CodeGen {
         deref_args.extend(deref_arg_uses.iter().cloned());
         let direct_call = format!("{}({}{})", callee, direct_args.join(", "), trailing);
         let deref_call = format!("{}({}{})", callee, deref_args.join(", "), trailing);
+        // The two trait-namespace rungs: the receiver and arguments as
+        // written, then every pointer-like one dereferenced. (Measured and
+        // rejected 2026-10-24: a rung dereferencing only the ARGUMENTS — a
+        // `&mut x` argument into a by-value type parameter arrives as a
+        // pointer, and dereferencing it alone makes the by-value `S` deduce
+        // the referent, a COPY of the serializer; the direct rung must be made
+        // viable for the pointer instead — see the pointee spelling of
+        // type-parameter projections.)
+        let cpo_rungs: Vec<String> = vec![direct_call.clone(), deref_call.clone()];
+        // One `if constexpr (requires { call; }) { return call; } else` rung per
+        // candidate, closed by the fallback — the ladder text every tail below
+        // shares.
+        let ladder = |capture: &str, rungs: &[String], fallback: &str| -> String {
+            let chain: String = rungs
+                .iter()
+                .map(|call| format!("if constexpr (requires {{ {0}; }}) {{ return {0}; }} else ", call))
+                .collect();
+            format!(
+                "({}({}) -> decltype(auto) {{ {}{{ return {}; }} }})({})",
+                capture, arg_param_list, chain, fallback, arg_call_list
+            )
+        };
         // Split the callee into its path-with-method base and an optional
         // turbofish suffix BEFORE taking the `::`-leaf. A turbofish type arg
         // can itself contain `::` (e.g. `next_value<de::IgnoredAny>`), so
@@ -44627,16 +44774,7 @@ impl CodeGen {
                 arg_names[0]
             );
             let op_call = format!("({}) {} ({})", lhs, op, rhs);
-            return format!(
-                "([&]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-                arg_param_list,
-                direct_call,
-                direct_call,
-                deref_call,
-                deref_call,
-                op_call,
-                arg_call_list
-            );
+            return ladder("[&]", &cpo_rungs, &op_call);
         }
         // `Index::index` is spelled `operator[]` in C++, so an explicit call —
         // `self.buffer.index(i)`, which is how a Rust `impl Index` normally
@@ -44657,16 +44795,7 @@ impl CodeGen {
                 arg_names[0]
             );
             let subscript_call = format!("({})[{}]", deref_receiver, idx);
-            return format!(
-                "([&]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-                arg_param_list,
-                direct_call,
-                direct_call,
-                deref_call,
-                deref_call,
-                subscript_call,
-                arg_call_list
-            );
+            return ladder("[&]", &cpo_rungs, &subscript_call);
         }
         // UFCS Phase 6 (book § 3.2.10): a `dyn Tr` receiver derefs to the
         // abstract interface `Tr&`, for which there is NO `m(const Tr&)`
@@ -44739,27 +44868,13 @@ impl CodeGen {
                 "::rusty::serde_rt::de::deserialize({}, {})",
                 direct_receiver, direct_arg_uses[0]
             );
-            let (first, second) = if cpo_first {
-                (
-                    [direct_call.clone(), deref_call.clone()],
-                    [member_call_direct.clone(), member_call.clone()],
-                )
+            let member_rungs = [member_call_direct.clone(), member_call.clone()];
+            let rungs: Vec<String> = if cpo_first {
+                cpo_rungs.iter().chain(member_rungs.iter()).cloned().collect()
             } else {
-                (
-                    [member_call_direct.clone(), member_call.clone()],
-                    [direct_call.clone(), deref_call.clone()],
-                )
+                member_rungs.iter().chain(cpo_rungs.iter()).cloned().collect()
             };
-            return format!(
-                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-                arg_param_list,
-                first[0], first[0],
-                first[1], first[1],
-                second[0], second[0],
-                second[1], second[1],
-                seed_fallback,
-                arg_call_list
-            );
+            return ladder("[]", &rungs, &seed_fallback);
         }
         if matches!(callee_leaf, "iter" | "is_empty" | "len") {
             let iter_fallback = if deref_args.len() == 1 {
@@ -44767,27 +44882,13 @@ impl CodeGen {
             } else {
                 format!("rusty::{}({})", callee_leaf, deref_args.join(", "))
             };
-            let (first, second) = if cpo_first {
-                (
-                    [direct_call.clone(), deref_call.clone()],
-                    [member_call_direct.clone(), member_call.clone()],
-                )
+            let member_rungs = [member_call_direct.clone(), member_call.clone()];
+            let rungs: Vec<String> = if cpo_first {
+                cpo_rungs.iter().chain(member_rungs.iter()).cloned().collect()
             } else {
-                (
-                    [member_call_direct.clone(), member_call.clone()],
-                    [direct_call.clone(), deref_call.clone()],
-                )
+                member_rungs.iter().chain(cpo_rungs.iter()).cloned().collect()
             };
-            return format!(
-                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-                arg_param_list,
-                first[0], first[0],
-                first[1], first[1],
-                second[0], second[0],
-                second[1], second[1],
-                iter_fallback,
-                arg_call_list
-            );
+            return ladder("[]", &rungs, &iter_fallback);
         }
         if callee_leaf == "into_iter" && extra_args.is_empty() {
             // Member tiers use the DIRECT receiver: deref_if_pointer_like
@@ -44800,22 +44901,9 @@ impl CodeGen {
                 format!("std::forward<decltype(__self)>(__self).into_iter()");
             let moved_member_call = format!("std::move(__self).into_iter()");
             let iter_fallback = format!("rusty::iter({})", direct_receiver);
-            return format!(
-                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-                arg_param_list,
-                direct_call,
-                direct_call,
-                deref_call,
-                deref_call,
-                direct_member_call,
-                direct_member_call,
-                member_call,
-                member_call,
-                moved_member_call,
-                moved_member_call,
-                iter_fallback,
-                arg_call_list
-            );
+            let mut rungs = cpo_rungs.clone();
+            rungs.extend([direct_member_call, member_call.clone(), moved_member_call]);
+            return ladder("[]", &rungs, &iter_fallback);
         }
         // A trait-namespace callee's overloads can COLLAPSE into width-
         // widened signatures that reject the other int widths (itoa's
@@ -44841,18 +44929,9 @@ impl CodeGen {
         // (`x.name()` under `X: ConvT<u8>` must not land on the struct
         // member that the i32 impl merged in).
         if cpo_first {
-            return format!(
-                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-                arg_param_list,
-                direct_call,
-                direct_call,
-                deref_call,
-                deref_call,
-                member_call_direct,
-                member_call_direct,
-                member_call,
-                arg_call_list
-            );
+            let mut rungs = cpo_rungs.clone();
+            rungs.push(member_call_direct.clone());
+            return ladder("[]", &rungs, &member_call);
         }
         // MEMBER tier first: rustc resolves INHERENT methods before trait
         // methods at each deref level. The trait free fn's requires-check
@@ -44861,18 +44940,9 @@ impl CodeGen {
         // hijacked receivers with a same-named inherent method and
         // hard-errored in the body — indexmap's `m.sorted_by(4-arg move
         // closure)` (inherent) fell into Itertools_::sorted_by (2-arg cmp).
-        format!(
-            "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-            arg_param_list,
-            member_call_direct,
-            member_call_direct,
-            member_call,
-            member_call,
-            direct_call,
-            direct_call,
-            deref_call,
-            arg_call_list
-        )
+        let mut rungs = vec![member_call_direct, member_call];
+        rungs.extend(cpo_rungs.iter().take(cpo_rungs.len() - 1).cloned());
+        ladder("[]", &rungs, &deref_call)
     }
 
     /// UFCS Fix A (§ 3.2.4 / serde_core): dispatch shim for a MULTI-OWNER method
@@ -44890,6 +44960,31 @@ impl CodeGen {
     /// free function and the pre-key "preserved collapse member"
     /// (`rusty_<Tr>_<m>`, the LOSING body of a struct-level collapse) must
     /// never be probed ahead of the trait namespace — it is the other impl.
+    /// The unqualified projection of a type parameter's associated name —
+    /// `S::Ok` with no `<Tr>Traits<S>` route (the assoc name is declared by
+    /// several traits and the parameter's bound is not in the scope, as in
+    /// the bound-stripped lane and member signatures). A Rust `&mut x`
+    /// argument into a by-value type parameter arrives as a POINTER, and
+    /// `typename S::Ok` is ill-formed for `S = Serializer*` — no `Serialize`
+    /// impl was viable for serde_test's serializer, and the ladder fell to a
+    /// rung that dereferenced the receiver (serde_bytes' `Bytes` serialized
+    /// through serde_core's slice impl, measured). The projection looks
+    /// through the pointer representation: Rust's `<&mut T as Tr>::Ok` is
+    /// `T`'s (`impl Tr for &mut T` forwards), and the referent struct carries
+    /// the alias. Identity for every other instantiation.
+    fn bare_type_param_projection(&self, first: &str, assoc_name: &str) -> String {
+        let is_type_param = self.is_type_param_in_scope(first)
+            || (first.len() == 1 && first.chars().all(|c| c.is_ascii_uppercase()));
+        if is_type_param && first != "Self" && first != "Self_" {
+            format!(
+                "typename std::remove_pointer_t<std::remove_cvref_t<{}>>::{}",
+                first, assoc_name
+            )
+        } else {
+            format!("typename {}::{}", first, assoc_name)
+        }
+    }
+
     pub(crate) fn ufcs_trait_is_keyed(&self, owner: &str) -> bool {
         let short = owner.rsplit("::").next().unwrap_or(owner);
         self.ufcs_traits_with_ref_self_impls.contains(short)
@@ -48008,6 +48103,16 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         let func = self.emit_call_func_with_owner_template_recovery_inner(call, expected_ty);
+        // A callee path is an EXPRESSION: a qualified-self owner that mapped as
+        // a dependent type (`<__A::Error as de::Error>::duplicate_field` →
+        // `typename std::remove_pointer_t<…>::Error::duplicate_field`) must not
+        // carry the type-only `typename` — clang reads the whole path as a type
+        // ("no type named 'duplicate_field'"), and the `Error::duplicate_field`
+        // / `missing_field` routes below key on the owner spelling.
+        let func = func
+            .strip_prefix("typename ")
+            .map(|rest| rest.trim_start().to_string())
+            .unwrap_or(func);
         // Book §3.2.2 rule 7: `Box::new(r)` into `Box<dyn Tr>` with `r: &T`
         // boxes the REFERENCE (`impl Tr for &T`). The recovered owner is
         // `rusty::Box<Tr>::new_`; spell the owning forwarder over `const T&`
@@ -48035,7 +48140,14 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         let mut base_func = match call.func.as_ref() {
-            syn::Expr::Path(path_expr) => self.emit_expr_path_to_string(&path_expr.path),
+            // A qualified-self callee (`<X as Tr>::f`) keeps its owner: the
+            // bare-path spelling dropped the qself and named the TRAIT as the
+            // owner (`Err::duplicate_field`); the expression emitter routes it
+            // (crate traits through their Traits maps, a dependency trait as
+            // the dependent owner type).
+            syn::Expr::Path(path_expr) if path_expr.qself.is_none() => {
+                self.emit_expr_path_to_string(&path_expr.path)
+            }
             _ => self.emit_expr_to_string(&call.func),
         };
         let syn::Expr::Path(path_expr) = call.func.as_ref() else {
@@ -56146,11 +56258,35 @@ impl CodeGen {
                 return Some(escape_cpp_keyword(&ident));
             }
         }
-        if !tp
-            .path
-            .segments
-            .last()
-            .is_some_and(|seg| seg.ident.to_string() == trait_name)
+        // A projection `P::X` of an in-scope type parameter whose bound trait
+        // declares `type X: Tr` is an owner for `Tr`'s static calls
+        // (`fn f<A: Acc>() -> Result<(), A::Error>` with `type Error: Err;` on
+        // `Acc`): the declaring crate's assoc bounds, manifests included.
+        let projected_through_bound = tp.path.segments.len() == 2
+            && {
+                let param = tp.path.segments[0].ident.to_string();
+                let assoc = tp.path.segments[1].ident.to_string();
+                self.is_type_param_in_scope(&param)
+                    && self.trait_bound_type_param_scopes.iter().rev().any(|scope| {
+                        scope.iter().any(|(bound_trait, bound_param)| {
+                            bound_param == &param
+                                && self
+                                    .ufcs_trait_assoc_bounds
+                                    .get(&format!(
+                                        "{}::{}",
+                                        bound_trait.rsplit("::").next().unwrap_or(bound_trait),
+                                        assoc
+                                    ))
+                                    .is_some_and(|bound| bound == trait_name)
+                        })
+                    })
+            };
+        if !projected_through_bound
+            && !tp
+                .path
+                .segments
+                .last()
+                .is_some_and(|seg| seg.ident.to_string() == trait_name)
         {
             return None;
         }
@@ -56473,10 +56609,20 @@ impl CodeGen {
             && self.declared_type_params.iter().any(|(key, params)| {
                 !params.is_empty() && (key == first || key.ends_with(&format!("::{}", first)))
             });
+        // A projection spelled pointer-robustly
+        // (`std::remove_pointer_t<std::remove_cvref_t<V>>::Error`) is dependent
+        // through the parameter it wraps, though its first segment is `std`.
+        let mentions_type_param = (path.starts_with("std::remove_pointer_t<std::remove_cvref_t<")
+            || path.starts_with("std::remove_cvref_t<"))
+            && path
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|tok| !tok.is_empty())
+                .any(|tok| self.is_type_param_in_scope(tok));
         let is_dependent_owner = first == "Self"
             || self.is_type_param_in_scope(first)
             || current_struct_is_generic
-            || (first.len() == 1 && first.chars().all(|c| c.is_ascii_uppercase()));
+            || (first.len() == 1 && first.chars().all(|c| c.is_ascii_uppercase()))
+            || mentions_type_param;
 
         // Phase 3b.2: if the path is `T::AssocName` where T is a type
         // param AND AssocName is unambiguously a trait's assoc type,
@@ -56577,7 +56723,7 @@ impl CodeGen {
                         // redeclaration` divergence that caused the
                         // last remaining itertools failure.
                         if self.in_constraint_emit.get() {
-                            return format!("typename {}::{}", first, assoc_name);
+                            return self.bare_type_param_projection(first, assoc_name);
                         }
                         if let Some(qpath) = self
                             .trait_declared_path_by_short_name
@@ -56674,7 +56820,7 @@ impl CodeGen {
                         {
                             return spelled;
                         }
-                        return format!("typename {}::{}", first, assoc_name);
+                        return self.bare_type_param_projection(first, assoc_name);
                     }
                 }
             }
@@ -56687,6 +56833,11 @@ impl CodeGen {
                     self.try_spell_assoc_method_projection(segments[0], segments[1])
             {
                 return spelled;
+            }
+            if segments.len() == 2 {
+                // A type parameter's projection looks through the pointer
+                // representation of a Rust reference (bare_type_param_projection).
+                return self.bare_type_param_projection(segments[0], segments[1]);
             }
             return format!("typename {}", path);
         }
@@ -56847,6 +56998,12 @@ impl CodeGen {
         }
         let qualified_path = path.trim_start_matches("::").contains("::");
         if qualified_path && self.type_path_requires_typename_prefix(tp) {
+            let segments: Vec<&str> = path.split("::").map(|s| s.trim()).collect();
+            if segments.len() == 2 {
+                // A type parameter's projection looks through the pointer
+                // representation of a Rust reference (bare_type_param_projection).
+                return self.bare_type_param_projection(segments[0], segments[1]);
+            }
             return format!("typename {}", path);
         }
         path
@@ -61382,6 +61539,40 @@ auto discriminant_value(const V& value) {
     std::abort();
 }
 }
+// The module-level fmt::Write dispatch every other module's helper block
+// carries (`write!`/`writeln!`/`fmt::write` lower to it); the token-owner text
+// lacked it, so serde_test's `write!(&mut buffer, ..)` found only the copy in
+// an imported module ("'write_fmt' must be declared before it is used").
+template<typename Writer, typename FmtArg>
+rusty::fmt::Result write_fmt(Writer&& writer, FmtArg&& fmt_arg) {
+    const auto text = rusty::to_string(std::forward<FmtArg>(fmt_arg));
+    const auto text_view = std::string_view(text);
+    if constexpr (requires { std::forward<Writer>(writer).write_fmt(text_view); }) {
+        return std::forward<Writer>(writer).write_fmt(text_view);
+    } else if constexpr (requires { writer.write_fmt(text_view); }) {
+        return writer.write_fmt(text_view);
+    } else if constexpr (requires { std::forward<Writer>(writer).write_str(text_view); }) {
+        return std::forward<Writer>(writer).write_str(text_view);
+    } else if constexpr (requires { writer.write_str(text_view); }) {
+        return writer.write_str(text_view);
+    } else if constexpr (requires { std::forward<Writer>(writer).formatter.write_str(text_view); }) {
+        if constexpr (requires { std::forward<Writer>(writer).has_decimal_point; }) {
+            if (text_view.find('.') != std::string_view::npos) {
+                std::forward<Writer>(writer).has_decimal_point = true;
+            }
+        }
+        return std::forward<Writer>(writer).formatter.write_str(text_view);
+    } else if constexpr (requires { writer.formatter.write_str(text_view); }) {
+        if constexpr (requires { writer.has_decimal_point; }) {
+            if (text_view.find('.') != std::string_view::npos) {
+                writer.has_decimal_point = true;
+            }
+        }
+        return writer.formatter.write_str(text_view);
+    } else {
+        return rusty::fmt::Result::Err(rusty::fmt::Error{});
+    }
+}
 #if !defined(RUSTY_HAS_ADDR_OF_TEMP)
 template<typename T>
 constexpr T* addr_of_temp(T& value) {
@@ -62157,32 +62348,56 @@ struct Formatter {\n\
             return Result::Ok(std::make_tuple());\n\
         }\n\
     };\n\
-    template<typename... Args>\n\
-    static Result debug_tuple_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_tuple_field2_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_tuple_field3_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_tuple_field4_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_tuple_field5_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_struct_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_struct_field2_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_struct_field3_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_struct_field4_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_struct_field5_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_struct_field6_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_struct_field7_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
-    template<typename... Args>\n\
-    static Result debug_struct_field8_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
+    // `#[derive(Debug)]` expands to `Formatter::debug_tuple_fieldN_finish(name, &f1, ..)`\n\
+    // and `debug_struct_fieldN_finish(name, k1, &v1, ..)`; they were no-op statics\n\
+    // (every derived enum/struct Debug printed an empty name — serde_test's Token\n\
+    // Display forwards to it). The builders above write them.\n\
+    template<typename Name, typename... Vals>\n\
+    Result debug_tuple_fields_finish_(Name&& name, Vals&&... vals) const {\n\
+        DebugTuple tuple(this);\n\
+        tuple.name(std::forward<Name>(name));\n\
+        (tuple.field(std::forward<Vals>(vals)), ...);\n\
+        return tuple.finish();\n\
+    }\n\
+    static void debug_struct_add_fields_(DebugStruct&) {}\n\
+    template<typename Key, typename Val, typename... Rest>\n\
+    static void debug_struct_add_fields_(DebugStruct& s, Key&& key, Val&& val, Rest&&... rest) {\n\
+        s.field(std::forward<Key>(key), std::forward<Val>(val));\n\
+        debug_struct_add_fields_(s, std::forward<Rest>(rest)...);\n\
+    }\n\
+    template<typename Name, typename... Pairs>\n\
+    Result debug_struct_pairs_finish_(Name&& name, Pairs&&... pairs) const {\n\
+        DebugStruct s(this);\n\
+        s.name(std::forward<Name>(name));\n\
+        debug_struct_add_fields_(s, std::forward<Pairs>(pairs)...);\n\
+        return s.finish();\n\
+    }\n\
+    template<typename Name, typename... Vals>\n\
+    Result debug_tuple_field1_finish(Name&& name, Vals&&... vals) const { return debug_tuple_fields_finish_(std::forward<Name>(name), std::forward<Vals>(vals)...); }\n\
+    template<typename Name, typename... Vals>\n\
+    Result debug_tuple_field2_finish(Name&& name, Vals&&... vals) const { return debug_tuple_fields_finish_(std::forward<Name>(name), std::forward<Vals>(vals)...); }\n\
+    template<typename Name, typename... Vals>\n\
+    Result debug_tuple_field3_finish(Name&& name, Vals&&... vals) const { return debug_tuple_fields_finish_(std::forward<Name>(name), std::forward<Vals>(vals)...); }\n\
+    template<typename Name, typename... Vals>\n\
+    Result debug_tuple_field4_finish(Name&& name, Vals&&... vals) const { return debug_tuple_fields_finish_(std::forward<Name>(name), std::forward<Vals>(vals)...); }\n\
+    template<typename Name, typename... Vals>\n\
+    Result debug_tuple_field5_finish(Name&& name, Vals&&... vals) const { return debug_tuple_fields_finish_(std::forward<Name>(name), std::forward<Vals>(vals)...); }\n\
+    template<typename Name, typename... Pairs>\n\
+    Result debug_struct_field1_finish(Name&& name, Pairs&&... pairs) const { return debug_struct_pairs_finish_(std::forward<Name>(name), std::forward<Pairs>(pairs)...); }\n\
+    template<typename Name, typename... Pairs>\n\
+    Result debug_struct_field2_finish(Name&& name, Pairs&&... pairs) const { return debug_struct_pairs_finish_(std::forward<Name>(name), std::forward<Pairs>(pairs)...); }\n\
+    template<typename Name, typename... Pairs>\n\
+    Result debug_struct_field3_finish(Name&& name, Pairs&&... pairs) const { return debug_struct_pairs_finish_(std::forward<Name>(name), std::forward<Pairs>(pairs)...); }\n\
+    template<typename Name, typename... Pairs>\n\
+    Result debug_struct_field4_finish(Name&& name, Pairs&&... pairs) const { return debug_struct_pairs_finish_(std::forward<Name>(name), std::forward<Pairs>(pairs)...); }\n\
+    template<typename Name, typename... Pairs>\n\
+    Result debug_struct_field5_finish(Name&& name, Pairs&&... pairs) const { return debug_struct_pairs_finish_(std::forward<Name>(name), std::forward<Pairs>(pairs)...); }\n\
+    template<typename Name, typename... Pairs>\n\
+    Result debug_struct_field6_finish(Name&& name, Pairs&&... pairs) const { return debug_struct_pairs_finish_(std::forward<Name>(name), std::forward<Pairs>(pairs)...); }\n\
+    template<typename Name, typename... Pairs>\n\
+    Result debug_struct_field7_finish(Name&& name, Pairs&&... pairs) const { return debug_struct_pairs_finish_(std::forward<Name>(name), std::forward<Pairs>(pairs)...); }\n\
+    template<typename Name, typename... Pairs>\n\
+    Result debug_struct_field8_finish(Name&& name, Pairs&&... pairs) const { return debug_struct_pairs_finish_(std::forward<Name>(name), std::forward<Pairs>(pairs)...); }\n\
     template<typename... Args>\n\
     static Result debug_struct_fields_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
     template<typename... Args>\n\
@@ -62974,6 +63189,12 @@ struct Cow_Borrowed {\n\
 struct Cow_Owned {\n\
     rusty::String _0;\n\
     explicit Cow_Owned(rusty::String value) : _0(std::move(value)) {}\n\
+    /* A copied owned Cow clones its String (the variant is copyable where a\n\
+       Rust `&Cow` binding is held by value, serde_bytes's `AsBytes(b)`). */\n\
+    Cow_Owned(const Cow_Owned& other) : _0(other._0.clone()) {}\n\
+    Cow_Owned(Cow_Owned&&) noexcept = default;\n\
+    Cow_Owned& operator=(const Cow_Owned& other) { _0 = other._0.clone(); return *this; }\n\
+    Cow_Owned& operator=(Cow_Owned&&) noexcept = default;\n\
     template<typename Bytes>\n\
     explicit Cow_Owned(Bytes&& bytes)\n\
         requires (!std::is_convertible_v<std::remove_cvref_t<Bytes>, rusty::String>\n\
@@ -62989,6 +63210,26 @@ inline std::string_view cow_view(const Cow& c) {\n\
         return std::string_view(v._0);\n\
     }, c);\n\
 }\n\
+// Rust's `Cow<B>: Deref<Target = B>`. The erased Cow carries text; its\n\
+// dereference is a view that converts to the target either way a callee\n\
+// spells it — `std::span<const uint8_t>` for a `Cow<[u8]>` reaching a\n\
+// bytes parameter (serde_bytes's `serializer.serialize_bytes(self)`),\n\
+// `std::string_view` for a `Cow<str>`. `deref_if_pointer_like` unboxes\n\
+// through this `operator*` like any Deref wrapper's.\n\
+struct CowDeref {\n\
+    std::string_view _v;\n\
+    operator std::string_view() const { return _v; }\n\
+    operator std::span<const uint8_t>() const {\n\
+        return std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(_v.data()), _v.size());\n\
+    }\n\
+    const char* data() const { return _v.data(); }\n\
+    std::size_t size() const { return _v.size(); }\n\
+    std::size_t len() const { return _v.size(); }\n\
+    bool is_empty() const { return _v.empty(); }\n\
+    bool operator==(const CowDeref& other) const { return _v == other._v; }\n\
+    auto operator<=>(const CowDeref& other) const { return _v <=> other._v; }\n\
+};\n\
+inline CowDeref operator*(const Cow& c) { return CowDeref{cow_view(c)}; }\n\
 // Rust `cow == \"literal\"` / cross-variant Cow equality.\n\
 inline bool operator==(const Cow& c, std::string_view s) { return cow_view(c) == s; }\n\
 inline bool operator==(std::string_view s, const Cow& c) { return cow_view(c) == s; }\n\
