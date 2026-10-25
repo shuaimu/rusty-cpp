@@ -2563,6 +2563,25 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   `Deserialize` lanes for REFERENCE self types (`&'a [u8]`, `&'de [u8; N]`, `&'a ByteArray<N>`) are skipped
   as unresolved (`Self` → `*const [u8]` maps to `auto`; the key would be spelled `const X&`), and
   `Cow<[u8]>` / `Cow<Bytes>` collapse to one `rusty::Cow` lane.
+  *The gate's verdict on the step (same day):* unit suite and the row green, matrix 22/3/3 — three
+  crates the row never exercised. (R1) hashbrown, in the rusty std port: its own `Equivalent<K>` lane
+  now exists beside the `equivalent` crate's, so `equivalent_key`'s dispatch carries the `rusty::tag<K>`
+  key, and the port's patcher had dropped `K` from that function's template (undeducible) — the patcher
+  drops the key with it. The derive(Debug) finish helpers, real since this step, reached a `*const ()`
+  field: a void pointer's Debug is its address, never a dereference. (R2) alloc: `impl<T, I>
+  SpecFromIter<T, I> for Vec<T>` gained a lane function (its no-receiver fn's first input counts), and
+  the body named the sibling GENERIC trait's `-> Self` associated fn, which the traits map does not
+  carry (§3.2.8) — as a call it is the keyed lane call `Tr_::f(rusty::self_tag<Self>{}, args)`; as a
+  value where a fn pointer is expected (`let fun: fn(I) -> Vec<T> = const { if .. { from_iter_in_place }
+  else { SpecFromIterNested::<T, I>::from_iter } }`) a captureless lambda with the pointer's signature,
+  the trait's written arguments as its `tag`; a fn-pointer-typed if-expression is an IIFE, because a
+  conditional operator cannot resolve an overload-set operand against a pointer operand while
+  `SafeFn`'s pointer constructor resolves each returned branch. (R3) pollster: the pointee projection's
+  `>::Output` read as an unresolved scoped path and dropped `block_on`'s forward declaration, which the
+  trait default helper emitted ahead of it named. And the `self`-is-`this` rule applies to reference
+  receivers only — a by-value `self` handed to a `this: &Self` static (alloc's `ascend`) stays `(*this)`.
+  Method: a worktree at the previous commit with its own target dir, both binaries replayed on the
+  failing crates' transpile stage, and the emissions diffed — each regression was one line.
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
   needs a pointer or reference-wrapper element spelling; phase 0, the `dyn` coercion family) and the

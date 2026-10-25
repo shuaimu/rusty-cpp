@@ -26580,10 +26580,14 @@ impl CodeGen {
                 // the keyed lane call, `Tr_::f(rusty::self_tag<Owner>{}, args)` —
                 // the trait's arguments deduce from the owner and the arguments
                 // (the lane's `rusty::tag<A…>` parameter is defaulted). The
-                // owner is the expected type, else the impl's self type.
+                // owner is the expected type, else the type parameter bounded
+                // by the trait, else the impl's self type.
+                let bound_param: Option<syn::Type> = self
+                    .resolve_unique_trait_bound_type_param(key.rsplit("::").next().unwrap_or(&key))
+                    .and_then(|p| syn::parse_str::<syn::Type>(&p).ok());
                 let impl_self_ty =
                     self.current_impl_method_self_tys.last().and_then(|t| t.as_ref());
-                let Some(exp) = expected_ty.or(impl_self_ty) else {
+                let Some(exp) = expected_ty.or(bound_param.as_ref()).or(impl_self_ty) else {
                     return None;
                 };
                 let cpp = self.map_type(exp);
@@ -26613,11 +26617,17 @@ impl CodeGen {
                     return None;
                 }
                 // No expected type (a lane function's `return
-                // SpecFromIterNested::from_iter(iterator)`, alloc): the impl's
-                // self type is the owner — the call sits in an impl function
-                // of that type and returns `Self`.
+                // SpecFromIterNested::from_iter(iterator)`, alloc): the type
+                // parameter bounded by the trait is the owner (serde_core's
+                // `Error::invalid_value(..)` inside `fn visit_str<E: Error>` is
+                // `E`'s, never the visitor's — measured, the second gate), else
+                // the impl's self type — the call sits in an impl function of
+                // that type and returns `Self`.
+                let bound_param: Option<syn::Type> = self
+                    .resolve_unique_trait_bound_type_param(key.rsplit("::").next().unwrap_or(&key))
+                    .and_then(|p| syn::parse_str::<syn::Type>(&p).ok());
                 let impl_self_ty = self.current_impl_method_self_tys.last().and_then(|t| t.as_ref());
-                let Some(exp) = expected_ty.or(impl_self_ty) else {
+                let Some(exp) = expected_ty.or(bound_param.as_ref()).or(impl_self_ty) else {
                     return None;
                 };
                 let cpp = self.map_type(exp);

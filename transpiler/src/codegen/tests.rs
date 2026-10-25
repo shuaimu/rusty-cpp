@@ -52302,3 +52302,27 @@ fn test_trait_static_fn_item_in_a_fn_pointer_conditional_is_a_pointer_into_the_l
         "the fn item is a pointer into the keyed lane: {out}"
     );
 }
+
+#[test]
+fn test_trait_static_self_fn_in_a_bounded_method_is_owned_by_the_bound_param_not_the_impl() {
+    // serde_core's `impl Visitor for StrVisitor { fn visit_str<E: Error>(..)
+    // -> Result<_, E> { .. Error::invalid_value(..) .. } }`: with no expected
+    // type at the call, the owner is the type parameter bounded by the trait
+    // (`E`), never the impl's self type (the visitor) — the second gate found
+    // `ErrorTraits<StrVisitor>::invalid_value` after the impl-self fallback.
+    let out = transpile_str_module(
+        r#"
+        pub trait Error: Sized { fn invalid_value(x: i32) -> Self; }
+        pub struct V { pub n: i32 }
+        impl V {
+            pub fn go<E: Error>(self) -> E {
+                let e = Error::invalid_value(self.n);
+                e
+            }
+        }
+        "#,
+        "consumer",
+    );
+    assert!(!out.contains("ErrorTraits<V>"), "the owner is the bound parameter, not the impl's self type: {out}");
+    assert!(out.contains("ErrorTraits<E>::invalid_value("), "the owner is `E`: {out}");
+}
