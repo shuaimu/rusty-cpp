@@ -42109,8 +42109,12 @@ fn test_extension_trait_mut_receiver_forwarding_ref_and_mut_span() {
         "#,
     );
     assert!(
-        out.contains("fill_empty(TagSliceExt_::impl_::tag, Self_&& self_)"),
-        "&mut default method must take a forwarding ref\nGot: {out}"
+        out.contains("fill_empty(TagSliceExt_::impl_::tag, Recv_&& self_)"),
+        "&mut default method must take a forwarding ref through its own receiver parameter\nGot: {out}"
+    );
+    assert!(
+        out.contains("template<typename Recv_, typename Self_ = std::remove_cvref_t<Recv_>>"),
+        "the declaration defaults Self_ to the receiver's value type\nGot: {out}"
     );
     assert!(
         out.contains("std::span<rusty::MaybeUninit<Tag>> self_"),
@@ -51413,5 +51417,92 @@ fn test_lane_body_resolves_an_imported_enum_against_the_impl_module() {
     assert!(
         out.contains("dp::Content_B") || out.contains("depcrate::private_::Content_B"),
         "the import's target owns the variant struct: {out}"
+    );
+}
+
+#[test]
+fn test_keyed_mut_self_default_splits_its_receiver_from_the_self_key() {
+    // Book §3.2.2 rule 7 (2026-10-24): a `&mut self` default template binds its
+    // receiver through its OWN forwarding-reference parameter `Recv_`; `Self_`
+    // is Rust's `Self` — deduced from the `rusty::self_tag<Self_>` key when a
+    // call passes one, `std::remove_cvref_t<Recv_>` otherwise. With `Self_&&`
+    // as the receiver, a type-parameter receiver keyed `self_tag<A>` on an
+    // lvalue `A` deduced `Self_` as `A&` AND `A` — a conflict, and serde_core's
+    // `next_element` fell to a member serde_test's visitors do not have.
+    let out = transpile_str(
+        r#"
+        pub trait Access {
+            fn req(&mut self, seed: i32) -> i32;
+            fn step(&mut self) -> i32 {
+                self.req(1)
+            }
+            fn peek(&self) -> i32 {
+                0
+            }
+            fn finish(self) -> i32
+            where
+                Self: Sized,
+            {
+                1
+            }
+        }
+        pub struct Seq {
+            pub v: i32,
+        }
+        impl Access for Seq {
+            fn req(&mut self, seed: i32) -> i32 {
+                self.v += seed;
+                self.v
+            }
+        }
+        impl<'a, A: Access> Access for &'a mut A {
+            fn req(&mut self, seed: i32) -> i32 {
+                (**self).req(seed)
+            }
+        }
+        pub fn drive<A: Access>(mut a: A) -> i32 {
+            a.step()
+        }
+        "#,
+    );
+    // The declaration: `Recv_` ahead of a defaulted `Self_`, the receiver
+    // through `Recv_`, the key still on `Self_`.
+    assert!(
+        out.contains("template<typename Recv_, typename Self_ = std::remove_cvref_t<Recv_>>"),
+        "declaration head: {out}"
+    );
+    assert!(
+        out.contains("step(Access_::impl_::tag, Recv_&& self_, rusty::self_tag<Self_> = {});"),
+        "declaration receiver and key: {out}"
+    );
+    // The definition repeats neither the default argument nor `Self_&&`.
+    assert!(
+        out.contains("template<typename Recv_, typename Self_>
+"),
+        "definition head without the default: {out}"
+    );
+    assert!(
+        out.contains("step(Access_::impl_::tag, Recv_&& self_, rusty::self_tag<Self_>) {"),
+        "definition receiver and key: {out}"
+    );
+    assert!(!out.contains("Self_&& self_"), "no receiver deduces Self_ any more: {out}");
+    // `&self` and by-value defaults keep one parameter: a value type deduced
+    // from the receiver agrees with a value key.
+    assert!(
+        out.contains("peek(Access_::impl_::tag, const Self_& self_, rusty::self_tag<Self_> = {});"),
+        "&self default unchanged: {out}"
+    );
+    assert!(
+        out.contains("finish(Access_::impl_::tag, Self_ self_, rusty::self_tag<Self_> = {});"),
+        "by-value default unchanged: {out}"
+    );
+    assert!(
+        !out.contains("peek(Access_::impl_::tag, const Recv_&") && !out.contains("finish(Access_::impl_::tag, Recv_"),
+        "only the &mut self shape splits: {out}"
+    );
+    // The call site is unchanged: a type-parameter receiver passes its key.
+    assert!(
+        out.contains("Access_::step(std::forward<decltype(__self)>(__self), rusty::self_tag<A>{})"),
+        "keyed call on the type-parameter receiver: {out}"
     );
 }

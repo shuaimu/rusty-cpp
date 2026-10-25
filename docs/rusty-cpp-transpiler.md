@@ -1484,7 +1484,13 @@ before any crate flips.
    (`via_bound<const T&>(r)`; deduction would collapse the reference). Measured identical to rustc on
    9/9 and 7/7 lines (§3.2.15). Both tags compose, one trailing parameter each; the dyn forwarders
    carry them as template parameters (`TrAdapterRef<A…, U>`, `TrAdapterRef<const T&>`) and pass them in
-   every slot.
+   every slot. **A default template's `Self_` is Rust's `Self` — the key's argument when a call passes
+   one, the receiver's value type otherwise — so it must never also be deduced through a receiver that
+   can bind a reference:** a `&mut self` default takes its receiver through its own forwarding-reference
+   parameter, `template<typename Recv_, typename Self_ = std::remove_cvref_t<Recv_>> m(tag, Recv_&&
+   self_, rusty::self_tag<Self_> = {})` (the default argument on the declaration only); `&self`
+   (`const Self_&`) and by-value `self` (`Self_`) deduce a value type and keep the one parameter
+   (2026-10-24, below).
 
 **Where an impl's functions are declared** (§3.2.5 has the module rules): in the **self type's
 declaring namespace** when the self type is declared by the emitting crate — ADL on the receiver finds
@@ -2491,6 +2497,29 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   ordering test asserts that none is emitted and the call is qualified). Oracle (gate, main @ 6c15c2a1): the matrix identical to step 5b's in every row's error
   set — 28 rows, 20 PASS, the pre-existing 5 FAIL, 3 known-fail; unit 2581 after four
   directive-expectation updates. Phase 2 is complete.
+- *2026-10-24 — rule 7, the default template's receiver:* a `&mut self` default was `template<typename
+  Self_> m(tag, Self_&& self_, rusty::self_tag<Self_> = {})`, and the keyed call a type-parameter
+  receiver makes (`Tr_::m(x, rusty::self_tag<A>{})`, `x: A`) deduced `Self_` twice — `A&` through the
+  forwarding reference, `A` through the key — a conflict, so the default was never viable for a keyed
+  lvalue call and the ladder fell to the member fallback. Measured on the serde_bytes row: serde_core's
+  `IgnoredAny::visit_seq`/`visit_map` call `next_element`/`next_entry` on serde_test's visitors, which
+  implement only the required `*_seed` methods — `no member named 'next_element' in
+  'serde_test::de::DeserializerSeqVisitor'` (×3). Fix: the receiver is its own parameter, `template<typename
+  Recv_, typename Self_ = std::remove_cvref_t<Recv_>> m(tag, Recv_&& self_, rusty::self_tag<Self_> = {})` —
+  `Self_` is Rust's `Self`, from the key when passed, the receiver's value type otherwise; the body's
+  `Self_` spellings (`std::remove_cvref_t<Self_>::Error`, the `self_tag<Self_>` it passes to siblings)
+  keep meaning `Self`; the definition repeats the head without the default argument. Probed on clang 22
+  (`$S/key_probe`): the four keyed `&mut self` cells go from the member fallback to the impl's value; the
+  reference-instantiation cells (`A = S&`, the blanket `impl Tr for &mut A`) and every unkeyed cell are
+  unchanged. `&self` (`const Self_&`) and by-value (`Self_`) defaults deduce a value type and agree with a
+  value key, so they keep one parameter; a by-value default keyed with a REFERENCE `Self` (`self_tag<S&>`
+  on `std::move(x)`, `x: S&`) still conflicts — recorded, no failing cell (serde_test's `&mut Serializer`
+  reaches its by-value Serializer methods as a pointer `S*`, through the deref rung and the member).
+  Found on the way, left alone: with the trailing key defaulted and unsupplied, a default and a blanket
+  reference impl's override of it are equally specialized (`Tr_::size_hint(p)` is ambiguous in the
+  probe); production is masked because the emitter does not emit the blanket's overrides of defaulted
+  methods at all (serde_core's `impl SeqAccess for &mut A` emits only `next_element_seed`), so a
+  `&mut A` receiver's `size_hint` is the default's `None` — a silent drop to classify.
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
   needs a pointer or reference-wrapper element spelling; phase 0, the `dyn` coercion family) and the

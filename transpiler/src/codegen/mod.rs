@@ -24355,6 +24355,21 @@ impl CodeGen {
         !unresolved.is_empty()
     }
 
+    /// Book §3.2.2 rule 7 (2026-10-24): does this default template take
+    /// `&mut self`? Its receiver is then the forwarding-reference parameter
+    /// `Recv_&&` of its own template parameter, and `Self_` — Rust's `Self`,
+    /// the type the `rusty::self_tag<Self_>` key names — follows it in the
+    /// template head, defaulted to `std::remove_cvref_t<Recv_>` on the
+    /// declaration. `&self` (`const Self_&`) and by-value `self` (`Self_`)
+    /// defaults deduce a value type from the receiver and keep one parameter.
+    fn ufcs_default_receiver_is_mut_ref(method_spec: &ExtensionImplMethod) -> bool {
+        method_spec.self_is_template_param
+            && matches!(
+                method_spec.method.sig.inputs.first(),
+                Some(syn::FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_some()
+            )
+    }
+
     fn extension_receiver_param_cpp_type(
         &self,
         self_cpp_ty: &str,
@@ -24369,15 +24384,21 @@ impl CodeGen {
             // `&mut self` must bind rvalue receivers (e.g. a `std::span` produced by
             // value from `self.ctrl_slice()`), which a plain `T&` lvalue ref cannot.
             // (`&self` below uses `const T&`, which already binds rvalues.)
-            //   - template param `Self_` → FORWARDING reference (binds anything; for
-            //     lvalue args still deduces to an lvalue ref, so call sites are
-            //     unaffected);
+            //   - template param `Self_` → FORWARDING reference through the
+            //     default template's OWN receiver parameter `Recv_` (book §3.2.2
+            //     rule 7, 2026-10-24): `Self_` is Rust's `Self` — deduced from
+            //     the `rusty::self_tag<Self_>` key when a call passes one,
+            //     defaulted to `std::remove_cvref_t<Recv_>` otherwise. Deducing
+            //     `Self_` from the receiver itself gave `A&` for an lvalue `A`
+            //     against the key's `A` — a deduction conflict that dropped
+            //     every keyed `&mut self` default call to the member fallback
+            //     (serde_core's `next_element` on serde_test's visitors);
             //   - `std::span` (a view = the `&mut [T]` fat pointer) → BY VALUE, with
             //     element const-ness carrying `&` vs `&mut` (drop a leading element
             //     `const` here); mutation through the view still hits the data;
             //   - regular types → keep the in-place lvalue ref.
             if mapped == "Self_" {
-                return "Self_&&".to_string();
+                return "Recv_&&".to_string();
             }
             if mapped.starts_with("std::span<") {
                 if let Some(inner) = mapped.strip_prefix("std::span<const ") {
@@ -24706,9 +24727,30 @@ impl CodeGen {
                 &method.sig,
                 &projection_defaulted,
             );
-            free_generics
-                .params
-                .insert(insert_at, syn::parse_quote!(Self_));
+            if Self::ufcs_default_receiver_is_mut_ref(method_spec) {
+                // Book §3.2.2 rule 7: the `&mut self` default's receiver is its
+                // own forwarding-reference parameter; `Self_` (Rust's `Self`)
+                // follows it, defaulted to the receiver's value type — the
+                // default template argument belongs to this declaration pass
+                // only (a redeclaration may not repeat it).
+                free_generics
+                    .params
+                    .insert(insert_at, syn::parse_quote!(Recv_));
+                let mut self_param: syn::TypeParam = syn::parse_quote!(Self_);
+                self_param.eq_token = Some(Default::default());
+                self_param.default = Some(syn::Type::Verbatim(
+                    "std::remove_cvref_t<Recv_>"
+                        .parse::<proc_macro2::TokenStream>()
+                        .expect("a literal C++ type spelling"),
+                ));
+                free_generics
+                    .params
+                    .insert(insert_at + 1, syn::GenericParam::Type(self_param));
+            } else {
+                free_generics
+                    .params
+                    .insert(insert_at, syn::parse_quote!(Self_));
+            }
             // Item-projection defaults for params only the where-clause binds
             // (declaration pass only; the definition renders without defaults).
             self.apply_iterator_item_projection_defaults(&mut free_generics, &method.sig);
@@ -25877,9 +25919,20 @@ impl CodeGen {
                 &method.sig,
                 &projection_defaulted,
             );
-            free_generics
-                .params
-                .insert(insert_at, syn::parse_quote!(Self_));
+            if Self::ufcs_default_receiver_is_mut_ref(method_spec) {
+                // Book §3.2.2 rule 7: `Recv_` ahead of `Self_`, as declared;
+                // the definition must not repeat `Self_`'s default argument.
+                free_generics
+                    .params
+                    .insert(insert_at, syn::parse_quote!(Recv_));
+                free_generics
+                    .params
+                    .insert(insert_at + 1, syn::parse_quote!(Self_));
+            } else {
+                free_generics
+                    .params
+                    .insert(insert_at, syn::parse_quote!(Self_));
+            }
         }
         let prev_forward_decl_signature = self.in_forward_decl_signature;
         self.in_forward_decl_signature = true;
