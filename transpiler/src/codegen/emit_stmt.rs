@@ -6432,6 +6432,19 @@ impl CodeGen {
         }
         let then_expr = then_single.unwrap();
         let else_expr = else_single.unwrap();
+        // A fn-pointer-typed if-expression (alloc's `let fun: fn(I) -> Vec<T> =
+        // const { if .. { from_iter_in_place } else { Tr::<..>::from_iter } }`):
+        // the IIFE, whose annotated return initializes each branch's fn item —
+        // an overload set resolves against `SafeFn`'s pointer constructor,
+        // which the conditional operator's operands cannot do between
+        // themselves once one side is a resolved pointer.
+        if expected_ty
+            .is_some_and(|t| matches!(self.peel_paren_group_type(t), syn::Type::BareFn(_)))
+            && !self.block_contains_early_return_or_try(&if_expr.then_branch)
+            && !self.expr_contains_early_return_or_try(else_branch)
+        {
+            return self.emit_if_expr_as_iife(if_expr, expected_ty);
+        }
 
         let inferred_expected_ty = if expected_ty.is_none() {
             self.infer_constructor_expected_type_from_pair(then_expr, else_expr)

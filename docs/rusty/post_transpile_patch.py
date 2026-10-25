@@ -71,6 +71,15 @@ def patch_hashbrown(path: Path) -> None:
         "export template<typename Q>\n"
         "    auto equivalent_key(const Q& k) {",
     )
+    # The body's keyed dispatch spells the trait argument, `rusty::tag<K>{}`
+    # (hashbrown's own `Equivalent<K>` lane, since the transpiler stopped
+    # deduping it against the `equivalent` crate's); `K` is exactly the
+    # parameter dropped above, and the lane deduces it from `x.0` anyway.
+    t = re.sub(
+        r"(    auto equivalent_key\(const Q& k\) \{\n)([^\n]*)",
+        lambda m: m.group(1) + m.group(2).replace(", rusty::tag<K>{}", ""),
+        t,
+    )
     # `mem::replace(&mut place, v)` — the &mut place arrived as a POINTER
     # (addr_of_temp); the runtime replace takes T&.
     t = t.replace(

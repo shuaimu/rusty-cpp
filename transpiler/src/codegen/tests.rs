@@ -52189,3 +52189,116 @@ fn test_reference_receiver_into_a_trait_method_argument_is_the_pointer() {
     assert!(out.contains("(value, this)"), "the reference receiver is passed as the pointer: {out}");
     assert!(!out.contains("(value, (*this))"), "never the dereferenced copy: {out}");
 }
+
+#[test]
+fn test_no_receiver_lane_body_calls_a_sibling_trait_static_through_its_lane() {
+    // alloc's `impl<T, I> SpecFromIter<T, I> for Vec<T> { default fn from_iter(i: I)
+    // -> Self { SpecFromIterNested::from_iter(i) } }`: once a no-receiver fn's
+    // first input counts as a parameter, the impl function is a lane function,
+    // and its body's static call on a sibling crate trait must be that trait's
+    // keyed lane call — not the bare trait name (the interface class).
+    let out = transpile_str_module(
+        r#"
+        pub trait Inner<T, I> { fn from_iter(i: I) -> Self; }
+        pub trait Outer<T, I> { fn from_iter(i: I) -> Self; }
+        pub struct Vecc<T> { pub v: Vec<T> }
+        impl<T, I> Inner<T, I> for Vecc<T> where I: Iterator<Item = T> {
+            fn from_iter(i: I) -> Self { Vecc { v: i.collect() } }
+        }
+        impl<T, I> Outer<T, I> for Vecc<T> where I: Iterator<Item = T> {
+            fn from_iter(i: I) -> Self { Inner::from_iter(i) }
+        }
+        "#,
+        "consumer",
+    );
+    assert!(
+        !out.contains("return Inner::from_iter("),
+        "the sibling trait's static call is not the bare interface name: {out}"
+    );
+    assert!(
+        out.contains("Inner_::from_iter(rusty::self_tag<Self>{}, std::move(i))"),
+        "the sibling generic trait's static call is its keyed lane call on the lane's `Self` alias: {out}"
+    );
+}
+
+#[test]
+fn test_free_fn_returning_a_pointee_projection_keeps_its_forward_declaration() {
+    // pollster: `pub fn block_on<F: IntoFuture>(fut: F) -> F::Output` maps its
+    // return to the pointer-robust projection
+    // `typename std::remove_pointer_t<std::remove_cvref_t<F>>::Output`; the
+    // scoped-path check read `>::Output` as an unresolved module path and
+    // dropped the forward declaration, so the trait default helper emitted
+    // ahead of it (`FutureExtRuntimeHelper::block_on` → `::pollster::block_on`)
+    // could not name it.
+    let out = transpile_str_module(
+        r#"
+        pub trait FutureExt: IntoFuture {
+            fn block_on(self) -> Self::Output where Self: Sized { block_on(self) }
+        }
+        impl<F: IntoFuture> FutureExt for F {}
+        pub fn block_on<F: IntoFuture>(fut: F) -> F::Output { fut.into_future().poll_now() }
+        "#,
+        "pollster",
+    );
+    assert!(out.contains("block_on(F fut);"), "the forward declaration stays: {out}");
+}
+
+#[test]
+fn test_trait_static_fn_item_as_a_fn_pointer_value_is_the_keyed_lane_call() {
+    // alloc's `let fun: fn(I) -> Vec<T> = const { if .. { from_iter_in_place }
+    // else { SpecFromIterNested::<T, I>::from_iter } }`: the associated fn as
+    // a VALUE where a fn pointer is expected is a captureless lambda into the
+    // keyed lane, converted to the pointer.
+    let out = transpile_str_module(
+        r#"
+        pub trait Inner<T, I> { fn from_iter(i: I) -> Self; }
+        pub trait Outer<T, I> { fn from_iter(i: I) -> Self; }
+        pub struct Vecc<T> { pub v: Vec<T> }
+        impl<T, I> Inner<T, I> for Vecc<T> where I: Iterator<Item = T> {
+            fn from_iter(i: I) -> Self { Vecc { v: i.collect() } }
+        }
+        impl<T, I> Outer<T, I> for Vecc<T> where I: Iterator<Item = T> {
+            fn from_iter(i: I) -> Self {
+                let f: fn(I) -> Vecc<T> = Inner::<T, I>::from_iter;
+                f(i)
+            }
+        }
+        "#,
+        "consumer",
+    );
+    assert!(
+        out.contains("return Inner_::from_iter(rusty::self_tag<Vecc<T>>{}, std::forward<decltype(__a)>(__a)..., rusty::tag<T, I>{}); }"),
+        "the fn item is a lambda into the keyed lane: {out}"
+    );
+}
+
+#[test]
+fn test_trait_static_fn_item_in_a_fn_pointer_conditional_is_a_pointer_into_the_lane() {
+    // alloc's `let fun: fn(I) -> Vec<T> = const { if .. { from_iter_in_place }
+    // else { SpecFromIterNested::<T, I>::from_iter } }`: the branch names the
+    // fn item where a fn pointer is expected — a captureless lambda with the
+    // pointer's signature, converted with unary plus, so the conditional's
+    // other operand (an overload set) resolves against it.
+    let out = transpile_str_module(
+        r#"
+        pub trait Inner<T, I> { fn from_iter(i: I) -> Self; }
+        pub trait Outer<T, I> { fn from_iter(i: I) -> Self; }
+        pub struct Vecc<T> { pub v: Vec<T> }
+        pub fn other<T, I: Iterator<Item = T>>(i: I) -> Vecc<T> { Vecc { v: i.collect() } }
+        impl<T, I> Inner<T, I> for Vecc<T> where I: Iterator<Item = T> {
+            fn from_iter(i: I) -> Self { Vecc { v: i.collect() } }
+        }
+        impl<T, I> Outer<T, I> for Vecc<T> where I: Iterator<Item = T> {
+            fn from_iter(i: I) -> Self {
+                let f: fn(I) -> Vecc<T> = if true { other } else { Inner::<T, I>::from_iter };
+                f(i)
+            }
+        }
+        "#,
+        "consumer",
+    );
+    assert!(
+        out.contains("+[](I __a0) -> Vecc<T> { return Inner_::from_iter(rusty::self_tag<Vecc<T>>{}, std::move(__a0), rusty::tag<T, I>{}); }"),
+        "the fn item is a pointer into the keyed lane: {out}"
+    );
+}

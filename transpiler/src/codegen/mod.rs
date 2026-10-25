@@ -50524,6 +50524,12 @@ impl CodeGen {
         if !is_probably_callable {
             return None;
         }
+        // A crate trait's `-> Self` associated fn (alloc's
+        // `SpecFromIterNested::<T, I>::from_iter` as a value): the keyed lane
+        // call, already a lambda.
+        if let Some(lane) = self.try_emit_trait_static_fn_item_as_generic_lambda(path_expr) {
+            return Some(lane);
+        }
         let target = self.emit_expr_path_to_string(path);
         // A NON-generic local fn item is a unique C++ free function: the
         // bare name decays to a function pointer (the shape a C callback
@@ -61417,6 +61423,14 @@ std::string to_debug_string(const T& value) {
         }
         return std::string("'") + rusty::detail::utf8_from_char32(ch) + "'";
     } else if constexpr (std::is_pointer_v<Value>
+        && std::is_void_v<std::remove_cv_t<std::remove_pointer_t<Value>>>) {
+        /* A `*const ()` / `*const c_void` has no pointee to print: its Debug
+           is the address, as Rust's `{:?}` on a raw pointer. */
+        char __addr[32];
+        std::snprintf(__addr, sizeof __addr, "0x%llx",
+                      static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(value)));
+        return std::string(__addr);
+    } else if constexpr (std::is_pointer_v<Value>
         && !std::is_same_v<std::remove_cv_t<std::remove_pointer_t<Value>>, char>) {
         if (value == nullptr) {
             return "<null>";
@@ -62768,6 +62782,14 @@ std::string to_debug_string(const T& value) {\n\
             default: break;\n\
         }\n\
         return std::string(\"'\") + rusty::detail::utf8_from_char32(ch) + \"'\";\n\
+    } else if constexpr (std::is_pointer_v<Value>\n\
+        && std::is_void_v<std::remove_cv_t<std::remove_pointer_t<Value>>>) {\n\
+        /* A `*const ()` / `*const c_void` has no pointee to print: its Debug\n\
+           is the address, as Rust's `{:?}` on a raw pointer. */\n\
+        char __addr[32];\n\
+        std::snprintf(__addr, sizeof __addr, \"0x%llx\",\n\
+                      static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(value)));\n\
+        return std::string(__addr);\n\
     } else if constexpr (std::is_pointer_v<Value>\n\
         && !std::is_same_v<std::remove_cv_t<std::remove_pointer_t<Value>>, char>) {\n\
         if (value == nullptr) {\n\

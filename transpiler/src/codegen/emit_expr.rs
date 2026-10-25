@@ -14910,22 +14910,166 @@ impl CodeGen {
 
     /// Emit an expression with optional expected type context from its parent.
     /// Currently used for typed `let` initializers to guide enum variant constructor calls.
+    /// A crate trait's `-> Self` associated fn named as a VALUE where a
+    /// `fn(..) -> R` is expected — alloc's `let fun: fn(I) -> Vec<T> = const {
+    /// if .. { from_iter_in_place } else { SpecFromIterNested::<T, I>::from_iter }
+    /// }` inside the lane function of `impl SpecFromIter for Vec<T>`: a
+    /// function pointer, `+[](I __a0) -> Vec<T> { return
+    /// SpecFromIterNested_::from_iter(rusty::self_tag<Self>{}, std::move(__a0),
+    /// rusty::tag<T, I>{}); }`, with the lane's keys — the impl's self type and
+    /// the trait's written arguments. The bare trait path spelled a
+    /// `SpecFromIterNested<T, I>::from_iter` that names no template.
+    /// The generic-lambda twin, for a callable position with no fn-pointer
+    /// type to spell (`let f = Inner::<T, I>::from_iter;` bound through
+    /// `emit_callable_path_item_expr`).
+    pub(super) fn try_emit_trait_static_fn_item_as_generic_lambda(
+        &self,
+        path_expr: &syn::ExprPath,
+    ) -> Option<String> {
+        let (callee, self_key, tag) = self.trait_static_fn_item_lane_parts(path_expr)?;
+        Some(format!(
+            "[](auto&&... __a) -> decltype(auto) {{ return {}({}, std::forward<decltype(__a)>(__a)...{}); }}",
+            callee, self_key, tag
+        ))
+    }
+
+    /// The keyed lane call's parts for a crate trait's `-> Self` associated fn
+    /// named as a value: `(Tr_::f, rusty::self_tag<Self>{}, ", rusty::tag<A..>{}")`.
+    fn trait_static_fn_item_lane_parts(
+        &self,
+        path_expr: &syn::ExprPath,
+    ) -> Option<(String, String, String)> {
+        if path_expr.qself.is_some() || path_expr.path.segments.len() < 2 {
+            return None;
+        }
+        let segs = &path_expr.path.segments;
+        let method = segs.last()?.ident.to_string();
+        if !matches!(segs.last()?.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let trait_seg = segs.iter().nth_back(1)?;
+        let owner: String = segs
+            .iter()
+            .take(segs.len() - 1)
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let key = self.nonvtable_trait_key(&owner)?;
+        if !self.ufcs_impl_lane_covers_trait_key(&key) {
+            return None;
+        }
+        if !self
+            .trait_nonvtable_fns
+            .get(&key)
+            .is_some_and(|v| v.iter().any(|(n, _, rs)| n == &method && *rs))
+        {
+            return None;
+        }
+        let self_ty = self.current_impl_method_self_tys.last().and_then(|t| t.as_ref())?;
+        let valid = |s: &str| {
+            !s.is_empty() && s != "auto" && !s.contains("/* TODO") && !type_string_has_auto_placeholder(s)
+        };
+        let self_cpp = self.map_type(self_ty);
+        if !valid(&self_cpp) {
+            return None;
+        }
+        let tag = match &trait_seg.arguments {
+            syn::PathArguments::AngleBracketed(args) => {
+                let spelled: Vec<String> = args
+                    .args
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        syn::GenericArgument::Type(ty) => Some(self.map_type(ty)),
+                        _ => None,
+                    })
+                    .collect();
+                if spelled.is_empty() || !spelled.iter().all(|s| valid(s)) {
+                    String::new()
+                } else {
+                    format!(", rusty::tag<{}>{{}}", spelled.join(", "))
+                }
+            }
+            _ => String::new(),
+        };
+        let short = key.rsplit("::").next().unwrap_or(&key).to_string();
+        Some((
+            format!("{}::{}", self.ufcs_trait_namespace(&short), escape_cpp_keyword(&method)),
+            format!("rusty::self_tag<{}>{{}}", self.normalize_qself_base_for_assoc(&self_cpp)),
+            tag,
+        ))
+    }
+
+    fn try_emit_trait_static_fn_item_as_fn_pointer(
+        &self,
+        path_expr: &syn::ExprPath,
+        bare: &syn::TypeBareFn,
+    ) -> Option<String> {
+        let (callee, self_key, tag) = self.trait_static_fn_item_lane_parts(path_expr)?;
+        let valid = |s: &str| {
+            !s.is_empty() && s != "auto" && !s.contains("/* TODO") && !type_string_has_auto_placeholder(s)
+        };
+        let mut params: Vec<String> = Vec::new();
+        let mut forwards: Vec<String> = vec![self_key];
+        for (idx, input) in bare.inputs.iter().enumerate() {
+            let ty = self.map_type(&input.ty);
+            if !valid(&ty) {
+                return None;
+            }
+            params.push(format!("{} __a{}", ty, idx));
+            forwards.push(format!("std::move(__a{})", idx));
+        }
+        let ret = match &bare.output {
+            syn::ReturnType::Type(_, ty) => self.map_type(ty),
+            syn::ReturnType::Default => "void".to_string(),
+        };
+        if !valid(&ret) {
+            return None;
+        }
+        Some(format!(
+            "+[]({}) -> {} {{ return {}({}{}); }}",
+            params.join(", "),
+            ret,
+            callee,
+            forwards.join(", "),
+            tag
+        ))
+    }
+
     pub(super) fn emit_expr_to_string_with_expected(
         &self,
         expr: &syn::Expr,
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if let Some(mapped) = self.try_emit_standard_future_pending(expr, expected_ty) { return mapped; }
+        if let Some(expected) = expected_ty
+            && let syn::Type::BareFn(bare) = self.peel_paren_group_type(expected)
+            && let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(expr)
+            && let Some(pointer) = self.try_emit_trait_static_fn_item_as_fn_pointer(path_expr, bare)
+        {
+            return pointer;
+        }
         // A reference self type's `Self` is the referent POINTER (paths.rs
         // `reference_self_value_type`): `self` handed out where that pointer is
         // expected (`return self`, `Ok(self)`, a pointer field) is `this`, not
         // a copy of `*this`.
+        // Only a `self` that IS a reference — a `&self`/`&mut self` receiver,
+        // or any receiver of a reference self type; a by-value `self` of a
+        // value type is the object (alloc's `fn ascend(self)` handing `&self`
+        // to `Self::as_leaf_ptr(this: &Self)` stays `(*this)`, measured).
         if let Some(expected) = expected_ty
             && matches!(
                 self.peel_paren_group_expr(expr),
                 syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("self")
             )
             && self.current_self_path_override().is_none()
+            && (self
+                .lookup_local_binding_type("self")
+                .is_some_and(|ty| matches!(self.peel_paren_group_type(&ty), syn::Type::Reference(_)))
+                || self
+                    .current_impl_method_self_tys
+                    .last()
+                    .and_then(|ty| ty.as_ref())
+                    .is_some_and(|ty| matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_))))
             && self.map_type(expected).trim_end().ends_with('*')
         {
             return "this".to_string();
@@ -26419,6 +26563,44 @@ impl CodeGen {
                 let key = self.nonvtable_owner_trait(&owner, &method, false)?;
                 (escape_cpp_keyword(&owner), key)
             } else if let Some(key) = self.nonvtable_trait_key(&owner)
+                && self
+                    .ufcs_trait_generic_params
+                    .get(key.rsplit("::").next().unwrap_or(&key))
+                    .is_some_and(|g| !g.is_empty())
+                && self
+                    .trait_nonvtable_fns
+                    .get(&key)
+                    .is_some_and(|v| v.iter().any(|(n, _, rs)| n == &method && *rs))
+                && self.ufcs_impl_lane_covers_trait_key(&key)
+            {
+                // A GENERIC trait's `-> Self` associated fn (alloc's
+                // `SpecFromIterNested::from_iter(iterator)` inside the lane
+                // function of `impl<T, I> SpecFromIter<T, I> for Vec<T>`): the
+                // traits map does not carry generic traits (§3.2.8), so this is
+                // the keyed lane call, `Tr_::f(rusty::self_tag<Owner>{}, args)` —
+                // the trait's arguments deduce from the owner and the arguments
+                // (the lane's `rusty::tag<A…>` parameter is defaulted). The
+                // owner is the expected type, else the impl's self type.
+                let impl_self_ty =
+                    self.current_impl_method_self_tys.last().and_then(|t| t.as_ref());
+                let Some(exp) = expected_ty.or(impl_self_ty) else {
+                    return None;
+                };
+                let cpp = self.map_type(exp);
+                if cpp == "auto" || cpp.contains("/* TODO") || type_string_has_auto_placeholder(&cpp) {
+                    return None;
+                }
+                let args: Vec<String> =
+                    call.args.iter().map(|a| self.emit_expr_maybe_move(a)).collect();
+                let short = key.rsplit("::").next().unwrap_or(&key).to_string();
+                return Some(format!(
+                    "{}::{}(rusty::self_tag<{}>{{}}, {})",
+                    self.ufcs_trait_namespace(&short),
+                    escape_cpp_keyword(&method),
+                    self.normalize_qself_base_for_assoc(&cpp),
+                    args.join(", ")
+                ));
+            } else if let Some(key) = self.nonvtable_trait_key(&owner)
                 && self.trait_declares_nonvtable(&key, &method, false)
             {
                 // `Tr::f(args)` — the self type comes from the expected type,
@@ -26430,7 +26612,14 @@ impl CodeGen {
                 if !returns_self {
                     return None;
                 }
-                let exp = expected_ty?;
+                // No expected type (a lane function's `return
+                // SpecFromIterNested::from_iter(iterator)`, alloc): the impl's
+                // self type is the owner — the call sits in an impl function
+                // of that type and returns `Self`.
+                let impl_self_ty = self.current_impl_method_self_tys.last().and_then(|t| t.as_ref());
+                let Some(exp) = expected_ty.or(impl_self_ty) else {
+                    return None;
+                };
                 let cpp = self.map_type(exp);
                 if cpp == "auto" || cpp.contains("/* TODO") || type_string_has_auto_placeholder(&cpp) {
                     return None;

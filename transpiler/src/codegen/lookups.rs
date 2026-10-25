@@ -80,6 +80,15 @@ impl CodeGen {
     }
 
     pub(super) fn extract_cpp_scoped_path_tokens(spelling: &str) -> Vec<String> {
+        // A member of a template-id (`std::remove_cvref_t<F>>::Output`, the
+        // pointer-robust projection spelling) is a dependent member, not a
+        // scoped path to resolve: `>::X` reads as a plain `X` here (the
+        // unqualified-unknown-name check sees the original spelling, where
+        // the `::` keeps it qualified). Without this the free function's
+        // forward declaration was dropped (pollster's `block_on<F>` →
+        // `F::Output`, and its default-method helper then could not name it).
+        let spelling = spelling.replace(">::", "> ");
+        let spelling = spelling.as_str();
         let mut out = Vec::new();
         let mut cur = String::new();
         let mut flush = |buf: &mut String, out: &mut Vec<String>| {
