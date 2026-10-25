@@ -8251,6 +8251,41 @@ impl CodeGen {
         None
     }
 
+    /// The `X` of an `AsRef<X>` bound on the type parameter a receiver
+    /// expression is declared as (`other: &Rhs` with `Rhs: AsRef<[u8]>` →
+    /// `[u8]`), from the in-scope bound maps; None for a receiver that is not
+    /// a bare in-scope type parameter (through references) or whose recorded
+    /// bound is another trait.
+    pub(super) fn as_ref_bound_target_of_type_param_receiver(
+        &self,
+        receiver: &syn::Expr,
+    ) -> Option<syn::Type> {
+        let ty = self.infer_simple_expr_type(receiver)?;
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(&ty) else {
+            return None;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return None;
+        }
+        let seg = &tp.path.segments[0];
+        if !seg.arguments.is_none() {
+            return None;
+        }
+        let name = seg.ident.to_string();
+        if !self.is_type_param_in_scope(&name) {
+            return None;
+        }
+        let (bound_trait, bound_args) = self
+            .trait_bound_args_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&name))?;
+        if bound_trait != "AsRef" || bound_args.len() != 1 {
+            return None;
+        }
+        Some(bound_args[0].clone())
+    }
+
     pub(super) fn infer_simple_expr_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
         let expr = self.extract_value_expr(expr)?;
         let expr_key = expr as *const syn::Expr as usize;

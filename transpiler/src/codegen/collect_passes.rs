@@ -14530,6 +14530,11 @@ impl CodeGen {
                 let syn::TypeParamBound::Trait(tb) = b else {
                     continue;
                 };
+                // `?Sized` relaxes a bound rather than adding one; recorded,
+                // it would erase a real bound it follows (`AsRef<[u8]> + ?Sized`).
+                if matches!(tb.modifier, syn::TraitBoundModifier::Maybe(_)) {
+                    continue;
+                }
                 let Some(seg) = tb.path.segments.last() else {
                     continue;
                 };

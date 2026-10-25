@@ -9968,6 +9968,35 @@ impl CodeGen {
             return try_for_each_call;
         }
         if mc.method == "as_ref" && mc.args.is_empty() {
+            // `as_ref()` on a type-parameter receiver: the BOUND names the target.
+            // `impl<Rhs: ?Sized + AsRef<[u8]>> PartialEq<Rhs> for Bytes { fn eq(..,
+            // other: &Rhs) { self.as_ref().eq(other.as_ref()) } }` (serde_bytes) is
+            // instantiated with a `std::array<uint8_t, N>`, which has no `as_ref`
+            // member for the deref dispatcher (`rusty::deref_call(other,
+            // __mdisp_as_ref{})`) to find. `AsRef<[u8]>` is the byte view
+            // (`rusty::as_u8_slice`: arrays, Vecs, spans, strings, `as_ref()` /
+            // `as_slice()` owners); `AsRef<[T]>` and `AsRef<str>` are
+            // `rusty::as_slice` (a span, or the string view of a string owner).
+            if let Some(target) = self.as_ref_bound_target_of_type_param_receiver(&mc.receiver) {
+                let helper = match self.peel_reference_paren_group_type(&target) {
+                    syn::Type::Slice(slice)
+                        if matches!(slice.elem.as_ref(), syn::Type::Path(tp)
+                            if tp.qself.is_none() && tp.path.is_ident("u8")) =>
+                    {
+                        Some("rusty::as_u8_slice")
+                    }
+                    syn::Type::Slice(_) => Some("rusty::as_slice"),
+                    syn::Type::Path(tp) if tp.qself.is_none() && tp.path.is_ident("str") => {
+                        Some("rusty::as_slice")
+                    }
+                    _ => None,
+                };
+                if let Some(helper) = helper {
+                    let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                    let receiver = self.wrap_method_receiver(&mc.receiver, raw_receiver);
+                    return format!("{}({})", helper, receiver);
+                }
+            }
             if self.expr_lowers_to_slice_or_span_view(&mc.receiver)
                 || self.is_to_vec_runtime_receiver_expr(&mc.receiver)
             {

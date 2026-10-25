@@ -51506,3 +51506,51 @@ fn test_keyed_mut_self_default_splits_its_receiver_from_the_self_key() {
         "keyed call on the type-parameter receiver: {out}"
     );
 }
+
+#[test]
+fn test_as_ref_on_a_bounded_type_parameter_is_the_bound_s_slice_view() {
+    // serde_bytes: `impl<Rhs: ?Sized + AsRef<[u8]>> PartialEq<Rhs> for Bytes`
+    // compares `other.as_ref()`; instantiated with a `std::array<uint8_t, N>`
+    // the deref dispatcher (`rusty::deref_call(other, __mdisp_as_ref{})`) finds
+    // no `as_ref` member. The bound names the target: `AsRef<[u8]>` is the
+    // byte view, `AsRef<[T]>` / `AsRef<str>` the slice / string view.
+    let out = transpile_str(
+        r#"
+        pub struct Bytes {
+            data: Vec<u8>,
+        }
+        impl Bytes {
+            pub fn as_ref(&self) -> &[u8] {
+                &self.data
+            }
+        }
+        impl<Rhs> PartialEq<Rhs> for Bytes
+        where
+            Rhs: ?Sized + AsRef<[u8]>,
+        {
+            fn eq(&self, other: &Rhs) -> bool {
+                self.as_ref().eq(other.as_ref())
+            }
+        }
+        pub fn total<T: AsRef<[i32]> + ?Sized>(x: &T) -> i32 {
+            x.as_ref().iter().sum()
+        }
+        pub fn width<S: AsRef<str>>(s: S) -> usize {
+            s.as_ref().len()
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::as_u8_slice(other)"),
+        "AsRef<[u8]> on the bounded parameter is the byte view: {out}"
+    );
+    assert!(
+        out.contains("rusty::as_slice(x)"),
+        "AsRef<[i32]> ahead of ?Sized is the slice view: {out}"
+    );
+    assert!(
+        out.contains("rusty::as_slice(s)"),
+        "AsRef<str> is the string view: {out}"
+    );
+    assert!(!out.contains("__mdisp_as_ref"), "no member probe remains: {out}");
+}
