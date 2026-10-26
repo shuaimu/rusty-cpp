@@ -1,5 +1,10 @@
 use super::*;
 
+/// Stand-in identifier for a C++ `Self` spelling that cannot be re-read as a
+/// Rust type while a signature is mapped (see
+/// `map_extension_impl_type_with_self_assoc`); never emitted.
+const SELF_SPELLING_PLACEHOLDER: &str = "__rusty_self_spelling_placeholder__";
+
 impl CodeGen {
     /// A relative standard-library spelling can resolve to a local module.
     /// Absolute extern-prelude paths keep their standard-library identity.
@@ -757,18 +762,43 @@ impl CodeGen {
                 } else {
                     self_cpp_ty
                 };
-                syn::parse_str::<syn::Type>(self_spelling).ok().map(|self_syn| {
+                // The spelling is C++, re-read as Rust type syntax: a
+                // `const`-qualified, pointer or reference spelling
+                // (`std::span<const uint8_t>`, `const ByteArray<N>*` — every
+                // reference self type's) does not parse, and the generic path
+                // below mapped the bare `Self` to an `auto` placeholder that
+                // skipped the lane ("unresolved signature placeholder":
+                // serde_bytes's `impl Deserialize for &'a [u8]`). Such a
+                // spelling rides through the mapping as an opaque identifier
+                // and is spliced back afterwards.
+                let (self_syn, placeholder) = match syn::parse_str::<syn::Type>(self_spelling) {
+                    Ok(parsed) => (Some(parsed), false),
+                    Err(_) => (
+                        syn::parse_str::<syn::Type>(SELF_SPELLING_PLACEHOLDER).ok(),
+                        true,
+                    ),
+                };
+                self_syn.map(|self_syn| {
                     let mut cloned = ty.clone();
                     let mut replacer = super::collect_passes::TypeIdentReplacer {
                         from: "Self".to_string(),
                         to: self_syn,
                     };
                     syn::visit_mut::VisitMut::visit_type_mut(&mut replacer, &mut cloned);
-                    cloned
+                    (cloned, placeholder)
                 })
             };
             match &self_substituted {
-                Some(substituted) => self.map_type(substituted),
+                Some((substituted, true)) => {
+                    let self_spelling = if self_cpp_ty == "Self_" {
+                        "std::remove_reference_t<Self_>"
+                    } else {
+                        self_cpp_ty
+                    };
+                    self.map_type(substituted)
+                        .replace(SELF_SPELLING_PLACEHOLDER, self_spelling)
+                }
+                Some((substituted, false)) => self.map_type(substituted),
                 None => self.map_type(ty),
             }
         };

@@ -2582,6 +2582,51 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   receivers only — a by-value `self` handed to a `this: &Self` static (alloc's `ascend`) stays `(*this)`.
   Method: a worktree at the previous commit with its own target dir, both binaries replayed on the
   failing crates' transpile stage, and the emissions diffed — each regression was one line.
+- *2026-10-26 — (ab) reference self types in a no-receiver lane:* serde_bytes's own `impl Deserialize
+  for &'a [u8]`, `for &'de [u8; N]` and `for &'a ByteArray<N>` were skipped as "unresolved signature
+  placeholder". One general root: a nested `Self` in a lane signature (`Result<Self, D::Error>`) was
+  substituted by re-reading the C++ self spelling as RUST type syntax (`syn::parse_str`), and a spelling
+  with `const`, `*` or `&` — every reference self type's, and every slice impl's `std::span<const T>` —
+  does not parse, so the generic path mapped the bare `Self` to an `auto` placeholder. Such a spelling now
+  rides through the mapping as an opaque identifier and is spliced back (`SELF_SPELLING_PLACEHOLDER`).
+  Representation: in a no-receiver function `Self` is purely a type-level key, so a reference self type
+  whose referent lowers to a C++ reference keys on the referent POINTER, spelled from the reference's own
+  spelling (`const X<N>&` → `const X<N>*`; `extension_lane_self_cpp_type`, `reference_spelling_as_pointer`)
+  — the value spelling is the by-value impl's key, a reference is no payload the `?` lowering's statement
+  expression carries, and `map_type` of a raw pointer with the impl's generics in scope spells
+  `std::add_pointer_t<std::add_const_t<X<N>>>`, an alias template from which `N` can never be deduced.
+  A reference to a view (`&[u8]` → `std::span<const uint8_t>`, `&str`, a DST wrapper such as `Bytes`)
+  already maps to a value and keeps it; receiver-bearing methods keep the mapping their receiver
+  parameter binds. The markers keep witnessing the REFERENT only (`has_<Tr>` strips cvref): the
+  partial-specialization branch now strips the reference like the concrete one did (its
+  `impls_<Tr><const X&>` was dead), a reference self over a bare parameter witnesses nothing (its referent
+  is the primary's shape: unconstrained, "does not specialize any template argument"; constrained by its
+  own trait, "satisfaction depends on itself" — serde_core's `SeqAccess for &mut A`, `Serialize for &T`),
+  and the global-scope qualifiers see through a leading `const` (the `const ByteArray<N>&` marker had been
+  skipped as "Fix B ambiguity" because the qualifier read `const` as the base). A POINTER witness
+  (`impls_<Tr><const X*>`) was tried and withdrawn: `has_<Tr>` on the pointer representation of a
+  reference gates the receiver ladders unconditionally, and the lane binds the referent
+  (trait_probes_collapse's `RefTr::m(&r)` lost its deref rung, measured); the keyed no-receiver call needs
+  no marker. The keyed no-receiver call sites (the seeded `deserialize`, the generic-trait `-> Self`
+  arm, the fn-item lane forms) spell a reference owner the same way (`reference_spelling_as_pointer`);
+  the traits-map route does NOT: `<&Mine as Make>::make(1)` emits `MakeTraits<Mine>::make(1)` — the
+  qself's reference is erased, so the by-value impl answers (task #206's SELF-TYPE collapse at the call
+  site; the lane for `&Mine` exists and is keyed `self_tag<const Mine*>`, the route just never asks). Callers key the same way: a
+  reference seed (`let x: &[u8; N] = Deserialize::deserialize(d)?`) spells
+  `Deserialize_::deserialize(rusty::self_tag<const std::array<uint8_t, N>*>{}, d)`. Open, measured and
+  deliberately left for the next step: (1) the bodies of the array and `ByteArray<N>` lanes forward to
+  serde's `impl Deserialize for &'a ByteArray<N>` through `serde_rt::de::deserialize(PhantomData<const
+  ByteArray<N>*>{}, d)` / `PhantomData<const ByteArray<N>&>`, and the runtime has no pointer-target
+  rung — its reference-target branch deserializes the OWNED value and derefs an `addr_of_temp` of a
+  prvalue (dangling), and serde's reference-self impl collapsed onto the value twin as the hoisted
+  `rusty_Deserialize_deserialize` with the VALUE signature (task #206) — so the two bodies compile only
+  once a pointer target reaches a keyed borrowed member; (2) `Ok(arr)` with `arr: &ByteArray<N>` into an
+  expected `&[u8; N]` payload is Rust deref coercion the emitter does not spell; (3) nothing instantiates
+  the own `Deserialize` lanes yet: the derive's `#[serde(with)]` wrapper `impl Deserialize for
+  __DeserializeWith` is skipped at block scope (inside the hoisted visitor's `visit_seq`, in a match
+  scrutinee block, 17 same-named locals) and the runtime's `.value`-member fallback deserializes the
+  field type with serde_core's semantics — the row's 4/4 verifies the serialize side only.
+
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
   needs a pointer or reference-wrapper element spelling; phase 0, the `dyn` coercion family) and the

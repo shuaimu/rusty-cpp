@@ -52326,3 +52326,148 @@ fn test_trait_static_self_fn_in_a_bounded_method_is_owned_by_the_bound_param_not
     assert!(!out.contains("ErrorTraits<V>"), "the owner is the bound parameter, not the impl's self type: {out}");
     assert!(out.contains("ErrorTraits<E>::invalid_value("), "the owner is `E`: {out}");
 }
+
+#[test]
+fn test_reference_self_no_receiver_lane_keys_on_the_referent_pointer() {
+    // §3.2.16 (ab): in a no-receiver function `Self` is purely a type-level
+    // key. serde_bytes's own `impl Deserialize for &'a [u8]`, `for &'de
+    // [u8; N]` and `for &'a ByteArray<N>` were all "unresolved signature
+    // placeholder": the C++ self spelling is re-read as Rust type syntax to
+    // substitute a nested `Self`, and `std::span<const uint8_t>` / `const
+    // X&` do not parse, so `Result<Self, _>` carried an `auto`. Now the
+    // spelling rides through as a placeholder; a reference self type whose
+    // referent lowers to a C++ reference keys on the referent POINTER
+    // (`reference_self_value_type`), a reference to a view keeps its value
+    // spelling, and the markers witness the pointer beside the referent.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["Deserialize".to_string()],
+        declared_trait_methods: [("Deserialize".to_string(), vec!["deserialize".to_string()])]
+            .into_iter()
+            .collect(),
+        method_owners: [("deserialize".to_string(), vec!["Deserialize".to_string()])]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    cg.set_crate_name("bytes_crate");
+    let file: syn::File = syn::parse_quote! {
+        pub mod arr {
+            pub struct Mine<const N: usize> { pub bytes: [u8; N] }
+        }
+        pub mod de {
+            use crate::arr::Mine;
+            pub trait Deserialize: Sized {
+                fn deserialize<D>(deserializer: D) -> Result<Self, i32> where D: Copy;
+            }
+            impl<'de: 'a, 'a> Deserialize for &'a [u8] {
+                fn deserialize<D>(deserializer: D) -> Result<Self, i32> where D: Copy { Err(1) }
+            }
+            impl<'de, const N: usize> Deserialize for [u8; N] {
+                fn deserialize<D>(deserializer: D) -> Result<Self, i32> where D: Copy { Err(2) }
+            }
+            impl<'de, const N: usize> Deserialize for &'de [u8; N] {
+                fn deserialize<D>(deserializer: D) -> Result<Self, i32> where D: Copy { Err(3) }
+            }
+            impl<'de, const N: usize> Deserialize for Mine<N> {
+                fn deserialize<D>(deserializer: D) -> Result<Self, i32> where D: Copy { Err(4) }
+            }
+            impl<'de: 'a, 'a, const N: usize> Deserialize for &'a Mine<N> {
+                fn deserialize<D>(deserializer: D) -> Result<Self, i32> where D: Copy { Err(5) }
+            }
+            pub fn borrowed<D: Copy>(d: D) -> Result<usize, i32> {
+                let arr: &[u8; 4] = Deserialize::deserialize(d)?;
+                Ok(arr.len())
+            }
+        }
+        pub use de::Deserialize;
+    };
+    cg.emit_file(&file, Some("bytes_crate"));
+    let out = cg.into_output();
+    assert!(
+        !out.contains("unresolved signature placeholder"),
+        "every reference-self lane resolves: {out}"
+    );
+    assert!(
+        out.contains("rusty::Result<std::span<const uint8_t>, int32_t> deserialize(Deserialize_::impl_::tag, rusty::self_tag<std::span<const uint8_t>>, D deserializer)"),
+        "a reference to a slice keeps the view spelling as its key and its nested `Self`: {out}"
+    );
+    assert!(
+        out.contains("rusty::Result<const std::array<uint8_t, N>*, int32_t> deserialize(Deserialize_::impl_::tag, rusty::self_tag<const std::array<uint8_t, N>*>, D deserializer)"),
+        "a reference to an array keys on the referent pointer: {out}"
+    );
+    assert!(
+        out.contains("rusty::Result<const ::bytes_crate::arr::Mine<N>*, int32_t> deserialize(Deserialize_::impl_::tag, rusty::self_tag<const ::bytes_crate::arr::Mine<N>*>, D deserializer)"),
+        "a reference to a nested-module struct keys on the qualified referent pointer: {out}"
+    );
+    assert!(
+        out.contains("rusty::Result<std::array<uint8_t, N>, int32_t> deserialize(Deserialize_::impl_::tag, rusty::self_tag<std::array<uint8_t, N>>, D deserializer)"),
+        "the by-value impl keeps its own lane beside the reference's: {out}"
+    );
+    assert!(
+        out.matches("struct impls_Deserialize<std::array<uint8_t, N>> : std::true_type {};").count() == 1
+            && out.matches("struct impls_Deserialize<::bytes_crate::arr::Mine<N>> : std::true_type {};").count() == 1,
+        "a reference self witnesses its referent, once beside the by-value impl's marker: {out}"
+    );
+    assert!(
+        !out.contains("impls_Deserialize<const std::array<uint8_t, N>&>")
+            && !out.contains("impls_Deserialize<const std::array<uint8_t, N>*>")
+            && !out.contains("implementor marker skipped: `impl Deserialize for const"),
+        "no reference-spelled (dead) marker, no pointer marker, no skipped one: {out}"
+    );
+    assert!(
+        out.contains("Deserialize_::deserialize(rusty::self_tag<const std::array<uint8_t, 4>*>{}, "),
+        "an expected reference type seeds the lane with the pointer key: {out}"
+    );
+}
+
+#[test]
+fn test_reference_self_lane_of_a_crate_local_trait_spells_its_nested_self_as_the_pointer() {
+    // The same root outside serde: any `impl Tr for &'a T` whose no-receiver
+    // function returns `Result<Self, E>` — the C++ spelling `const Mine*` is
+    // not Rust type syntax, so the nested `Self` mapped to `auto` and the
+    // lane was skipped.
+    let out = transpile_str_module(
+        r#"
+        pub trait Make: Sized { fn make(n: i32) -> Result<Self, String>; }
+        pub struct Mine { pub v: i32 }
+        impl<'a> Make for &'a Mine {
+            fn make(n: i32) -> Result<Self, String> { Err(format!("no {}", n)) }
+        }
+        "#,
+        "consumer",
+    );
+    assert!(!out.contains("unresolved signature placeholder"), "{out}");
+    assert!(
+        out.contains("rusty::Result<const Mine*, rusty::String> make(Make_::impl_::tag, rusty::self_tag<const Mine*>, int32_t n)"),
+        "the key, the return's nested `Self`: {out}"
+    );
+    assert!(out.contains("template<> struct impls_Make<Mine> : std::true_type {};"), "the referent witness: {out}");
+    assert!(!out.contains("impls_Make<const Mine*>"), "no pointer marker: {out}");
+}
+
+#[test]
+fn test_blanket_reference_self_marker_witnesses_nothing() {
+    // `impl<A: Acc> Acc for &'a mut A` (serde_core's SeqAccess/MapAccess):
+    // `has_<Tr>` strips cvref, so the reference-spelled partial specialization
+    // was dead, but its referent is the bare parameter — the PRIMARY's shape,
+    // which clang rejects ("does not specialize any template argument";
+    // constrained by its own trait, "satisfaction depends on itself"). No
+    // pointer witness either: `has_<Tr>` on the pointer representation of a
+    // reference gates the receiver ladders (trait_probes_collapse).
+    let out = transpile_str_module(
+        r#"
+        pub trait Acc { fn next(&mut self) -> i32; }
+        impl<'a, A: Acc> Acc for &'a mut A {
+            fn next(&mut self) -> i32 { (**self).next() }
+        }
+        "#,
+        "consumer",
+    );
+    assert!(!out.contains("struct impls_Acc<A> :"), "never the primary's shape: {out}");
+    assert!(!out.contains("struct impls_Acc<A&> :"), "never the dead reference spelling: {out}");
+    assert!(!out.contains("struct impls_Acc<A*> :"), "no pointer witness: {out}");
+}

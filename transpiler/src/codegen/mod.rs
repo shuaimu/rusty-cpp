@@ -5748,6 +5748,13 @@ impl CodeGen {
     fn qualify_nested_local_type_for_global_scope(&self, cpp_ty: &str) -> String {
         let trimmed = cpp_ty.trim_start();
         let lead_ws = &cpp_ty[..cpp_ty.len() - trimmed.len()];
+        // A `const`-qualified spelling (`const ByteArray<N>*`, a reference
+        // self type's referent pointer or reference) qualifies its base the
+        // same way; the qualifier is not the base.
+        let (lead_ws, trimmed) = match trimmed.strip_prefix("const ") {
+            Some(rest) => (format!("{}const ", lead_ws), rest.trim_start()),
+            None => (lead_ws.to_string(), trimmed),
+        };
         let base_end = trimmed
             .find(|c: char| !(c.is_alphanumeric() || c == '_'))
             .unwrap_or(trimmed.len());
@@ -23143,6 +23150,11 @@ impl CodeGen {
     /// marker sits OUTSIDE the wrap (a dependency trait's witness).
     fn root_qualify_bare_local_base(&self, ty: &str) -> String {
         let t = ty.trim_start();
+        // A `const`-qualified spelling (a reference self type's referent
+        // pointer) roots its base the same way.
+        if let Some(rest) = t.strip_prefix("const ") {
+            return format!("const {}", self.root_qualify_bare_local_base(rest.trim_start()));
+        }
         if t.starts_with("::") {
             return ty.to_string();
         }
@@ -23472,13 +23484,6 @@ impl CodeGen {
                 return;
             }
         }
-        let key = (
-            format!("{}{}", primary_prefix, trait_name),
-            self.canonicalize_extension_overload_type_for_dedupe(&self_cpp),
-        );
-        if !self.ufcs_marker_specializations_emitted.insert(key) {
-            return;
-        }
         let requires = if constraints.is_empty() {
             String::new()
         } else {
@@ -23517,19 +23522,49 @@ impl CodeGen {
         }) {
             return;
         }
-        let self_cpp = if primary_prefix.is_empty() {
-            self_cpp
-        } else {
-            self.root_qualify_bare_local_base(&self_cpp)
-        };
-        self.writeln(&format!(
-            "template<{}>{} struct {}impls_{}<{}> : std::true_type {{}};",
-            header.join(", "),
-            requires,
-            primary_prefix,
-            trait_cpp,
-            self_cpp
-        ));
+        // As in the concrete branch: `has_<Tr>` strips cvref, so a reference
+        // self type (`impl<const N: usize> Deserialize for &'de [u8; N]`)
+        // witnesses its referent — the reference-spelled partial
+        // specialization was dead. A reference self over a bare parameter
+        // (`impl<A: SeqAccess> SeqAccess for &'a mut A`, `impl<T: Serialize>
+        // Serialize for &T`) strips to the PRIMARY's shape — unconstrained,
+        // "does not specialize any template argument"; constrained by its own
+        // trait, "satisfaction depends on itself" — so it witnesses nothing (its
+        // reference-spelled marker was dead too). A value blanket over a bare
+        // parameter (`impl<T: Score> Tr for T`) is the constrained partial
+        // specialization it always was; the unconstrained one returned above.
+        // No POINTER witness: `has_<Tr>` on the pointer representation of a
+        // reference gates the receiver ladders unconditionally, and a lane
+        // binds the referent (trait_probes_collapse's `RefTr::m(&r)`, measured).
+        let is_reference_self = self_cpp.trim_end().ends_with('&')
+            && matches!(self.peel_paren_group_type(impl_block.self_ty.as_ref()), syn::Type::Reference(_));
+        let self_cpp = Self::strip_reference_type_spelling(&self_cpp);
+        let mut spellings = Vec::new();
+        if !(is_reference_self && type_params.iter().any(|p| p == self_cpp.trim())) {
+            spellings.push(self_cpp);
+        }
+        for self_cpp in spellings {
+            let self_cpp = if primary_prefix.is_empty() {
+                self_cpp
+            } else {
+                self.root_qualify_bare_local_base(&self_cpp)
+            };
+            let key = (
+                format!("{}{}", primary_prefix, trait_name),
+                self.canonicalize_extension_overload_type_for_dedupe(&self_cpp),
+            );
+            if !self.ufcs_marker_specializations_emitted.insert(key) {
+                continue;
+            }
+            self.writeln(&format!(
+                "template<{}>{} struct {}impls_{}<{}> : std::true_type {{}};",
+                header.join(", "),
+                requires,
+                primary_prefix,
+                trait_cpp,
+                self_cpp
+            ));
+        }
     }
 
     /// Step 8: the per-module helper namespace of a nested-module trait's
@@ -24819,13 +24854,7 @@ impl CodeGen {
         let self_cpp_ty = if method_spec.self_is_template_param {
             "Self_".to_string()
         } else {
-            let mapped =
-                self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty));
-            // serde_core Fix B: a free function emitted at global `<Tr>_` scope
-            // must qualify a nested-module self type (`MapAsEnum<A>` →
-            // `de::value::private_::MapAsEnum<A>`). No-op for global-scope types
-            // and flag-off.
-            self.qualify_nested_local_type_for_global_scope(&mapped)
+            self.extension_lane_self_cpp_type(&method_spec.self_ty, receiver_opt.is_none())
         };
         let self_cpp_ty =
             Self::despell_const_generic_array_capacities(&self_cpp_ty, &free_generics);
@@ -25995,13 +26024,7 @@ impl CodeGen {
         let self_cpp_ty = if method_spec.self_is_template_param {
             "Self_".to_string()
         } else {
-            let mapped =
-                self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty));
-            // serde_core Fix B: a free function emitted at global `<Tr>_` scope
-            // must qualify a nested-module self type (`MapAsEnum<A>` →
-            // `de::value::private_::MapAsEnum<A>`). No-op for global-scope types
-            // and flag-off.
-            self.qualify_nested_local_type_for_global_scope(&mapped)
+            self.extension_lane_self_cpp_type(&method_spec.self_ty, receiver_opt.is_none())
         };
         let self_cpp_ty =
             Self::despell_const_generic_array_capacities(&self_cpp_ty, &free_generics);
@@ -26958,6 +26981,40 @@ impl CodeGen {
                 gt_token: Default::default(),
             });
         Some(new_block)
+    }
+
+    /// The C++ spelling of an impl's `Self` in its lane function: the key
+    /// (`rusty::self_tag<…>`), the body's `Self` alias and every nested `Self`
+    /// of the signature. serde_core Fix B: a free function emitted at global
+    /// `<Tr>_` scope qualifies a nested-module self type (`MapAsEnum<A>` →
+    /// `de::value::private_::MapAsEnum<A>`); no-op for global-scope types.
+    /// Book §3.2.16 (ab): in a NO-RECEIVER function `Self` is purely a
+    /// type-level key, so a reference self type whose referent lowers to a C++
+    /// reference (`impl Deserialize for &'de [u8; N]`, for `&'a ByteArray<N>`)
+    /// is the referent POINTER (`reference_self_value_type`: `const
+    /// std::array<uint8_t, N>*`) — the value spelling is the by-value impl's
+    /// key, and a reference is no payload the `?` lowering's statement
+    /// expression carries. A reference to a view (`&[u8]`, `&str`, a DST
+    /// wrapper such as serde_bytes's `Bytes`) already maps to a value and
+    /// keeps it; a receiver-bearing method keeps the mapping its receiver
+    /// parameter binds (`extension_receiver_param_cpp_type`).
+    fn extension_lane_self_cpp_type(&self, self_ty: &syn::Type, no_receiver: bool) -> String {
+        let mapped = self.rewrite_cpp_import_bound_type_spelling(&self.map_type(self_ty));
+        // Spelled from the reference's own spelling (`const X<N>&` → `const
+        // X<N>*`), never through `map_type` of a raw pointer: with the impl's
+        // generics in scope that spells `std::add_pointer_t<std::add_const_t<X<N>>>`,
+        // an alias template — a non-deduced context from which `N` could never
+        // be deduced at a keyed call. The same textual rule keys the callers
+        // (`reference_spelling_as_pointer`).
+        let mapped = if no_receiver
+            && mapped.trim_end().ends_with('&')
+            && matches!(self.peel_paren_group_type(self_ty), syn::Type::Reference(_))
+        {
+            Self::reference_spelling_as_pointer(&mapped)
+        } else {
+            mapped
+        };
+        self.qualify_nested_local_type_for_global_scope(&mapped)
     }
 
     fn extension_self_type_mapping_is_unsupported(&self, mapped: &str) -> bool {

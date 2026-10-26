@@ -7214,6 +7214,17 @@ impl CodeGen {
     /// `::rusty::serde_rt::de::deserialize(PhantomData<Seed>{}, d)`. `owner`
     /// is the written trait path (`Deserialize`, `serde::Deserialize`) or the
     /// type parameter of a `T::deserialize(d)` call.
+    /// `const X&` → `const X*`, `X&` → `X*`: the pointer representation of a
+    /// Rust reference where a C++ reference cannot stand (a type-level key, a
+    /// template argument the `?` lowering carries). Identity otherwise.
+    pub(super) fn reference_spelling_as_pointer(cpp: &str) -> String {
+        let t = cpp.trim_end();
+        match t.strip_suffix("&&").or_else(|| t.strip_suffix('&')) {
+            Some(referent) => format!("{}*", referent.trim_end()),
+            None => cpp.to_string(),
+        }
+    }
+
     pub(super) fn emit_seeded_deserialize_call(
         &self,
         owner: &str,
@@ -7231,6 +7242,10 @@ impl CodeGen {
                 self.trait_owner_path_is_crate_declared(owner)
             };
         if own {
+            // A reference seed (`let x: &[u8; N] = Deserialize::deserialize(d)?`)
+            // keys the lane of the reference self type: the referent POINTER
+            // (`extension_lane_self_cpp_type`), never a C++ reference.
+            let seed_cpp = Self::reference_spelling_as_pointer(seed_cpp);
             format!(
                 "{}::deserialize(rusty::self_tag<{}>{{}}, {})",
                 self.ufcs_trait_namespace("Deserialize"),
@@ -14994,7 +15009,10 @@ impl CodeGen {
         let short = key.rsplit("::").next().unwrap_or(&key).to_string();
         Some((
             format!("{}::{}", self.ufcs_trait_namespace(&short), escape_cpp_keyword(&method)),
-            format!("rusty::self_tag<{}>{{}}", self.normalize_qself_base_for_assoc(&self_cpp)),
+            format!(
+                "rusty::self_tag<{}>{{}}",
+                Self::reference_spelling_as_pointer(&self.normalize_qself_base_for_assoc(&self_cpp))
+            ),
             tag,
         ))
     }
@@ -26597,11 +26615,13 @@ impl CodeGen {
                 let args: Vec<String> =
                     call.args.iter().map(|a| self.emit_expr_maybe_move(a)).collect();
                 let short = key.rsplit("::").next().unwrap_or(&key).to_string();
+                // A reference owner keys the lane of the reference self type:
+                // the referent POINTER (`extension_lane_self_cpp_type`).
                 return Some(format!(
                     "{}::{}(rusty::self_tag<{}>{{}}, {})",
                     self.ufcs_trait_namespace(&short),
                     escape_cpp_keyword(&method),
-                    self.normalize_qself_base_for_assoc(&cpp),
+                    Self::reference_spelling_as_pointer(&self.normalize_qself_base_for_assoc(&cpp)),
                     args.join(", ")
                 ));
             } else if let Some(key) = self.nonvtable_trait_key(&owner)
