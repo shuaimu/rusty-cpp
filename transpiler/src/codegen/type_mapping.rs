@@ -795,8 +795,7 @@ impl CodeGen {
                     } else {
                         self_cpp_ty
                     };
-                    self.map_type(substituted)
-                        .replace(SELF_SPELLING_PLACEHOLDER, self_spelling)
+                    Self::splice_self_spelling(&self.map_type(substituted), self_spelling)
                 }
                 Some((substituted, false)) => self.map_type(substituted),
                 None => self.map_type(ty),
@@ -834,6 +833,37 @@ impl CodeGen {
             rewritten
         };
         collapse_redundant_typename_tokens(&rewritten)
+    }
+
+    /// Splice a C++ `Self` spelling over its placeholder. A reference (or
+    /// pointer) spelling under a reference, pointer or `const` of the signature
+    /// — `other: &Self` on `impl Tr for &'a Mine`, mapped `const <ph>&` — takes
+    /// the REFERENT (`const Mine&`), never the doubled `const const Mine&&`;
+    /// a bare position takes the whole spelling.
+    fn splice_self_spelling(mapped: &str, self_spelling: &str) -> String {
+        let referent = {
+            let t = self_spelling.trim_end();
+            let t = t
+                .strip_suffix("&&")
+                .or_else(|| t.strip_suffix('&'))
+                .or_else(|| t.strip_suffix('*'))
+                .map(str::trim_end)
+                .unwrap_or(t);
+            t.strip_prefix("const ").map(str::trim_start).unwrap_or(t)
+        };
+        let mut out = String::with_capacity(mapped.len());
+        let mut rest = mapped;
+        while let Some(pos) = rest.find(SELF_SPELLING_PLACEHOLDER) {
+            let before = &rest[..pos];
+            let after = &rest[pos + SELF_SPELLING_PLACEHOLDER.len()..];
+            let under_const = before.trim_end().ends_with("const");
+            let under_ref_or_ptr = matches!(after.trim_start().chars().next(), Some('&' | '*'));
+            out.push_str(before);
+            out.push_str(if under_const || under_ref_or_ptr { referent } else { self_spelling });
+            rest = after;
+        }
+        out.push_str(rest);
+        out
     }
 
     /// String replace that only fires when the match is NOT followed by an

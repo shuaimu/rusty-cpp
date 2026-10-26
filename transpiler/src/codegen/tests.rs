@@ -52471,3 +52471,36 @@ fn test_blanket_reference_self_marker_witnesses_nothing() {
     assert!(!out.contains("struct impls_Acc<A&> :"), "never the dead reference spelling: {out}");
     assert!(!out.contains("struct impls_Acc<A*> :"), "no pointer witness: {out}");
 }
+
+#[test]
+fn test_reference_self_lane_spells_a_nested_reference_to_self_as_the_referent() {
+    // The placeholder route (`map_extension_impl_type_with_self_assoc`) now
+    // emits every lane of a reference self type, receiver-bearing ones too.
+    // `other: &Self` on `impl Tr for &'a Mine` maps `const <ph>&`: splicing the
+    // whole `const Mine&` there would read `const const Mine&&` — the referent
+    // goes under a reference, pointer or `const`.
+    let out = transpile_str_module(
+        r#"
+        pub trait Tr: Sized {
+            fn same(&self, other: &Self) -> bool;
+            fn pick(a: &Self, b: &Self) -> Self;
+        }
+        pub struct Mine { pub v: i32 }
+        impl<'a> Tr for &'a Mine {
+            fn same(&self, other: &Self) -> bool { self.v == other.v }
+            fn pick(a: &Self, b: &Self) -> Self { if a.v > b.v { *a } else { *b } }
+        }
+        "#,
+        "consumer",
+    );
+    assert!(!out.contains("unresolved signature placeholder"), "{out}");
+    assert!(!out.contains("const const"), "no doubled qualifier: {out}");
+    assert!(
+        out.contains("bool same(Tr_::impl_::tag, const Mine& self_, const Mine& other, rusty::self_tag<const Mine&>"),
+        "the receiver-bearing lane: {out}"
+    );
+    assert!(
+        out.contains("const Mine* pick(Tr_::impl_::tag, rusty::self_tag<const Mine*>, const Mine& a, const Mine& b)"),
+        "the no-receiver lane keys on the pointer, its nested `&Self` is the referent: {out}"
+    );
+}
