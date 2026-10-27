@@ -7214,6 +7214,46 @@ impl CodeGen {
     /// `::rusty::serde_rt::de::deserialize(PhantomData<Seed>{}, d)`. `owner`
     /// is the written trait path (`Deserialize`, `serde::Deserialize`) or the
     /// type parameter of a `T::deserialize(d)` call.
+    /// Rust's deref coercion at an `Ok(x)` whose payload is a reference:
+    /// `Ok(arr)` with `arr: &ByteArray<N>` into `Result<&[u8; N], _>`
+    /// (serde_bytes's `impl Deserialize for &'de [u8; N]`; the expected
+    /// payload may be the impl's `Self`) — the referent's `Deref` target is
+    /// the expected referent, so the payload is the address of `*arr`
+    /// (`rusty::addr_of_temp(*…)`, the pointer representation). None when the
+    /// types do not line up that way.
+    fn try_emit_ok_payload_deref_coercion(
+        &self,
+        ok_expected_ty: Option<&syn::Type>,
+        arg: &syn::Expr,
+        arg_cpp: &str,
+    ) -> Option<String> {
+        let expected = ok_expected_ty?;
+        let expected = if Self::is_plain_self_type(expected) {
+            self.current_impl_method_self_tys.last()?.as_ref()?.clone()
+        } else {
+            expected.clone()
+        };
+        let syn::Type::Reference(expected_ref) = self.peel_paren_group_type(&expected) else {
+            return None;
+        };
+        let arg_ty = self.infer_simple_expr_type(self.peel_paren_group_expr(arg))?;
+        let syn::Type::Reference(arg_ref) = self.peel_paren_group_type(&arg_ty) else {
+            return None;
+        };
+        let target = self.extract_deref_target_type_from_inner(&arg_ref.elem)?;
+        let same = |a: &syn::Type, b: &syn::Type| {
+            a.to_token_stream().to_string().split_whitespace().collect::<String>()
+                == b.to_token_stream().to_string().split_whitespace().collect::<String>()
+        };
+        if !same(&target, &expected_ref.elem) || same(&arg_ref.elem, &expected_ref.elem) {
+            return None;
+        }
+        Some(format!(
+            "rusty::addr_of_temp(*rusty::detail::deref_if_pointer({}))",
+            arg_cpp
+        ))
+    }
+
     /// `const X&` → `const X*`, `X&` → `X*`: the pointer representation of a
     /// Rust reference where a C++ reference cannot stand (a type-level key, a
     /// template argument the `?` lowering carries). Identity otherwise.
@@ -24148,6 +24188,10 @@ impl CodeGen {
                     syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("self")
                 ) {
                 "this".to_string()
+            } else if let Some(coerced) =
+                self.try_emit_ok_payload_deref_coercion(ok_expected_ty, &call.args[0], &arg)
+            {
+                coerced
             } else {
                 arg
             };

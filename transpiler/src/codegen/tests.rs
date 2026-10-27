@@ -52504,3 +52504,94 @@ fn test_reference_self_lane_spells_a_nested_reference_to_self_as_the_referent() 
         "the no-receiver lane keys on the pointer, its nested `&Self` is the referent: {out}"
     );
 }
+
+#[test]
+fn test_reference_self_no_receiver_impl_of_a_dependency_trait_is_the_keyed_member_twin() {
+    // serde_bytes's `impl serde::Deserialize for &'a ByteArray<N>` beside
+    // `for ByteArray<N>` (task #206, SELF-TYPE): the member tier collapsed the
+    // reference impl onto the value twin with the VALUE signature (a copy).
+    // A no-receiver function keys on `Self`, so the loser is the keyed
+    // overload under the plain name — `deserialize(rusty::self_tag<const
+    // Mine*>, D)` returning the referent pointer — exactly what
+    // rusty::serde_rt's pointer-target rung probes.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["Deserialize".to_string()],
+        declared_trait_methods: [("Deserialize".to_string(), vec!["deserialize".to_string()])]
+            .into_iter()
+            .collect(),
+        method_owners: [("deserialize".to_string(), vec!["Deserialize".to_string()])]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    cg.set_crate_name("bytes_crate");
+    let file: syn::File = syn::parse_quote! {
+        use serde_core::Deserialize;
+        pub struct Mine { pub v: i32 }
+        impl<'de> Deserialize<'de> for Mine {
+            fn deserialize<D>(deserializer: D) -> Result<Self, i32> where D: Copy { Ok(Mine { v: 1 }) }
+        }
+        impl<'de: 'a, 'a> Deserialize<'de> for &'a Mine {
+            fn deserialize<D>(deserializer: D) -> Result<Self, i32> where D: Copy { Err(2) }
+        }
+    };
+    cg.emit_file(&file, Some("bytes_crate"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("static auto deserialize(D deserializer) -> rusty::Result<Mine, int32_t>;"),
+        "the value impl keeps the plain static member: {out}"
+    );
+    assert!(
+        out.contains("static auto deserialize(::rusty::self_tag<const Mine*> __self_key, D deserializer) -> rusty::Result<const Mine*, int32_t>;"),
+        "the reference impl is the keyed overload returning the referent pointer: {out}"
+    );
+    assert!(!out.contains("rusty_Deserialize_deserialize"), "no hoisted value-signature twin: {out}");
+}
+
+#[test]
+fn test_ok_of_a_reference_binding_deref_coerces_into_the_expected_reference_payload() {
+    // serde_bytes `impl Deserialize for &'de [u8; N]`: `let arr: &ByteArray<N>
+    // = …?; Ok(arr)` — Rust deref-coerces `&ByteArray<N>` into the payload
+    // `&[u8; N]` through `ByteArray<N>: Deref<Target = [u8; N]>`; the payload
+    // is the address of `*arr`.
+    let out = transpile_str_module(
+        r#"
+        use std::ops::Deref;
+        pub struct Wrap { pub bytes: [u8; 4] }
+        impl Deref for Wrap { type Target = [u8; 4]; fn deref(&self) -> &[u8; 4] { &self.bytes } }
+        pub trait Make: Sized { fn make(w: &Wrap) -> Result<Self, i32>; }
+        impl<'a> Make for &'a [u8; 4] {
+            fn make(w: &Wrap) -> Result<Self, i32> { let arr: &Wrap = w; Ok(arr) }
+        }
+        "#,
+        "consumer",
+    );
+    assert!(
+        out.contains("::Ok(rusty::addr_of_temp(*rusty::detail::deref_if_pointer(arr)))"),
+        "the deref target's address: {out}"
+    );
+}
+
+#[test]
+fn test_try_into_a_reference_to_an_array_is_the_borrowed_view() {
+    // `let a: &[u8; 4] = v.try_into()…?` (serde_bytes's borrowed visitors):
+    // Rust's `TryFrom<&[T]> for &[T; N]` is a view. The target used to be
+    // peeled to the value array, so the "borrowed" array was a lifetime-
+    // extended copy and every reference derived from it dangled.
+    let out = transpile_str(
+        r#"
+        pub fn head(v: &[u8]) -> Result<u8, i32> {
+            let a: &[u8; 4] = v.try_into().map_err(|_| 7)?;
+            Ok(a[0])
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::try_from<const std::array<uint8_t, 4>&>(v)"),
+        "the reference target reaches the runtime's view overload: {out}"
+    );
+}

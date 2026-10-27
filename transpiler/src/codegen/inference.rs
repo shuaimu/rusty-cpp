@@ -13248,6 +13248,17 @@ impl CodeGen {
         if self.type_contains_infer(&target) {
             return None;
         }
+        // A reference to an ARRAY stays a reference: Rust's `TryFrom<&[T]> for
+        // &[T; N]` is a view, and `rusty::try_from<const std::array<T, N>&>`
+        // reinterprets the slice in place. Peeled to the value array, the
+        // "borrowed" array was a lifetime-extended COPY — serde_bytes's
+        // `BorrowedByteArrayVisitor` then reinterpreted that temporary into a
+        // `&'de ByteArray<N>` it returned (dangling; measured zero_copy=0).
+        if let syn::Type::Reference(reference) = self.peel_paren_group_type(&target)
+            && matches!(self.peel_paren_group_type(&reference.elem), syn::Type::Array(_))
+        {
+            return Some(target);
+        }
         while let syn::Type::Reference(reference) = self.peel_paren_group_type(&target) {
             target = (*reference.elem).clone();
         }

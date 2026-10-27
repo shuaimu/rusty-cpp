@@ -326,6 +326,31 @@ public:
             new (&storage.err_storage) ErrStored(to_err_storage(other.unwrap_err()));
         }
     }
+
+    // A reference payload and its pointer representation convert both ways:
+    // `Result<const X&, E>` (a serde visitor's `type Value = &'de X`) into
+    // `Result<const X*, E>` (the pointer a keyed borrowed `deserialize` hands
+    // out, see rusty::serde_rt) and back. Both store the address.
+    template<typename U>
+    requires (std::is_reference_v<U> && !std::is_reference_v<T>
+              && std::is_same_v<T, std::add_pointer_t<std::remove_reference_t<U>>>)
+    Result(Result<U, E>&& other) : is_ok_value(other.is_ok_value) {
+        if (is_ok_value) {
+            new (&storage.ok_storage) OkStored(std::addressof(other.unwrap()));
+        } else {
+            new (&storage.err_storage) ErrStored(to_err_storage(other.unwrap_err()));
+        }
+    }
+    template<typename U>
+    requires (std::is_reference_v<T> && std::is_pointer_v<U>
+              && std::is_same_v<U, std::add_pointer_t<std::remove_reference_t<T>>>)
+    Result(Result<U, E>&& other) : is_ok_value(other.is_ok_value) {
+        if (is_ok_value) {
+            new (&storage.ok_storage) OkStored(other.unwrap());
+        } else {
+            new (&storage.err_storage) ErrStored(to_err_storage(other.unwrap_err()));
+        }
+    }
     
     // Copy assignment
     // @lifetime: (&'a mut) -> &'a mut self

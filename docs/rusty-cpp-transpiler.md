@@ -2626,6 +2626,32 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   __DeserializeWith` is skipped at block scope (inside the hoisted visitor's `visit_seq`, in a match
   scrutinee block, 17 same-named locals) and the runtime's `.value`-member fallback deserializes the
   field type with serde_core's semantics — the row's 4/4 verifies the serialize side only.
+- *2026-10-26 — (ab) the reference-self lanes' bodies, measured directly:* a scratch consumer over the
+  row's BMIs (`$S/st_work/probe_de`) calls `::serde_bytes::deserialize<T>(&de)` for the three `T` over a
+  serde_test deserializer fed `Token::BorrowedBytes` and checks the payload's address. Before: the slice
+  lane Ok and zero-copy; the array lane did not compile (`Ok(arr)`); the `ByteArray<N>` lane returned
+  Err (the runtime had no pointer-target rung). Five pieces, every one general: (1) `rusty::serde_rt`'s
+  seeded dispatch gained the `std::is_pointer_v<Target>` rung — the pointer representation of a Rust
+  reference target is the pointee's KEYED borrowed member, `X::deserialize(rusty::self_tag<const X*>{},
+  d)` (a pointee without one has no `impl Deserialize for &X` in Rust either: static_assert) — and its
+  reference-target branch is that route converted, where it used to deserialize the OWNED value and
+  dereference an `addr_of_temp` of a prvalue (dangling); (2) `rusty::Result<T&, E>` and `Result<T*, E>`
+  convert into each other (both store the address) — a serde visitor's `type Value = &'de X` is the
+  reference payload, the key protocol is the pointer; (3) the member tier's collapse (task #206): a
+  NO-RECEIVER function of a reference-self loser (`impl serde::Deserialize for &'a ByteArray<N>` beside
+  `for ByteArray<N>`) is the constrained overload C++ can express — the keyed twin under the plain
+  name, `static auto deserialize(::rusty::self_tag<const X*> __self_key, D) -> Result<const X*, E>`,
+  its `Self` the referent pointer (`rewrite_bare_self_type`), where the hoisted value-signature twin
+  returned a copy; (4) `Ok(arr)` with `arr: &ByteArray<N>` into the payload `&[u8; N]` is Rust's deref
+  coercion: the address of `*arr` (`try_emit_ok_payload_deref_coercion`; a bare `Self` payload resolves
+  through the impl's self type); (5) `resolve_try_into_target_type` peeled EVERY reference, so `let a:
+  &[u8; N] = v.try_into()…?` targeted the value array — `rusty::try_from` already serves
+  `const std::array<T, N>&` as a reinterpreted view, and peeled, the "borrowed" array was a
+  lifetime-extended COPY that `BorrowedByteArrayVisitor` reinterpreted into the `&'de ByteArray<N>` it
+  returned (dangling; the probe measured `zero_copy=0`). After: all three lanes Ok, zero-copy, the
+  deserializer fully consumed. The `?` lowering's try-carrier already preserves a reference payload
+  through its statement expression, so the reference-typed `let` binds the real referent. Still open:
+  the derive's `__DeserializeWith` wrapper (nothing in a test target instantiates the own lanes yet).
 
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —

@@ -59078,6 +59078,34 @@ fn preserve_dropped_collapse_body(
         .and_then(split_impl_origin)
         .is_some_and(|(kh, _)| kh.split('<').next().unwrap_or(kh).trim() == trait_head)
         && dropped_self.trim_start().starts_with('&');
+    // A NO-RECEIVER function of a reference-self loser (`impl Deserialize for
+    // &'a ByteArray<N>` beside `for ByteArray<N>`): `Self` is a type-level key,
+    // so it is the constrained overload C++ can express — the KEYED twin under
+    // the plain name, `deserialize(rusty::self_tag<const ByteArray<N>*>, D)`,
+    // its `Self` the referent pointer (book §3.2.16 (ab): the same key the
+    // lanes use; rusty::serde_rt's pointer-target rung probes exactly this).
+    // The hoisted value signature would have returned a COPY.
+    if ref_self_loser
+        && preserved.sig.receiver().is_none()
+        && let Ok(self_ty) = syn::parse_str::<syn::Type>(dropped_self)
+        && let Some(pointer) = CodeGen::reference_self_value_type(&self_ty)
+    {
+        preserved.sig.ident = dropped.sig.ident.clone();
+        if let syn::ReturnType::Type(_, ty) = &mut preserved.sig.output {
+            CodeGen::rewrite_bare_self_type(ty, &pointer);
+        }
+        for input in preserved.sig.inputs.iter_mut() {
+            if let syn::FnArg::Typed(pat_type) = input {
+                CodeGen::rewrite_bare_self_type(&mut pat_type.ty, &pointer);
+            }
+        }
+        let key: syn::FnArg = syn::parse_quote!(__self_key: ::rusty::self_tag<#pointer>);
+        preserved.sig.inputs.insert(0, key);
+        let plain = dropped.sig.ident.to_string();
+        entry.push(syn::ImplItem::Fn(preserved));
+        record_preserved_collapse_body(type_name, &plain, trait_head, &plain);
+        return Some(plain);
+    }
     if ref_self_loser {
         clone_borrowed_returns_in_block(&mut preserved.block);
     }

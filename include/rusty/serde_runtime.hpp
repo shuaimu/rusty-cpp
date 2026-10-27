@@ -471,23 +471,42 @@ decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {
         }) {
             return Target::deserialize(rusty::detail::deref_if_pointer_like(
                 std::forward<Deserializer>(deserializer)));
+        } else if constexpr (std::is_pointer_v<Target>) {
+            // The pointer representation of a Rust reference target
+            // (`&'de ByteArray<N>`): a reference-self `impl Deserialize for
+            // &'a X` is the pointee's KEYED borrowed member,
+            // `X::deserialize(rusty::self_tag<const X*>{}, d)` (book §3.2.16
+            // (ab), task #206) — zero-copy into the deserializer's input. A
+            // pointee without one has no borrowed impl in Rust either.
+            using Pointee = std::remove_cv_t<std::remove_pointer_t<Target>>;
+            if constexpr (requires {
+                Pointee::deserialize(rusty::self_tag<Target>{}, std::forward<Deserializer>(deserializer));
+            }) {
+                return Pointee::deserialize(rusty::self_tag<Target>{}, std::forward<Deserializer>(deserializer));
+            } else if constexpr (requires {
+                Pointee::deserialize(rusty::self_tag<Target>{}, rusty::detail::deref_if_pointer_like(
+                    std::forward<Deserializer>(deserializer)));
+            }) {
+                return Pointee::deserialize(rusty::self_tag<Target>{}, rusty::detail::deref_if_pointer_like(
+                    std::forward<Deserializer>(deserializer)));
+            } else {
+                static_assert(sizeof(Target) == 0,
+                    "rusty::serde_rt: no borrowed `deserialize` for a pointer target — the pointee "
+                    "has no `impl Deserialize for &T` (its keyed member `deserialize(rusty::self_tag<const T*>, D)`)");
+            }
         } else if constexpr (std::is_reference_v<Target>) {
-            using Owned = std::remove_cv_t<std::remove_reference_t<Target>>;
-            auto __owned = ::rusty::serde_rt::de::deserialize(
-                rusty::PhantomData<Owned>{},
+            // A reference target is the same borrowed impl, dereferenced into a
+            // reference payload (`rusty::Result<T&, E>` and `Result<T*, E>` both
+            // store the address — `Result`'s pointer/reference converting
+            // constructors). The former owned-value route dereferenced an
+            // `addr_of_temp` of a prvalue: dangling.
+            using Pointer = std::add_pointer_t<std::remove_reference_t<Target>>;
+            auto __borrowed = ::rusty::serde_rt::de::deserialize(
+                rusty::PhantomData<Pointer>{},
                 std::forward<Deserializer>(deserializer));
             using Err = std::remove_cv_t<std::remove_reference_t<
-                decltype(__owned.unwrap_err())>>;
-            using Ret = rusty::Result<Target, Err>;
-            if (__owned.is_err()) {
-                return Ret::Err(__owned.unwrap_err());
-            }
-            if constexpr (std::is_const_v<std::remove_reference_t<Target>>) {
-                auto __bound = rusty::addr_of_temp(std::move(__owned.unwrap()));
-                return Ret::Ok(static_cast<Target>(*__bound));
-            } else {
-                return Ret::Err(Err::custom("unsupported non-const reference target"));
-            }
+                decltype(__borrowed.unwrap_err())>>;
+            return rusty::Result<Target, Err>(std::move(__borrowed));
         } else if constexpr (
             std::is_same_v<Target, std::tuple<>>
             && requires {
