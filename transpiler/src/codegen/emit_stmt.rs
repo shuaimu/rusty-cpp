@@ -638,7 +638,9 @@ impl CodeGen {
                     && let syn::Item::Impl(impl_block) = item
                 {
                     self.record_local_impl_method_metadata(impl_block);
-                    self.writeln("// Rust-only nested impl block skipped in local scope");
+                    if !self.try_emit_block_local_deserialize_impl_as_seed(impl_block) {
+                        self.writeln("// Rust-only nested impl block skipped in local scope");
+                    }
                 } else {
                     // Nested items emitted while generating deferred out-of-line
                     // method bodies must not inherit the outer owner qualifier.
@@ -3452,6 +3454,65 @@ impl CodeGen {
             .or_else(|| self.infer_local_binding_type_from_initializer(peeled))
     }
 
+    /// A `let` whose initializer is a struct literal of a struct with a
+    /// REFERENCE member binds the object by reference (`const auto& t = T{..}`
+    /// / `auto&& t = T{..}`). Rust extends the temporaries of `let t = T { r:
+    /// &B::new() }` to the block; clang extends a temporary bound to a
+    /// reference member only when the braced list initializes the variable
+    /// directly or the whole prvalue is bound to a reference — `const auto t =
+    /// T{..}` (a functional cast, copy-initialized) drops it at the semicolon
+    /// (measured, clang 22: `T t{..}` / `T t = {..}` / `auto&& t = T{..}` keep
+    /// it, `T t = T{..}` / `auto t = T{..}` do not). serde_bytes's test_derive
+    /// `borrowed_byte_array: &ByteArray::new([0; 314])` read the dead
+    /// temporary in the comparison after deserialization (ASan).
+    fn reference_member_struct_literal_binding_spelling(
+        &self,
+        local: &syn::Local,
+        decl_type: &str,
+        qualifier: &str,
+    ) -> Option<String> {
+        let init = local.init.as_ref()?;
+        if !self.struct_literal_binds_reference_members(&init.expr) {
+            return None;
+        }
+        let spelled = decl_type.trim_end();
+        if spelled.ends_with('&') || spelled.ends_with('*') || spelled.starts_with("decltype") {
+            return None;
+        }
+        Some(if qualifier == "const " {
+            "const auto&".to_string()
+        } else {
+            "auto&&".to_string()
+        })
+    }
+
+    /// A reference member of the literal is initialized from a borrow of a
+    /// TEMPORARY (`r: &B::make()` — not a place, not a promoted constant):
+    /// the only initializers whose lifetime the binding must extend. A
+    /// place borrow (`iter: &mut self.iter`) keeps the plain `const auto`
+    /// binding, so `decltype(local)`-based spellings downstream are unchanged.
+    fn struct_literal_binds_reference_members(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::Struct(s) = self.peel_paren_group_expr(expr) else {
+            return false;
+        };
+        let Some(name) = s.path.segments.last().map(|seg| seg.ident.to_string()) else {
+            return false;
+        };
+        s.fields.iter().any(|f| {
+            let syn::Member::Named(id) = &f.member else {
+                return false;
+            };
+            if !self.struct_field_is_reference(&name, &id.to_string()) {
+                return false;
+            }
+            let syn::Expr::Reference(r) = self.peel_paren_group_expr(&f.expr) else {
+                return false;
+            };
+            !self.is_stable_reference_lvalue_expr(&r.expr)
+                && !self.expr_is_promotable_constant_array(&r.expr)
+        })
+    }
+
     pub(super) fn emit_local(&mut self, local: &syn::Local) {
         let pat = &local.pat;
         // `let x = pin!(e);` pins `e` in place. `Pin<&mut T>` is the pinned
@@ -4917,6 +4978,9 @@ impl CodeGen {
                 } else {
                     decl_type
                 };
+                let decl_type = self
+                    .reference_member_struct_literal_binding_spelling(local, &decl_type, qualifier)
+                    .unwrap_or(decl_type);
                 self.record_local_const_binding(
                     &name_str,
                     qualifier == "const " && local.init.is_some(),
@@ -6205,6 +6269,9 @@ impl CodeGen {
                     } else {
                         decl_type
                     };
+                    let decl_type = self
+                        .reference_member_struct_literal_binding_spelling(local, &decl_type, qualifier)
+                        .unwrap_or(decl_type);
                     self.record_local_reference_binding(&name_str, local_decl_is_reference);
                     if needs_rebind_pointer_local {
                         self.record_rebind_reference_pointer_binding(&name_str);

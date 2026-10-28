@@ -5273,6 +5273,19 @@ impl CodeGen {
             // duck-probe exactly that member, and dropping the impl leaves the
             // hoisted struct failing every `T: Clone`-bounded signature.
             let is_local_clone_trait_impl = trait_name.as_deref() == Some("Clone");
+            // A block-local `impl Deserialize` whose `deserialize` is generic is
+            // a closure seed (`try_emit_block_local_deserialize_impl_as_seed`),
+            // never a member: a local class cannot hold the member template.
+            let is_closure_seeded_deserialize = trait_name.as_deref() == Some("Deserialize")
+                && impl_block.items.iter().any(|item| {
+                    matches!(item, syn::ImplItem::Fn(f)
+                        if f.sig.ident == "deserialize"
+                            && f.sig.receiver().is_none()
+                            && f.sig.generics.params.iter().any(|p| matches!(p, syn::GenericParam::Type(_))))
+                });
+            if is_closure_seeded_deserialize {
+                continue;
+            }
             let allow_non_inherent_trait_impl = is_drop_trait
                 || is_default_trait
                 || impl_is_automatically_derived
@@ -8665,6 +8678,69 @@ impl CodeGen {
         }
     }
 
+    /// The expected type of `Cow::Owned(x)` / `Cow::Borrowed(x)`'s argument under
+    /// an expected `Cow<'_, B>`: `<B as ToOwned>::Owned` (`[T]` → `Vec<T>`, `str`
+    /// → `String`, `Path` → `PathBuf`, `OsStr` → `OsString`, `CStr` → `CString`,
+    /// a sized `B` → `B`) for `Owned`, `&B` for `Borrowed`.
+    pub(super) fn cow_variant_ctor_arg_expected_type(
+        call: &syn::ExprCall,
+        context_expected_ty: Option<&syn::Type>,
+        arg_idx: usize,
+    ) -> Option<syn::Type> {
+        if arg_idx != 0 || call.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let segs = &path_expr.path.segments;
+        if segs.len() < 2 || segs[segs.len() - 2].ident != "Cow" {
+            return None;
+        }
+        let variant = segs.last()?.ident.to_string();
+        let mut context = context_expected_ty?;
+        loop {
+            match context {
+                syn::Type::Reference(r) => context = &r.elem,
+                syn::Type::Paren(p) => context = &p.elem,
+                syn::Type::Group(g) => context = &g.elem,
+                _ => break,
+            }
+        }
+        let syn::Type::Path(ctx_path) = context else {
+            return None;
+        };
+        let last = ctx_path.path.segments.last()?;
+        if last.ident != "Cow" {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let borrowed: &syn::Type = args.args.iter().find_map(|a| match a {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })?;
+        match variant.as_str() {
+            "Borrowed" => Some(syn::parse_quote!(&#borrowed)),
+            "Owned" => Some(match borrowed {
+                syn::Type::Slice(slice) => {
+                    let elem = &slice.elem;
+                    syn::parse_quote!(Vec<#elem>)
+                }
+                syn::Type::Path(tp) => match tp.path.segments.last().map(|s| s.ident.to_string()).as_deref() {
+                    Some("str") => syn::parse_quote!(String),
+                    Some("Path") => syn::parse_quote!(PathBuf),
+                    Some("OsStr") => syn::parse_quote!(OsString),
+                    Some("CStr") => syn::parse_quote!(CString),
+                    _ => borrowed.clone(),
+                },
+                other => other.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     pub(super) fn collect_local_generic_placeholder_function_call_hints_in_expr(
         &self,
         expr: &syn::Expr,
@@ -8702,6 +8778,15 @@ impl CodeGen {
                         idx,
                         substitutions.as_ref(),
                     );
+                    // `Cow::Owned(x)` / `Cow::Borrowed(x)`: the payload is decided
+                    // by the expected `Cow<'_, B>` alone (`<B as ToOwned>::Owned` /
+                    // `&B`) — ahead of every owner-shaped fallback, which handed
+                    // the argument the Cow itself.
+                    if let Some(cow_payload) =
+                        Self::cow_variant_ctor_arg_expected_type(call, context_expected_ty, idx)
+                    {
+                        arg_expected = Some(cow_payload);
+                    }
                     let expected_needs_owner_recovery =
                         arg_expected.as_ref().is_some_and(|expected| {
                             self.type_contains_infer(expected)
@@ -9359,6 +9444,13 @@ impl CodeGen {
             };
             let mut expected_ty =
                 self.lookup_function_arg_expected_type_for_call(call, idx, substitutions.as_ref());
+            // `Cow::Owned(x)` / `Cow::Borrowed(x)`: the payload is decided by the
+            // expected `Cow<'_, B>` alone (see cow_variant_ctor_arg_expected_type).
+            if let Some(cow_payload) =
+                Self::cow_variant_ctor_arg_expected_type(call, context_expected_ty, idx)
+            {
+                expected_ty = Some(cow_payload);
+            }
             let expected_needs_owner_recovery = expected_ty.as_ref().is_some_and(|expected| {
                 self.type_contains_infer(expected)
                     || self.type_contains_in_scope_type_param(expected)

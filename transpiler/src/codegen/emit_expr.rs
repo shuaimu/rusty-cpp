@@ -784,6 +784,7 @@ impl CodeGen {
             self.generic_call_later_use_template_args.insert(call_key, template_args);
         }
         let mut placeholder_hints = collect_local_generic_placeholder_hints(&block.stmts);
+
         block_profile_mark("collect_local_generic_placeholder_hints");
         // Large expanded test functions can contain massive generated blocks.
         // Keep default hint augmentation for normal blocks, but skip the
@@ -995,6 +996,7 @@ impl CodeGen {
         self.template_lambda_nested_fns.push(HashSet::new());
         self.local_function_arg_expected_types.push(HashMap::new());
         self.local_type_bindings.push(local_types);
+        self.closure_seeded_locals.push(HashMap::new());
         self.local_manually_drop_bindings.push(HashSet::new());
         self.recursive_nested_fns_in_scope.push(HashSet::new());
         self.block_depth += 1;
@@ -1199,6 +1201,7 @@ impl CodeGen {
         self.template_lambda_nested_fns.pop();
         self.local_function_arg_expected_types.pop();
         self.local_type_bindings.pop();
+        self.closure_seeded_locals.pop();
         self.local_manually_drop_bindings.pop();
         self.recursive_nested_fns_in_scope.pop();
         self.local_placeholder_type_hints.pop();
@@ -6911,7 +6914,22 @@ impl CodeGen {
         let args: Vec<String> = mc
             .args
             .iter()
-            .map(|arg| {
+            .enumerate()
+            .map(|(idx, arg)| {
+                // `impl Deserializer for &mut De { fn deserialize_any(self, v)
+                // { v.visit_some(self) } }`: a bare `self` that IS the
+                // reference, into a trait method's by-value parameter, is the
+                // POINTER (`this`) — `(*this)` deduced the deserializer's
+                // VALUE, a copy whose token cursor advanced alone (the
+                // `serialize_some` class; serde_bytes's derived `Option`
+                // fields left their payload token behind, measured).
+                if self.method_call_arg_is_reference_receiver_into_trait_method(
+                    &method_name,
+                    idx,
+                    arg,
+                ) {
+                    return "this".to_string();
+                }
                 let emitted = self.emit_expr_maybe_move(arg);
                 self.rewrite_current_deserializer_access_ctor_arg(emitted)
             })
@@ -13915,7 +13933,7 @@ impl CodeGen {
             }
             let escaped_method = escape_cpp_keyword_in_member_position(&method);
             return Some(format!(
-                "[](auto&& _v) -> decltype(auto) {{ return rusty::detail::deref_if_pointer_like(std::forward<decltype(_v)>(_v)).{}(); }}",
+                "[](auto&& _v) -> decltype(auto) {{ return rusty::detail::deref_if_pointer(std::forward<decltype(_v)>(_v)).{}(); }}",
                 escaped_method
             ));
         }
@@ -13993,7 +14011,7 @@ impl CodeGen {
         // The mapped payload may arrive as a POINTER (iterator Options carry
         // `Bucket*` payloads) — probe-deref before the member call.
         Some(format!(
-            "[](auto&& _v) -> decltype(auto) {{ return rusty::detail::deref_if_pointer_like(std::forward<decltype(_v)>(_v)).{}(); }}",
+            "[](auto&& _v) -> decltype(auto) {{ return rusty::detail::deref_if_pointer(std::forward<decltype(_v)>(_v)).{}(); }}",
             escaped_method
         ))
     }
@@ -15549,6 +15567,31 @@ impl CodeGen {
                     self.try_emit_reference_expr_with_expected_span_storage(r, expected_ty)
                 {
                     return span_expr;
+                }
+                // Rust's rvalue static promotion (RFC 1414): a constant array
+                // behind an immutable borrow, `&[1; 314]` / `&[1, 2]`, is a
+                // `'static` place. Bound to a reference MEMBER through a struct
+                // literal (`Test { borrowed_array: &[1; 314] }`), the C++
+                // prvalue died with the declaration and the member dangled
+                // (serde_bytes's test_derive: ASan stack-use-after-scope in the
+                // comparison after deserialization; the plain run passed by
+                // luck). A per-site `static constexpr` is the promoted
+                // constant. Slice-view targets have their own static slot above.
+                if r.mutability.is_none()
+                    && matches!(
+                        self.expected_reference_inner_type(expected_ty),
+                        Some(syn::Type::Array(_))
+                    )
+                    && self.expr_is_promotable_constant_array(&r.expr)
+                {
+                    let value = self.emit_expr_to_string_with_expected(
+                        &r.expr,
+                        self.expected_reference_inner_type(expected_ty),
+                    );
+                    return format!(
+                        "([]() -> const auto& {{ static const auto _rusty_promoted = {}; return _rusty_promoted; }}())",
+                        value
+                    );
                 }
                 if self.expected_type_is_string_view(expected_ty) {
                     return self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
@@ -17657,7 +17700,9 @@ impl CodeGen {
             // a deleted-copy error once the target became a move-only Box.
             // A literal-backed target has no object to alias, so it keeps its
             // own storage.
-            let storage_decl = if static_kw.is_empty() {
+            let storage_decl = if static_kw.is_empty()
+                && !self.slice_view_slot_holds_the_value(&reference.expr, &inner)
+            {
                 if is_mut {
                     "auto&& _slice_ref_tmp".to_string()
                 } else {
@@ -17693,7 +17738,9 @@ impl CodeGen {
         // `&mut xs` aliases; copying into the slot pointed the span at the copy
         // and discarded every mutation through it — silently for a copyable
         // target, and as a deleted-copy error for a move-only one.
-        let storage_decl = if static_kw.is_empty() {
+        let storage_decl = if static_kw.is_empty()
+            && !self.slice_view_slot_holds_the_value(&reference.expr, &inner)
+        {
             if is_mut {
                 "auto&& _slice_ref_tmp".to_string()
             } else {
@@ -17708,6 +17755,61 @@ impl CodeGen {
             "{}() -> {} {{ {}{} = {}; return {}(_slice_ref_tmp); }}()",
             capture, span_cpp, static_kw, storage_decl, inner, span_cpp
         ))
+    }
+
+    /// The slice-view slot HOLDS its operand instead of referencing it when
+    /// the operand is a CALL whose result the emission wrapped in
+    /// `rusty::detail::deref_if_pointer_like` (`&*slice::from_raw_parts(p, n)`:
+    /// `rusty::from_raw_parts` is a `std::span` prvalue). The helper hands
+    /// back an xvalue of its argument — the prvalue dies with the
+    /// declaration, and the reference slot then read a dead stack frame
+    /// (vec_port's `as_slice()`: ASan stack-use-after-scope, 16 bytes of a
+    /// `ref.tmp` in the lambda frame; the plain run passed by luck). A place
+    /// operand keeps the aliasing reference slot (the `&mut xs` rule above);
+    /// a method call stays as it was (its result may be a reference).
+    fn slice_view_slot_holds_the_value(&self, operand: &syn::Expr, inner: &str) -> bool {
+        if !inner.starts_with("rusty::detail::deref_if_pointer_like(") {
+            return false;
+        }
+        let mut root = self.peel_paren_group_expr(operand);
+        while let syn::Expr::Unary(un) = root
+            && matches!(un.op, syn::UnOp::Deref(_))
+        {
+            root = self.peel_paren_group_expr(&un.expr);
+        }
+        matches!(root, syn::Expr::Call(_) | syn::Expr::Macro(_))
+    }
+
+    /// An array literal / repeat whose every element is a literal (nested
+    /// arrays included): constexpr-constructible, promotable to a per-site
+    /// static behind an immutable borrow. String literals are left to the
+    /// string-view route; a repeat needs a literal length.
+    pub(super) fn expr_is_promotable_constant_array(&self, expr: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::Array(a) => {
+                !a.elems.is_empty() && a.elems.iter().all(|e| self.expr_is_promotable_constant_elem(e))
+            }
+            syn::Expr::Repeat(r) => {
+                self.expr_is_promotable_constant_elem(&r.expr)
+                    && matches!(self.peel_paren_group_expr(&r.len), syn::Expr::Lit(_))
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_is_promotable_constant_elem(&self, expr: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::Lit(l) => matches!(
+                l.lit,
+                syn::Lit::Int(_) | syn::Lit::Float(_) | syn::Lit::Bool(_) | syn::Lit::Char(_) | syn::Lit::Byte(_)
+            ),
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => {
+                self.expr_is_promotable_constant_elem(&u.expr)
+            }
+            syn::Expr::Cast(c) => self.expr_is_promotable_constant_elem(&c.expr),
+            syn::Expr::Array(_) | syn::Expr::Repeat(_) => self.expr_is_promotable_constant_array(expr),
+            _ => false,
+        }
     }
 
     /// A `+` chain whose LEFTMOST leaf produces an owned string
@@ -22855,6 +22957,10 @@ impl CodeGen {
                     && !type_string_has_auto_placeholder(&output_cpp)
                 {
                     let deserializer = self.emit_deserializer_call_arg(&call.args[0]);
+                    // A reference payload (`&'a [u8; N]`, a `#[serde(with)]`
+                    // field) is its pointer representation as the type
+                    // argument: the lane keys on it.
+                    let output_cpp = Self::reference_spelling_as_pointer(&output_cpp);
                     return format!("{}<{}>({})", func, output_cpp, deserializer);
                 }
             }
@@ -26059,6 +26165,30 @@ impl CodeGen {
                 .skip(1)
                 .map(|arg| self.emit_expr_maybe_move(arg))
                 .collect();
+            // `SeqAccess::next_element::<Local>(&mut seq)` over a closure-seeded
+            // block-local type (`try_emit_block_local_deserialize_impl_as_seed`):
+            // the `_seed` form with its seed.
+            if extra_args.is_empty()
+                && matches!(method_name.as_str(), "next_element" | "next_value" | "next_key")
+                && let Some(last_seg) = func_path.segments.last()
+                && let syn::PathArguments::AngleBracketed(ab) = &last_seg.arguments
+                && ab.args.len() == 1
+                && let Some(syn::GenericArgument::Type(seed_ty)) = ab.args.first()
+                && let syn::Type::Path(tp) = self.peel_reference_paren_group_type(seed_ty)
+                && tp.qself.is_none()
+                && tp.path.segments.len() == 1
+                && let Some(seed_var) = self
+                    .closure_seed_for_local_type(&tp.path.segments[0].ident.to_string())
+                    .map(str::to_string)
+            {
+                let owner_ns = if method_name == "next_element" { "SeqAccess_" } else { "MapAccess_" };
+                let callee = format!("{}::{}_seed", owner_ns, method_name);
+                return Some(self.emit_extension_call_with_receiver_autoderef_fallback(
+                    &callee,
+                    &receiver,
+                    &[seed_var],
+                ));
+            }
             let mut template_args = self
                 .emit_expr_path_template_args(func_path)
                 .unwrap_or_default();

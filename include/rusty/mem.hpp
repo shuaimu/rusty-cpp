@@ -174,11 +174,11 @@ private:
         new (storage_) T(value);
     }
 
-    T* ptr() noexcept {
+    T* storage_ptr() noexcept {
         return std::launder(reinterpret_cast<T*>(storage_));
     }
 
-    const T* ptr() const noexcept {
+    const T* storage_ptr() const noexcept {
         return std::launder(reinterpret_cast<const T*>(storage_));
     }
 
@@ -193,18 +193,18 @@ public:
     ManuallyDrop(ManuallyDrop&& other) noexcept(std::is_nothrow_move_constructible_v<T>)
         : initialized_(other.initialized_) {
         if (other.initialized_) {
-            new (storage_) T(std::move(*other.ptr()));
+            new (storage_) T(std::move(*other.storage_ptr()));
             other.initialized_ = false;
         }
     }
     ManuallyDrop& operator=(ManuallyDrop&& other) noexcept(std::is_nothrow_move_constructible_v<T>) {
         if (this != &other) {
             if (initialized_) {
-                ptr()->~T();
+                storage_ptr()->~T();
             }
             initialized_ = other.initialized_;
             if (other.initialized_) {
-                new (storage_) T(std::move(*other.ptr()));
+                new (storage_) T(std::move(*other.storage_ptr()));
                 other.initialized_ = false;
             }
         }
@@ -225,19 +225,33 @@ public:
     }
 
     T* as_mut_ptr() noexcept {
-        return ptr();
+        return storage_ptr();
     }
 
     const T* as_ptr() const noexcept {
-        return ptr();
+        return storage_ptr();
     }
 
     T& operator*() noexcept {
-        return *ptr();
+        return *storage_ptr();
     }
 
     const T& operator*() const noexcept {
-        return *ptr();
+        return *storage_ptr();
+    }
+
+    // Rust Deref-coercion shim, like `allocator()` below: Rust's ManuallyDrop
+    // has no inherent `ptr`, so transpiled `me.ptr()` on a
+    // ManuallyDrop<RawVec<T>> (vec's `into_box`) is the wrapped value's.
+    decltype(auto) ptr()
+        requires requires(T& t) { t.ptr(); }
+    {
+        return (**this).ptr();
+    }
+    decltype(auto) ptr() const
+        requires requires(const T& t) { t.ptr(); }
+    {
+        return (**this).ptr();
     }
 
     // Rust Deref-coercion shim: transpiled Vec/VecDeque IntoIterator glue
@@ -253,7 +267,7 @@ public:
     // Transpiler emits it as an instance call `slot.take()` rather than the
     // free-fn form, so expose it as a method here.
     T take() noexcept(std::is_nothrow_move_constructible_v<T>) {
-        T result = std::move(*ptr());
+        T result = std::move(*storage_ptr());
         initialized_ = false;
         return result;
     }

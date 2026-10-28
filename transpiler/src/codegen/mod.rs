@@ -1916,6 +1916,15 @@ pub struct CodeGen {
     /// the dependency's own, and never a bare `<Tr>_` the crate wrap would
     /// have to requalify. `None` for a crate-declared trait's lane.
     pub(crate) ufcs_dependency_lane_root: Option<String>,
+    /// A lane function's signature as the DECLARATION pass spelled it
+    /// (return type, parameters), keyed by lane + self type + method +
+    /// generics: the definition pass adopts it verbatim, so the two passes
+    /// agree by construction. They diverged on a bound type parameter's
+    /// projection — `typename std::remove_pointer_t<std::remove_cvref_t<V>>::Value`
+    /// declared, `typename ::serde_core::de::VisitorTraits<V>::Value` defined
+    /// (serde_core, 908 lanes: the declared template had no definition, an
+    /// undefined reference the first time a consumer instantiated one).
+    pub(crate) ufcs_lane_declared_signatures: HashMap<String, (String, Vec<String>)>,
     /// §3.2.16 (aa): while a consumer impl of a dependency trait on a
     /// crate-LOCAL self type emits its lane definitions, each lane function
     /// forwards to the member (the member tier carries the body, resolved
@@ -2475,6 +2484,9 @@ pub struct CodeGen {
     /// lowered as single-span VIEW VALUES — `&T`/`&mut T` drop the
     /// reference. Maps type name -> the span field's emitted name.
     pub(crate) slice_tail_view_types: HashMap<String, String>,
+    /// The dependencies' slice-tail DST wrappers (manifest `slice_tail_view`):
+    /// a consumer's `&Bytes` lowers to the view value like the declaring crate's.
+    pub(crate) dependency_slice_tail_view_types: HashMap<String, String>,
     /// Data enums emitted as struct-wrapper variants (instead of alias-only `using`).
     /// Used for expression lowering where wrapper-only static constructors may be needed.
     pub(crate) data_enum_wrapper_types: HashSet<String>,
@@ -3012,6 +3024,10 @@ pub struct CodeGen {
     /// block scope. C++ does not support local class templates, so local type
     /// references must not recover/emit template arguments.
     pub(crate) local_type_bindings: Vec<HashSet<String>>,
+    /// Block-local structs whose `impl Deserialize` became a closure seed
+    /// (`try_emit_block_local_deserialize_impl_as_seed`): type name → the seed
+    /// variable, per block scope.
+    pub(crate) closure_seeded_locals: Vec<HashMap<String, String>>,
     /// Hoisted local generic type names temporarily visible while emitting the
     /// corresponding block after local generic item stripping.
     pub(crate) hoisted_local_type_name_scopes: Vec<HashSet<String>>,
@@ -3442,6 +3458,19 @@ pub struct CodeGen {
     /// Enables method-signature adjustments (for example Deref view targets) while
     /// impl items are being consumed from `impl_blocks`.
     pub(crate) current_struct_assoc_cpp_types: Vec<HashMap<String, String>>,
+    /// The RUST binding of each struct's associated types (`type Value =
+    /// Cow<'de, [u8]>;`), keyed by struct name, recorded as the struct is
+    /// emitted: a hint needs what the mapped C++ spelling erases.
+    pub(crate) struct_assoc_syn_types: HashMap<String, HashMap<String, syn::Type>>,
+    /// `Struct::Alias` keys of associated-type aliases emitted through the
+    /// `rusty::detail::assoc_<X>` probe in plain module mode (not under
+    /// --crate-graph). The alias EXISTS as a member — a consumer's `typename
+    /// D::Error` finds it — but it does not make a method's return spellable:
+    /// the explicit spelling is the HARD `typename …<L>::Target`, a hard error
+    /// when a conditional impl's class is instantiated with a non-conforming
+    /// parameter (either's `Either<int, int>` with `impl<L: Deref, R: Deref>
+    /// Deref for Either<L, R>`, measured), so such methods keep deducing.
+    pub(crate) soft_probe_assoc_aliases: HashSet<String>,
     /// Stack of method return types for the currently emitted struct body.
     /// Used by expression lowering to infer tuple-returning local methods even
     /// after `impl_blocks` entries are consumed.
@@ -3750,6 +3779,7 @@ impl CodeGen {
             ufcs_traits_with_generic_impls: HashSet::new(),
             ufcs_tag_namespace: None,
             ufcs_dependency_lane_root: None,
+            ufcs_lane_declared_signatures: HashMap::new(),
             ufcs_lane_forward_to_member: false,
             pending_dependency_trait_witness_lines: Vec::new(),
             ufcs_abi_companion_wanted: false,
@@ -3858,6 +3888,7 @@ impl CodeGen {
             external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
             slice_tail_view_types: HashMap::new(),
+            dependency_slice_tail_view_types: HashMap::new(),
             data_enum_wrapper_types: HashSet::new(),
             data_enum_unit_variants: HashSet::new(),
             emitting_class_template_param_stack: Vec::new(),
@@ -3973,6 +4004,7 @@ impl CodeGen {
             pending_uninit_let_locals: Vec::new(),
             local_function_bindings: Vec::new(),
             local_type_bindings: Vec::new(),
+            closure_seeded_locals: Vec::new(),
             hoisted_local_type_name_scopes: Vec::new(),
             local_manually_drop_bindings: Vec::new(),
             param_bindings: Vec::new(),
@@ -4081,6 +4113,8 @@ impl CodeGen {
             harness_test_marker_fn_names_stack: Vec::new(),
             emitted_non_method_member_names: Vec::new(),
             current_struct_assoc_cpp_types: Vec::new(),
+            struct_assoc_syn_types: HashMap::new(),
+            soft_probe_assoc_aliases: HashSet::new(),
             current_struct_method_output_types: Vec::new(),
             return_value_scopes: Vec::new(),
             return_scope_decltype_auto: Vec::new(),
@@ -5411,7 +5445,14 @@ impl CodeGen {
         manifests: Vec<crate::transpile::UfcsTraitManifest>,
     ) {
         self.dependency_type_alias_targets.clear();
+        self.dependency_slice_tail_view_types.clear();
         for manifest in &manifests {
+            for dt in &manifest.declared_types {
+                if let Some(field) = &dt.slice_tail_view {
+                    self.dependency_slice_tail_view_types
+                        .insert(dt.name.clone(), field.clone());
+                }
+            }
             for (path, target) in &manifest.type_aliases {
                 if let Ok(ty) = syn::parse_str::<syn::Type>(target) {
                     self.dependency_type_alias_targets
@@ -5485,6 +5526,7 @@ impl CodeGen {
                     module_path: module_path.clone(),
                     arity,
                     args_inline: self.declared_type_generic_args_inline(name, module_path),
+                    slice_tail_view: self.slice_tail_view_types.get(name).cloned(),
                 }
             })
             .collect();
@@ -8526,6 +8568,9 @@ impl CodeGen {
         self.forward_declared_function_paths.clear();
         self.data_enum_types.clear();
         self.slice_tail_view_types.clear();
+        self.struct_assoc_syn_types.clear();
+        self.soft_probe_assoc_aliases.clear();
+        self.ufcs_lane_declared_signatures.clear();
         self.data_enum_wrapper_types.clear();
         self.data_enum_unit_variants.clear();
         self.data_enum_variants_by_enum.clear();
@@ -20245,6 +20290,150 @@ impl CodeGen {
         self.writeln("};");
     }
 
+    /// A block-local `impl Deserialize for Local { fn deserialize<D>(d: D) ->
+    /// Result<Self, D::Error> }` — serde_derive's `#[serde(with = …)]` wrapper
+    /// `__DeserializeWith`, one per field, inside the visitor's `visit_seq` /
+    /// `visit_map`: a local class cannot hold the member template, and the
+    /// local-class rewrite to an enclosing type parameter has none to use (and
+    /// would pick the SeqAccess `__A`). A generic lambda IS a local member
+    /// template: the impl becomes `auto __rusty_seed_Local =
+    /// rusty::serde_rt::de::make_fn_seed<Local>([&](auto d) -> Result<Local,
+    /// D::Error> { body })`, and the accessors that name the type
+    /// (`SeqAccess::next_element::<Local>`) take the `_seed` form with it
+    /// (`closure_seeded_locals`). The lambda's `D` is the deserializer's pointer
+    /// representation, as a lane's `D` would be.
+    pub(super) fn try_emit_block_local_deserialize_impl_as_seed(
+        &mut self,
+        impl_block: &syn::ItemImpl,
+    ) -> bool {
+        let Some((_, trait_path, _)) = &impl_block.trait_ else {
+            return false;
+        };
+        if trait_path.segments.last().is_none_or(|s| s.ident != "Deserialize") {
+            return false;
+        }
+        let Some(self_tp) = Self::impl_self_type_path(impl_block.self_ty.as_ref()) else {
+            return false;
+        };
+        if matches!(impl_block.self_ty.as_ref(), syn::Type::Reference(_))
+            || self_tp.path.segments.len() != 1
+        {
+            return false;
+        }
+        let local_name = self_tp.path.segments[0].ident.to_string();
+        // Block-local: declared in an enclosing block (a GNU statement
+        // expression's block does not push `local_type_bindings`, so a
+        // crate-level declaration is the only disqualifier there).
+        let block_local = self
+            .local_type_bindings
+            .iter()
+            .any(|scope| scope.contains(&local_name))
+            || !self.local_declared_types.contains(&local_name);
+        if !block_local {
+            return false;
+        }
+        let methods: Vec<&syn::ImplItemFn> = impl_block
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let [method] = methods.as_slice() else {
+            return false;
+        };
+        if method.sig.ident != "deserialize" || method.sig.receiver().is_some() {
+            return false;
+        }
+        let type_params: Vec<String> = method
+            .sig
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let [d_param] = type_params.as_slice() else {
+            return false;
+        };
+        let inputs: Vec<&syn::PatType> = method
+            .sig
+            .inputs
+            .iter()
+            .filter_map(|a| match a {
+                syn::FnArg::Typed(pt) => Some(pt),
+                _ => None,
+            })
+            .collect();
+        let [input] = inputs.as_slice() else {
+            return false;
+        };
+        let syn::Pat::Ident(input_ident) = input.pat.as_ref() else {
+            return false;
+        };
+        let param_name = escape_cpp_keyword(&input_ident.ident.to_string());
+        let local_cpp = escape_cpp_keyword(&local_name);
+        let local_syn: syn::Type = syn::parse_quote!(#self_tp);
+        let mut output = method.sig.output.clone();
+        if let syn::ReturnType::Type(_, ty) = &mut output {
+            Self::rewrite_bare_self_type(ty, &local_syn);
+        }
+        self.push_type_param_scope(&method.sig.generics);
+        let return_cpp = self.map_return_type(&output);
+        self.pop_type_param_scope();
+        if return_cpp == "auto"
+            || return_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&return_cpp)
+        {
+            return false;
+        }
+        // The trailing return type precedes the body's `using D = …;`: spell
+        // the parameter's own type there.
+        let trailing_return = return_cpp.replace(
+            &format!("std::remove_cvref_t<{}>", d_param),
+            &format!("std::remove_cvref_t<decltype({})>", param_name),
+        );
+        let seed_var = format!("__rusty_seed_{}", local_cpp);
+        self.writeln(&format!(
+            "auto {} = ::rusty::serde_rt::de::make_fn_seed<{}>([&](auto {}) -> {} {{",
+            seed_var, local_cpp, param_name, trailing_return
+        ));
+        self.indent += 1;
+        self.writeln(&format!(
+            "using {} = std::remove_cvref_t<decltype({})>;",
+            d_param, param_name
+        ));
+        self.push_type_param_scope(&method.sig.generics);
+        self.push_return_value_scope(&return_cpp);
+        self.push_return_type_hint(&output);
+        self.push_param_bindings(&method.sig.inputs);
+        self.emit_block(&method.block);
+        self.pop_param_bindings();
+        self.pop_return_type_hint();
+        self.pop_return_value_scope();
+        self.pop_type_param_scope();
+        self.indent -= 1;
+        self.writeln("});");
+        if self.closure_seeded_locals.is_empty() {
+            self.closure_seeded_locals.push(HashMap::new());
+        }
+        if let Some(scope) = self.closure_seeded_locals.last_mut() {
+            scope.insert(local_name, seed_var);
+        }
+        true
+    }
+
+    /// The seed variable of a closure-seeded block-local type in scope.
+    pub(super) fn closure_seed_for_local_type(&self, name: &str) -> Option<&str> {
+        self.closure_seeded_locals
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).map(String::as_str))
+    }
+
     fn impl_self_type_path<'a>(ty: &'a syn::Type) -> Option<&'a syn::TypePath> {
         match ty {
             syn::Type::Path(tp) if tp.qself.is_none() => Some(tp),
@@ -25014,6 +25203,10 @@ impl CodeGen {
         // after the template parameter list; book §3.2.2 rule 3: a blanket's
         // bound-derived constraints.
         let requires_prefix = self.ufcs_free_function_requires_prefix(method_spec, &free_generics);
+        self.ufcs_lane_declared_signatures.insert(
+            self.ufcs_lane_signature_key(&self_cpp_ty, &method_name, &free_generics),
+            (return_type.clone(), params.clone()),
+        );
         self.emit_template_declaration_with_type_defaults(
             &free_generics,
             export_prefix,
@@ -26304,6 +26497,32 @@ impl CodeGen {
             // type-parameter scope and the signature flag were restored above).
             return;
         }
+        // Agreement with the declaration pass by construction: adopt the
+        // signature it spelled for this lane (`ufcs_lane_declared_signatures`).
+        if let Some((declared_return, declared_params)) = self
+            .ufcs_lane_declared_signatures
+            .get(&self.ufcs_lane_signature_key(&self_cpp_ty, &method_name, &free_generics))
+            .cloned()
+            && (declared_return != return_type || declared_params != params)
+        {
+            if std::env::var_os("RUSTY_CPP_DBG_LANE_SIG").is_some() {
+                eprintln!(
+                    "[lane-sig] {}: adopting the declaration's spelling\n  decl: {} ({})\n  def:  {} ({})",
+                    method_name,
+                    declared_return,
+                    declared_params.join(", "),
+                    return_type,
+                    params.join(", ")
+                );
+            }
+            return_type = declared_return;
+            // A defaulted key (`rusty::self_tag<X> = {}`) belongs to the
+            // declaration alone ("redefinition of default argument").
+            params = declared_params
+                .into_iter()
+                .map(|p| p.strip_suffix(" = {}").map(str::to_string).unwrap_or(p))
+                .collect();
+        }
         // Fix A part 2: inject the multi-owner default's `requires` constraint
         // after the template parameter list (must match the declaration);
         // book §3.2.2 rule 3: a blanket's bound-derived constraints.
@@ -26998,6 +27217,25 @@ impl CodeGen {
     /// wrapper such as serde_bytes's `Bytes`) already maps to a value and
     /// keeps it; a receiver-bearing method keeps the mapping its receiver
     /// parameter binds (`extension_receiver_param_cpp_type`).
+    /// The identity of a lane function across the declaration and definition
+    /// passes (`ufcs_lane_declared_signatures`).
+    fn ufcs_lane_signature_key(
+        &self,
+        self_cpp_ty: &str,
+        method_name: &str,
+        free_generics: &syn::Generics,
+    ) -> String {
+        format!(
+            "{}|{}|{}|{}|{}|{}",
+            self.ufcs_dependency_lane_root.as_deref().unwrap_or(""),
+            self.ufcs_tag_namespace.as_deref().unwrap_or(""),
+            self.ufcs_impl_module_path.join("::"),
+            self_cpp_ty,
+            method_name,
+            free_generics.to_token_stream()
+        )
+    }
+
     fn extension_lane_self_cpp_type(&self, self_ty: &syn::Type, no_receiver: bool) -> String {
         let mapped = self.rewrite_cpp_import_bound_type_spelling(&self.map_type(self_ty));
         // Spelled from the reference's own spelling (`const X<N>&` → `const
@@ -49677,7 +49915,17 @@ impl CodeGen {
                                         // slot is still the `auto` placeholder. This is what
                                         // closes the linked_list_port `Box<auto>::new_in` bug
                                         // and the analogous rc_port sites.
+                                        // A capacity factory's argument is a COUNT, never
+                                        // the element (`Vec::with_capacity(len)` recovered
+                                        // `Vec<decltype(len)>`: serde_bytes's CowVisitor).
+                                        let callee_is_capacity_factory = match call.func.as_ref() {
+                                            syn::Expr::Path(p) => p.path.segments.last().is_some_and(|s| {
+                                                s.ident.to_string().starts_with("with_capacity")
+                                            }),
+                                            _ => false,
+                                        };
                                         if owner_arity == 1
+                                            && !callee_is_capacity_factory
                                             && recovered_args
                                                 .first()
                                                 .is_some_and(|a| a == "auto")
@@ -52956,12 +53204,22 @@ impl CodeGen {
             syn::Lit::Char(c) => escape_cpp_char_literal(c.value()),
             syn::Lit::Byte(b) => format!("static_cast<uint8_t>({})", b.value()),
             syn::Lit::ByteStr(bs) => {
+                // `b"..."` is `&'static [u8; N]`: a place with static storage.
+                // Emitted as an array PRVALUE, every consumer that kept a
+                // view of it dangled — a `std::span` field of a struct
+                // literal (`Test { slice: b"..." }`, serde_bytes's test_derive:
+                // ASan stack-use-after-scope once the declaration's
+                // temporaries died), `Bytes::new(b"..")`, a `let s: &[u8] =
+                // b".."`. A per-site `static constexpr` array is the literal;
+                // it converts to a span, binds to a `const std::array&`, and
+                // copies where a value is wanted. `*b".."` (the array VALUE)
+                // and the pointer cast keep their own lowerings.
                 let bytes: Vec<String> =
                     bs.value().iter().map(|b| format!("0x{:02x}", b)).collect();
                 format!(
-                    "std::array<uint8_t, {}>{{{{ {} }}}}",
-                    bytes.len(),
-                    bytes.join(", ")
+                    "([]() -> const std::array<uint8_t, {n}>& {{ static constexpr std::array<uint8_t, {n}> _bs{{{{ {init} }}}}; return _bs; }}())",
+                    n = bytes.len(),
+                    init = bytes.join(", ")
                 )
             }
             _ => "/* TODO: literal */".to_string(),
@@ -55784,10 +56042,28 @@ impl CodeGen {
             inner.emit_stmt(stmt, false);
         }
 
+        // A GNU statement expression yields its last expression as an
+        // RVALUE: a block whose Rust value is a reference carried as a C++
+        // reference (`&'de [u8; N]` → `const std::array&`, never a view)
+        // would hand out a COPY of the referent — serde's derive binds
+        // `Some({ … match next_value::<__DeserializeWith>(..) { Ok(w) =>
+        // w.value, .. } })` to the field's `Option<const std::array&>`, and
+        // the copy died with the statement (ASan stack-use-after-return
+        // once `visit_map` returned the struct). The block carries the
+        // ADDRESS out and the consumer dereferences it.
+        let mut carries_reference = false;
         match tail_stmt {
             syn::Stmt::Expr(expr, None) => {
                 let tail_expr = inner.emit_expr_to_string_with_expected(expr, expected_ty);
-                inner.writeln(&format!("{};", tail_expr));
+                carries_reference = self.block_value_is_cpp_reference(expected_ty, &inner, expr);
+                if carries_reference {
+                    inner.writeln(&format!(
+                        "&rusty::detail::deref_if_pointer({});",
+                        tail_expr
+                    ));
+                } else {
+                    inner.writeln(&format!("{};", tail_expr));
+                }
             }
             _ => {
                 inner.emit_stmt(tail_stmt, false);
@@ -55800,7 +56076,33 @@ impl CodeGen {
         if emitted_body.is_empty() {
             return None;
         }
+        if carries_reference {
+            return Some(format!("*({{ {} }})", emitted_body));
+        }
         Some(format!("({{ {} }})", emitted_body))
+    }
+
+    /// The block's value is a Rust reference whose C++ spelling is a
+    /// reference (not a view such as `std::span` / `std::string_view`, not
+    /// a slice-tail DST wrapper): the expected type when the consumer gave
+    /// one, else the tail expression's own type.
+    fn block_value_is_cpp_reference(
+        &self,
+        expected_ty: Option<&syn::Type>,
+        inner: &CodeGen,
+        tail: &syn::Expr,
+    ) -> bool {
+        let ty = match expected_ty {
+            Some(ty) => ty.clone(),
+            None => match inner.infer_simple_expr_type(tail) {
+                Some(ty) => ty,
+                None => return false,
+            },
+        };
+        if !matches!(self.peel_paren_group_type(&ty), syn::Type::Reference(_)) {
+            return false;
+        }
+        inner.map_type(&ty).trim_end().ends_with('&')
     }
 
     /// Best-effort lowering of a Rust block used in expression position.
@@ -55864,7 +56166,27 @@ impl CodeGen {
             return None;
         }
 
-        let lambda_return_annotation = self.expected_lambda_return_annotation(expected_ty, false);
+        // A block whose value is a reference carried as a C++ reference
+        // (`&'a [u8; N]` → `const std::array&`): a deduced lambda return
+        // DECAYS it to a copy of the referent (the statement-expression
+        // route has the same hazard; see `block_value_is_cpp_reference`).
+        // The lambda returns the mapped reference type.
+        let reference_return = block
+            .stmts
+            .split_last()
+            .and_then(|(tail, _)| match tail {
+                syn::Stmt::Expr(tail_expr, None)
+                    if self.block_value_is_cpp_reference(expected_ty, &inner, tail_expr) =>
+                {
+                    Some(match expected_ty {
+                        Some(ty) => format!(" -> {}", inner.map_type(ty)),
+                        None => " -> decltype(auto)".to_string(),
+                    })
+                }
+                _ => None,
+            });
+        let lambda_return_annotation = reference_return
+            .unwrap_or_else(|| self.expected_lambda_return_annotation(expected_ty, false));
 
         let capture = if self.block_depth == 0 { "[]" } else { "[&]" };
         Some(format!(

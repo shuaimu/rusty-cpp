@@ -2494,12 +2494,77 @@ impl CodeGen {
         }
     }
 
+    /// The element of the `Vec<T>` a `Cow<'_, [T]>` or `Box<[T]>` is built
+    /// from (`Cow::Owned(vec)` / `vec.into_boxed_slice()`).
+    pub(super) fn owned_slice_wrapper_element_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        if !matches!(last.ident.to_string().as_str(), "Cow" | "Box") {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let inner = args.args.iter().find_map(|a| match a {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })?;
+        let inner = match inner {
+            syn::Type::Reference(r) => r.elem.as_ref(),
+            other => other,
+        };
+        match inner {
+            syn::Type::Slice(slice) => Some((*slice.elem).clone()),
+            _ => None,
+        }
+    }
+
     pub(super) fn resolve_current_struct_assoc_projection_syn_hint(
         &self,
         ty: &syn::Type,
     ) -> Option<syn::Type> {
+        // The RUST binding first (`type Value = Cow<'de, [u8]>;` of the current
+        // struct's impl): the mapped C++ spelling erases what a hint needs
+        // (`rusty::Cow` lost the `[u8]` that types `Cow::Owned(bytes)`'s
+        // argument — serde_bytes's CowVisitor, measured).
+        if let Some(bound) = self.current_struct_assoc_syn_type_for_projection(ty) {
+            return Some(bound);
+        }
         let mapped = self.resolve_current_struct_assoc_projection_cpp_type(ty)?;
         Self::parse_mapped_cpp_type_as_syn_hint(&mapped)
+    }
+
+    /// `Self::X` / `<Self as Tr>::X` bound by the current struct's impl items
+    /// (`type X = …;`), at the Rust level.
+    pub(super) fn current_struct_assoc_syn_type_for_projection(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<syn::Type> {
+        let syn::Type::Path(tp) = self.peel_paren_group_type(ty) else {
+            return None;
+        };
+        let assoc = match &tp.qself {
+            Some(qself) => {
+                if !Self::is_plain_self_type(&qself.ty) {
+                    return None;
+                }
+                tp.path.segments.last()?.ident.to_string()
+            }
+            None => {
+                if tp.path.segments.len() != 2 || tp.path.segments[0].ident != "Self" {
+                    return None;
+                }
+                tp.path.segments[1].ident.to_string()
+            }
+        };
+        let current = self.current_struct.as_ref()?;
+        let bindings = self
+            .struct_assoc_syn_types
+            .get(current)
+            .or_else(|| self.struct_assoc_syn_types.get(current.rsplit("::").next().unwrap_or(current)))?;
+        bindings.get(&assoc).cloned()
     }
 
     pub(super) fn infer_oncecell_inner_type_from_get_or_init_arg(
@@ -13084,7 +13149,16 @@ impl CodeGen {
                         let vec_hint = self
                             .expected_result_type_arg(Some(return_hint), 0)
                             .unwrap_or(return_hint);
-                        if let Some(elem_hint) = extract_vec_element_type_for_hint(vec_hint) {
+                        // `Result<Self::Value, _>` of a visitor method: the
+                        // RUST binding of the projection (`Cow<'de, [u8]>`), and
+                        // the buffer a `Cow<'_, [T]>` / `Box<[T]>` is built from
+                        // is a `Vec<T>` (serde_bytes's CowVisitor::visit_seq).
+                        let resolved_hint = self
+                            .resolve_current_struct_assoc_projection_syn_hint(vec_hint)
+                            .unwrap_or_else(|| vec_hint.clone());
+                        if let Some(elem_hint) = extract_vec_element_type_for_hint(&resolved_hint)
+                            .or_else(|| Self::owned_slice_wrapper_element_type_for_hint(&resolved_hint))
+                        {
                             let mapped = self.map_type(&elem_hint);
                             if mapped != "auto"
                                 && !mapped.contains("/* TODO")

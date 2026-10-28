@@ -354,6 +354,14 @@ impl CodeGen {
         if Self::is_deref_owner_or_guard_name(&name) {
             return true;
         }
+        // A crate type with its own `impl Deref` (`ByteArray<N>: Deref<Target
+        // = [u8; N]>`): `*arr` is its `operator*`, never a reference deref to
+        // collapse (`Ok(*arr)` into `Result<[u8; N], _>` lost the `*`).
+        if self.user_deref_targets.contains_key(&name)
+            || self.user_deref_targets.contains_key(&self.scoped_type_key(&name))
+        {
+            return true;
+        }
         self.cpp_type_aliases.get(&name).is_some_and(|target| {
             let head = target.split('<').next().unwrap_or(target);
             head.rsplit("::")
@@ -904,9 +912,16 @@ impl CodeGen {
             return false;
         }
         assoc_names.into_iter().all(|name| {
+            let escaped = escape_cpp_keyword(&name);
             self.emitted_non_method_member_names
                 .last()
-                .is_some_and(|scope| scope.contains(&escape_cpp_keyword(&name)))
+                .is_some_and(|scope| scope.contains(&escaped))
+                // A probe-emitted alias of plain module mode is a member, not a
+                // spellable return (see `soft_probe_assoc_aliases`).
+                && !self.current_struct.as_ref().is_some_and(|cur| {
+                    self.soft_probe_assoc_aliases
+                        .contains(&format!("{}::{}", cur, escaped))
+                })
         })
     }
 
@@ -4303,6 +4318,7 @@ impl CodeGen {
                     && tp.path.segments.last().is_some_and(|s| {
                         let n = s.ident.to_string();
                         self.slice_tail_view_types.contains_key(&n)
+                            || self.dependency_slice_tail_view_types.contains_key(&n)
                             || (n == "Self"
                                 && self.current_struct.as_deref().is_some_and(|cur| {
                                     self.slice_tail_view_types

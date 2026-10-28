@@ -4387,13 +4387,13 @@ struct Vec {
     constexpr std::span<const T> as_slice() const {
         // @unsafe
         {
-            return [&]() -> std::span<const T> { const auto& _slice_ref_tmp = rusty::detail::deref_if_pointer_like(std::span<const T>(rusty::as_ptr((*this)), this->len_field)); return std::span<const T>(_slice_ref_tmp); }();
+            return [&]() -> std::span<const T> { const auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(std::span<const T>(rusty::as_ptr((*this)), this->len_field)); return std::span<const T>(_slice_ref_tmp); }();
         }
     }
     constexpr std::span<T> as_mut_slice() {
         // @unsafe
         {
-            return [&]() -> std::span<T> { auto&& _slice_ref_tmp = rusty::detail::deref_if_pointer_like(std::span<T>(rusty::as_mut_ptr((*this)), this->len_field)); return std::span<T>(_slice_ref_tmp); }();
+            return [&]() -> std::span<T> { auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(std::span<T>(rusty::as_mut_ptr((*this)), this->len_field)); return std::span<T>(_slice_ref_tmp); }();
         }
     }
     constexpr std::add_pointer_t<std::add_const_t<T>> as_ptr() const {

@@ -2652,6 +2652,103 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   deserializer fully consumed. The `?` lowering's try-carrier already preserves a reference payload
   through its statement expression, so the reference-typed `let` binds the real referent. Still open:
   the derive's `__DeserializeWith` wrapper (nothing in a test target instantiates the own lanes yet).
+  Two gaps recorded after landing: (i) the keyed twin exists only through the COLLAPSE path — a lone
+  `impl Deserialize for &'a X` with no value impl (serde_core's `&'a Path`) gets no keyed member, so a
+  consumer deserializing `&Path` now hits the runtime's static_assert where it used to dangle; the rule
+  to reach is "every no-receiver function of a reference-self impl is keyed"; (ii) `rusty::try_from`'s
+  borrowed-view branch refused every non-lvalue SOURCE, so `(&buf[..4]).try_into()` (a prvalue span)
+  returned Err once the target stayed a reference — a view source (`std::span`, `std::string_view`, a
+  pointer) is never the storage, only an owning prvalue is; exempted (`try_from_source_is_view`, local
+  to array.hpp), measured with a standalone TU (prvalue span Ok and zero-copy, length mismatch Err).
+- *2026-10-27 — (ab) the derive route: serde_bytes 4/4 with test_derive green, the first consumer to
+  instantiate the own lanes.* serde's derive wraps every `#[serde(with)]` field in a block-local
+  `impl Deserialize for __DeserializeWith { fn deserialize<D> }` — a hoisted struct whose impl the member
+  tier has nothing to attach to inside a lane body. It is a CLOSURE SEED now
+  (`try_emit_block_local_deserialize_impl_as_seed`): `auto __rusty_seed_Local =
+  ::rusty::serde_rt::de::make_fn_seed<Local>([&](auto d) -> rusty::Result<Local, typename …::Error> {
+  using D = …; <body> })`, and the accessors `SeqAccess::next_element::<Local>` /
+  `MapAccess::next_value::<Local>` take it as the seed (`next_element_seed(receiver, seed)`); the
+  runtime `fn_seed` hands the deserializer's POINTER representation on (an lvalue deduced a COPY whose
+  cursor advanced alone — the `serialize_some` class); `collect_local_impl_overrides` leaves such impls
+  alone. What the first instantiation exposed, each general: (1) 908 serde_core lane DECLARATIONS had no
+  matching DEFINITION — the decl pre-pass spelled `remove_pointer_t<remove_cvref_t<V>>::Value`, the def
+  pass `VisitorTraits<V>::Value` (the declared-path map is not populated in the pre-pass) → undefined
+  references the first time any consumer instantiated one; the decl pass now records each lane's
+  signature (`ufcs_lane_declared_signatures`, keyed by self type + method + free generics) and the def
+  pass adopts it verbatim, stripping the `= {}` defaults (a redefinition of a default argument is
+  ill-formed). (2) The turbofish `deserialize::<&'a X>` spelled `deserialize<const X&>`: the reference
+  argument is its pointer key. (3) A reference member initialised from a `?` payload reads through the
+  pointer (`deref_if_pointer`); the mapper lambdas likewise (`deref_if_pointer_like` looked THROUGH a
+  Deref-able value). (4) `&Bytes` across crates: the slice-tail DST wrapper's view fact travels in the
+  manifest (`UfcsDeclaredType.slice_tail_view`), so a consumer's `&'a Bytes` is the view value, never
+  `const Bytes&`. (5) serde_core's `impl Deserializer for SeqAccessDeserializer<A> { type Error =
+  A::Error; }` was "skipped in constrained mode", so a consumer's `typename D::Error` did not exist: the
+  probe alias route (`using Error = typename rusty::detail::assoc_Error<A>::type;`, the probe now
+  pointer-robust) applies in plain module mode too — AND, gate-found: that alone turned every such
+  method's deduced return into the HARD `typename remove_pointer_t<remove_cvref_t<L>>::Target` (the
+  explicit spelling is `map_type(L::Target)` from `early_assoc_type_cpp_types`), a hard error the moment a
+  conditional impl's class is instantiated with a non-conforming parameter (either's `Either<int, int>`
+  under `impl<L: Deref, R: Deref> Deref`; the either parity harness went red and two leaf pins broke).
+  `soft_probe_assoc_aliases`: in plain module mode the probe alias is a member but not a spellable return
+  (`type_current_struct_assoc_aliases_emitted`), so methods keep deducing as before. LATENT under
+  --crate-graph: the same hard spelling has been emitted there all along (no matrix crate instantiates
+  such a class non-conformingly); the right spelling is the alias or the probe — follow-up. (6) `Ok(*arr)`
+  with `arr: ByteArray<N>` collapsed to `Ok(arr)`: a crate type with its own `impl Deref` is a deref
+  owner (`type_is_deref_owner_or_guard_type` counts `user_deref_targets`), `*arr` is its `operator*`;
+  either's `is_str(&*value)` now reads `deref_if_pointer_like(value)` (was `to_string_view(value)`),
+  7/7. (7) The Cow visitor body: `Vec::with_capacity(len)` was typed `Vec<decltype(len)>` by the
+  single-arg owner factory rule (capacity factories excluded), and `Cow::Owned(bytes)`'s argument was
+  hinted as the Cow itself — `cow_variant_ctor_arg_expected_type` (Owned → the owned form of `B`,
+  Borrowed → `&B`) overrides the generic placeholder hint in both hint collectors, with `Self::Value`
+  resolved at the RUST level (`struct_assoc_syn_types`; the mapped `rusty::Cow` had lost the `[u8]`).
+  (8) vec_port's `into_boxed_slice` reached runtime gaps — fixed in the headers only, no regen:
+  `ManuallyDrop::ptr()` forwards to the inner's `ptr()` (its private storage accessor renamed
+  `storage_ptr`), `Box<span<MaybeUninit<E>>>::assume_init()`, slice-box `from_raw_in`. (9) THE runtime
+  failure, test_derive's "did not expect this token: StructEnd": serde_test's `Token::Some =>
+  visitor.visit_some(self)` is emitted through the visitor-dispatch ladder
+  (`try_emit_visit_method_fallback_call`) as `.visit_some((*this))` — the by-value `D2` deduced the
+  deserializer's VALUE, a copy whose cursor advanced alone, so every derived `Option` field left its
+  payload token behind (a per-field probe over the row's BMIs localised it: every non-Option field
+  consumed exactly its tokens) — the fourth argument-emission site of the `serialize_some` class, now
+  `this` (`method_call_arg_is_reference_receiver_into_trait_method`). (10) ASan over the row (a replay of
+  its clang commands with `-fsanitize=address`, linked against the cache's `lib*_port.a`): vec_port's
+  `as_slice()` — `&*slice::from_raw_parts(p, n)` — bound `deref_if_pointer_like(<span prvalue>)` by
+  `const auto&`; the helper hands back an xvalue of its argument, the prvalue dies with the declaration,
+  and the slot read a dead stack frame (stack-use-after-scope, 16 bytes of `ref.tmp`; the plain run passed
+  by luck, and the alloc port regenerated before the aliasing-slot change still held the value). A CALL
+  operand's view is now HELD (`slice_view_slot_holds_the_value`); a place operand keeps the aliasing
+  reference slot; the two vendored vec_port lines hand-patched to what the emitter now produces. (11) ASan
+  again, in the TEST BODY: Rust's rvalue static promotion was missing — `Test { slice: b"...",
+  borrowed_array: &[1; 314], .. }` viewed (a `std::span` field) and bound (a `const std::array&` member)
+  prvalues that died with the declaration, read back in the comparison after deserialization. Three
+  pieces: `b"..."` (`&'static [u8; N]`) is a per-site `static constexpr std::array` lambda in the generic
+  literal lowering (`*b".."` and the pointer cast keep theirs); a constant array behind an immutable
+  borrow into an expected `&[T; N]` is a per-site `static const auto _rusty_promoted` (the Reference arm,
+  and the designated-field route that strips the `&` for a reference member —
+  `expr_is_promotable_constant_array`: literal elements only, literal repeat length); and the positional
+  literal of an AGGREGATE with a reference member (`Test(args…)`, taken because the derive gives `Test`
+  impl methods) is brace-initialized — C++20 parenthesized aggregate init does not extend a temporary
+  bound to a reference member (P0960), list-initialization does, which is Rust's `let`-extension of
+  `borrowed: &ByteArray::new(..)`. The tokens array of `assert_tokens(&test, &[Token::BorrowedBytes(b".."),
+  ..])` was never at risk: its temporaries live for the call's full-expression.
+  (12) ASan, the deserialized side: the derive's `__field = Some({ struct __DeserializeWith { value: &'a [u8;
+  314], .. } …; match next_value::<__DeserializeWith>(..) { Ok(w) => w.value, Err(e) => return Err(e) } })`
+  lowers to a GNU statement expression, whose value is its tail as an RVALUE — a 314-byte COPY of the
+  referent bound into the field's `Option<const std::array&>`, dead once `visit_map` returned the struct
+  (stack-use-after-return). A block whose Rust value is a reference carried as a C++ reference (never a
+  view) now carries its ADDRESS out, `*({ …; &rusty::detail::deref_if_pointer(tail); })`
+  (`block_value_is_cpp_reference`), and the IIFE route annotates the lambda with the mapped reference
+  type (a deduced return decays to the copy). (13) ASan, the last one: `let test = Test { ..,
+  borrowed_byte_array: &ByteArray::new([0; 314]), .. }` — Rust extends the temporary to the block; clang
+  keeps a temporary bound to a reference member only when the braced list initializes the variable
+  directly (`T t{..}`, `T t = {..}`) or the prvalue is bound to a reference (`auto&& t = T{..}`), and
+  `const auto t = T{..}` — a functional cast, copy-initialized — drops it at the semicolon (measured, clang
+  22.1.8, standalone TU). A `let` of a struct literal that borrows a TEMPORARY into a reference member
+  (`r: &B::make()` — not a place, not a promoted constant) binds by reference, `const auto& t = T{..}` /
+  `auto&& t = T{..}` (`reference_member_struct_literal_binding_spelling`); a place borrow keeps the plain
+  binding, so `decltype(local)` spellings downstream are unchanged (itertools' PutBackOnDrop pins). After all of it: serde_bytes 4/4 under ASan with
+  no memory errors; LeakSanitizer's 18 bytes in 6 allocations are the boxed-slice model's documented leak
+  (`Box<[T]>` is `Box<std::span<T>>`, the element buffer does not ride the Box's destructor — box.hpp).
 
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —

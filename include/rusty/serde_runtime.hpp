@@ -451,6 +451,40 @@ struct seq_access_bridge {
 };
 }
 inline namespace v1 {
+// A fn-local `impl Deserialize for Local` (serde_derive's `#[serde(with)]`
+// wrapper) cannot be a member template of a local class; the transpiler
+// emits it as a generic lambda behind this seed adapter, which carries the
+// DeserializeSeed surface (`Value`, `deserialize(D)`) the accessors probe.
+// The deserializer reaches the lambda in its POINTER representation: an
+// lvalue would deduce the lambda's `auto` as a COPY whose token cursor
+// advances alone (measured).
+template<typename V, typename F>
+struct fn_seed {
+    using Value = V;
+    F f;
+    template<typename D>
+    static decltype(auto) as_pointer(D&& d) {
+        if constexpr (std::is_pointer_v<std::remove_cvref_t<D>>) {
+            return +d;
+        } else {
+            return std::addressof(d);
+        }
+    }
+    // A trailing return type: the lambda's viability (its own trailing
+    // `typename D::Error`) is part of this overload's immediate context, so
+    // an accessor ladder probing `seed.deserialize(x)` with a deserializer
+    // the lambda cannot take moves on instead of hard-erroring.
+    template<typename D>
+    auto deserialize(D&& d) const
+        -> decltype(std::declval<const F&>()(fn_seed::as_pointer(std::declval<D&&>()))) {
+        return f(as_pointer(std::forward<D>(d)));
+    }
+};
+template<typename V, typename F>
+fn_seed<V, std::decay_t<F>> make_fn_seed(F&& f) {
+    return fn_seed<V, std::decay_t<F>>{std::forward<F>(f)};
+}
+
 template<typename Deserializer, typename Visitor>
 decltype(auto) deserialize_any(Deserializer&& deserializer, Visitor&& visitor);
 

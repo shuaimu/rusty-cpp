@@ -244,8 +244,8 @@ struct missing_assoc_type;
     template<typename P, typename = void>                                        \
     struct assoc_##Name { using type = missing_assoc_type; };                    \
     template<typename P>                                                         \
-    struct assoc_##Name<P, std::void_t<typename std::remove_cvref_t<P>::Name>> { \
-        using type = typename std::remove_cvref_t<P>::Name;                      \
+    struct assoc_##Name<P, std::void_t<typename std::remove_pointer_t<std::remove_cvref_t<P>>::Name>> { \
+        using type = typename std::remove_pointer_t<std::remove_cvref_t<P>>::Name;                      \
     };
 RUSTY_DETAIL_ASSOC_PROBE(Output)
 RUSTY_DETAIL_ASSOC_PROBE(Item)

@@ -3156,6 +3156,16 @@ struct std_array_meta<std::array<Elem, N>> {
     using elem_type = Elem;
     static constexpr std::size_t len = N;
 };
+// A non-owning view source for the borrowed `try_from` below (local to this
+// header: it stays self-contained).
+template<typename S>
+struct try_from_source_is_view : std::false_type {};
+template<typename E, std::size_t N>
+struct try_from_source_is_view<std::span<E, N>> : std::true_type {};
+template<>
+struct try_from_source_is_view<std::string_view> : std::true_type {};
+template<>
+struct try_from_source_is_view<std::u8string_view> : std::true_type {};
 } // namespace detail
 
 // Generic array TryFrom helper used by transpiled `try_into()` lowering:
@@ -3178,7 +3188,16 @@ auto try_from(Source&& source) {
     using SpanElem = std::remove_cv_t<std::remove_reference_t<decltype(*span.data())>>;
 
     if constexpr (std::is_reference_v<Target>) {
-        if constexpr (!std::is_lvalue_reference_v<Source&&>) {
+        // A borrowed view into the source: an OWNING prvalue source (a
+        // temporary array/Vec) would dangle, but a view source (`std::span`,
+        // `std::string_view`, any non-owning range) is never the storage —
+        // its data outlives the prvalue, and Rust already rejects borrowing
+        // a dropped temporary (`(&buf[..4]).try_into()` lowers to a prvalue
+        // span and returned Err here, measured).
+        using RawSource = std::remove_cvref_t<Source>;
+        constexpr bool source_is_view =
+            detail::try_from_source_is_view<RawSource>::value || std::is_pointer_v<RawSource>;
+        if constexpr (!std::is_lvalue_reference_v<Source&&> && !source_is_view) {
             return ResultTy::Err(std::tuple<>{});
         }
         if constexpr (!std::is_same_v<SpanElem, Elem>) {

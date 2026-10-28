@@ -221,6 +221,12 @@ pub struct UfcsDeclaredType {
     /// MISSING entry (older manifests) as `true` (conservative).
     #[serde(default = "default_args_inline")]
     pub args_inline: bool,
+    /// A slice-tail DST wrapper (`struct Bytes { bytes: [u8] }`): the name of
+    /// its single slice field. Its C++ form is a single-span VIEW VALUE, so a
+    /// consumer's `&Bytes` lowers to the value exactly as the declaring
+    /// crate's does (serde_bytes's `&'a Bytes` field, keyed `self_tag<Bytes>`).
+    #[serde(default)]
+    pub slice_tail_view: Option<String>,
 }
 
 fn default_args_inline() -> bool {

@@ -145,6 +145,36 @@ public:
         return Box<U, A>::from_raw(reinterpret_cast<U*>(slot));
     }
 
+    // Rust `Box::<[MaybeUninit<U>]>::assume_init(self) -> Box<[U]>` (vec's
+    // `into_boxed_slice` → `RawVec::into_box`): the boxed-slice model owns the
+    // SPAN object, so re-type the span over the same buffer.
+    // @lifetime: owned
+    template<typename TT = T>
+        requires rusty::detail::is_std_span_v<TT>
+            && requires { typename rusty::detail::maybe_uninit_inner<
+                   typename rusty::detail::span_element<TT>::type>::type; }
+    auto assume_init() {
+        using Uninit = typename rusty::detail::span_element<TT>::type;
+        using U = typename rusty::detail::maybe_uninit_inner<Uninit>::type;
+        TT* old_span = this->into_raw();
+        std::span<U> re(reinterpret_cast<U*>(old_span->data()), old_span->size());
+        alloc_.deallocate(
+            rusty::NonNull<std::uint8_t>::from(reinterpret_cast<std::uint8_t*>(old_span)),
+            rusty::alloc::Layout::for_value<TT>());
+        return Box<std::span<U>, A>::new_(re);
+    }
+
+    // Rust `Box::<[T]>::from_raw_in(slice, alloc)` (vec's `into_box`): adopt
+    // the slice as the boxed-slice model does — the Box owns the span object;
+    // the element buffer rides along (the allocator is a zero-state tag here).
+    // @unsafe
+    // @lifetime: owned
+    template<typename S, typename A2>
+        requires rusty::detail::is_std_span_v<T> && std::is_constructible_v<T, S>
+    static Box from_raw_in(S slice, A2&&) {
+        return new_(T(slice));
+    }
+
     // Rust `Box::<MaybeUninit<U>>::write(boxed, value) -> Box<U>`: construct
     // the value into the uninit storage and re-type the SAME allocation
     // (MaybeUninit<U> is alignas(U) storage of sizeof(U) — layout-identical).

@@ -2826,6 +2826,11 @@ impl CodeGen {
                     early_assoc_type_cpp_types
                         .entry(alias_name.clone())
                         .or_insert(alias_cpp_type.clone());
+                    self.struct_assoc_syn_types
+                        .entry(name_str.clone())
+                        .or_default()
+                        .entry(alias_rust_name.clone())
+                        .or_insert_with(|| t.ty.clone());
                     let alias_was_emitted = self
                         .emitted_non_method_member_names
                         .last()
@@ -10826,8 +10831,12 @@ impl CodeGen {
                 // spelled through a probe that is well-formed for every `F`
                 // (include/rusty/traits.hpp), so the class template stays
                 // instantiable where `typename F::Output` would not be.
-                if self.crate_graph_mode
-                    && self.should_soften_dependent_assoc_mode()
+                // In module mode too (not only under --crate-graph): serde_core's
+                // `impl Deserializer for SeqAccessDeserializer<A> { type Error =
+                // A::Error; }` was skipped outright, so `typename …::Error` of
+                // that deserializer did not exist and a consumer's seed could
+                // not take it (serde_bytes's derive wrapper, measured).
+                if self.should_soften_dependent_assoc_mode()
                     && let Some((param, assoc)) = self.type_param_std_assoc_projection(&t.ty)
                 {
                     let name = escape_cpp_keyword(&t.ident.to_string());
@@ -10836,6 +10845,16 @@ impl CodeGen {
                             "using {} = typename rusty::detail::assoc_{}<{}>::type;",
                             name, assoc, param
                         ));
+                        // Plain module mode keeps the methods DEDUCING as before
+                        // the alias existed (`type_current_struct_assoc_aliases_
+                        // emitted`): the member alias is the probe, but the
+                        // explicit return spelling would be the hard projection.
+                        if !self.crate_graph_mode
+                            && let Some(cur) = self.current_struct.as_ref()
+                        {
+                            self.soft_probe_assoc_aliases
+                                .insert(format!("{}::{}", cur, name));
+                        }
                     }
                     return;
                 }
@@ -12647,6 +12666,17 @@ impl CodeGen {
                                 )
                             })
                             .collect();
+                        // An aggregate with a REFERENCE member takes braces: a
+                        // temporary bound to a reference member persists with the
+                        // aggregate under list-initialization, never under C++20
+                        // parenthesized aggregate init (P0960) — Rust extends the
+                        // temporary of `Test { borrowed: &ByteArray::new(..) }`
+                        // to the `let`, and the paren form left the member
+                        // dangling (serde_bytes's test_derive, ASan).
+                        let aggregate_with_reference_member = !has_fieldwise_ctor
+                            && field_order
+                                .iter()
+                                .any(|f| self.struct_field_is_reference(struct_name, f));
                         let emitted = if args.len() == 1 && !has_fieldwise_ctor {
                             // One parenthesized argument is a functional CAST
                             // (`T(x)` is `(T)x`), not C++20 parenthesized
@@ -12657,6 +12687,8 @@ impl CodeGen {
                             // Vec::new() }`). Braces aggregate-initialize. A
                             // type with a fieldwise ctor keeps the call form.
                             format!("{}{{{}}}", target_name, args[0])
+                        } else if aggregate_with_reference_member {
+                            format!("{}{{{}}}", target_name, args.join(", "))
                         } else {
                             format!("{}({})", target_name, args.join(", "))
                         };
@@ -12838,8 +12870,40 @@ impl CodeGen {
                         .is_some_and(|n| self.struct_field_is_reference(n, &rust_member_name));
                 let val = if field_is_reference
                     && let syn::Expr::Reference(ref_expr) = self.peel_paren_group_expr(&f.expr)
+                    && ref_expr.mutability.is_none()
+                    && self.expr_is_promotable_constant_array(&ref_expr.expr)
+                {
+                    // Rust's rvalue static promotion: `borrowed_array: &[1; 314]`
+                    // is a `'static` constant. Stripped to the prvalue array, the
+                    // reference member bound a temporary (serde_bytes's
+                    // test_derive, ASan stack-use-after-scope). A per-site
+                    // static is the promoted constant.
+                    format!(
+                        "([]() -> const auto& {{ static const auto _rusty_promoted = {}; return _rusty_promoted; }}())",
+                        self.emit_expr_to_string_with_expected(
+                            &ref_expr.expr,
+                            self.expected_reference_inner_type(field_ty.as_ref()),
+                        )
+                    )
+                } else if field_is_reference
+                    && let syn::Expr::Reference(ref_expr) = self.peel_paren_group_expr(&f.expr)
                 {
                     self.emit_expr_to_string(&ref_expr.expr)
+                } else if field_is_reference
+                    && matches!(self.peel_paren_group_expr(&f.expr), syn::Expr::Try(_))
+                {
+                    // `value: deserialize(d)?` into a reference member: the `?`
+                    // yields the payload as the lane hands it out — the pointer
+                    // representation of a reference (`Result<const T*, E>`), or
+                    // a reference the try-carrier preserved. Look through the
+                    // pointer; identity for the reference.
+                    format!(
+                        "rusty::detail::deref_if_pointer({})",
+                        self.emit_expr_to_string_with_expected_and_move_if_needed(
+                            &f.expr,
+                            field_ty.as_ref(),
+                        )
+                    )
                 } else {
                     self.emit_expr_to_string_with_expected_and_move_if_needed(
                         &f.expr,

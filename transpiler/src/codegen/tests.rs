@@ -45101,8 +45101,11 @@ fn test_value_condition_match_applies_guard_on_literal_arm() {
         "#,
     );
     // Value-condition lowering (not std::visit), and the guard is applied.
+    // The byte literal is its promoted static (`&'static [u8; N]`), compared
+    // by value all the same.
     assert!(
-        out.contains("_m == std::array"),
+        out.contains("_m == std::array")
+            || out.contains("_m == ([]() -> const std::array<uint8_t, 1>& { static constexpr"),
         "expected the byte-literal value-condition lowering:\n{out}"
     );
     assert!(
@@ -51369,7 +51372,7 @@ fn test_lane_signature_spells_an_import_bound_type_over_a_same_leaf_local_one() 
             name: "Content".to_string(),
             module_path: "private_".to_string(),
             arity: 0,
-            args_inline: true,
+            args_inline: true, slice_tail_view: None,
         }],
         ..Default::default()
     }]);
@@ -52191,6 +52194,233 @@ fn test_reference_receiver_into_a_trait_method_argument_is_the_pointer() {
 }
 
 #[test]
+fn test_reference_receiver_into_a_visitor_method_argument_is_the_pointer() {
+    // serde_test: `impl Deserializer for &mut Deserializer { fn deserialize_any
+    // <V>(self, visitor: V) { … Token::Some => visitor.visit_some(self) } }` —
+    // the visitor-dispatch ladder is a fourth argument-emission site of the
+    // `serialize_some` class: `(*this)` deduced `visit_some(D2)`'s `D2` as the
+    // VALUE, a copy of the deserializer whose token cursor advanced alone
+    // (serde_bytes's derived `Option` fields left their payload token behind:
+    // "did not expect this token: StructEnd", measured).
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["Deserializer".to_string(), "Visitor".to_string()],
+        declared_trait_methods: [
+            ("Deserializer".to_string(), vec!["deserialize_any".to_string()]),
+            ("Visitor".to_string(), vec!["visit_some".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        method_owners: [
+            ("deserialize_any".to_string(), vec!["Deserializer".to_string()]),
+            ("visit_some".to_string(), vec!["Visitor".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    cg.set_crate_name("consumer");
+    let file: syn::File = syn::parse_quote! {
+        pub struct De { pub n: i32 }
+        impl serde_core::Deserializer for &mut De {
+            fn deserialize_any<V>(self, visitor: V) -> i32 where V: serde_core::Visitor {
+                visitor.visit_some(self)
+            }
+        }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(out.contains("visit_some(this)"), "the reference receiver is the pointer: {out}");
+    assert!(!out.contains("visit_some((*this))"), "never the dereferenced copy: {out}");
+}
+
+#[test]
+fn test_slice_view_of_a_raw_parts_call_is_held_not_referenced() {
+    // vec_port's `as_slice(&self) -> &[T] { &*slice::from_raw_parts(p, n) }`:
+    // `rusty::from_raw_parts` is a `std::span` PRVALUE, and the emission
+    // wraps it in `deref_if_pointer_like`, which hands back an xvalue of its
+    // argument — bound to `const auto&`, the slot referenced the temporary
+    // after the declaration destroyed it (ASan: stack-use-after-scope in the
+    // slot's lambda frame, reached through serde_bytes's `Vec<u8>` serialize;
+    // the plain run passed by luck). A call operand's view is HELD by value;
+    // a place operand (`&mut xs`) keeps the aliasing reference slot.
+    let out = transpile_str_module(
+        r#"
+        pub struct V<T> { ptr: *const T, len: usize }
+        impl<T> V<T> {
+            pub fn as_slice(&self) -> &[T] { unsafe { &*std::slice::from_raw_parts(self.ptr, self.len) } }
+            pub fn as_mut_slice(&mut self) -> &mut [T] { unsafe { &mut *std::slice::from_raw_parts_mut(self.ptr as *mut T, self.len) } }
+        }
+        pub fn place(xs: &mut Vec<i32>) -> &mut [i32] { &mut xs[..] }
+        "#,
+        "consumer",
+    );
+    assert!(
+        out.contains("const auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(rusty::from_raw_parts("),
+        "a const call view is held: {out}"
+    );
+    assert!(
+        !out.contains("const auto& _slice_ref_tmp = rusty::detail::deref_if_pointer_like(rusty::from_raw_parts("),
+        "never referenced: {out}"
+    );
+    assert!(
+        !out.contains("auto&& _slice_ref_tmp = rusty::detail::deref_if_pointer_like(rusty::from_raw_parts_mut("),
+        "the mutable call view is held too: {out}"
+    );
+}
+
+#[test]
+fn test_constant_array_behind_a_borrow_and_a_byte_string_have_static_storage() {
+    // Rust's rvalue static promotion: `b"..."` is `&'static [u8; N]` and
+    // `&[1; 314]` is a promoted constant. serde_bytes's test_derive built
+    // `Test { slice: b"...", borrowed_array: &[1; 314], .. }` — the span field
+    // viewed, and the reference member bound, a prvalue that died with the
+    // declaration (ASan stack-use-after-scope in the comparison after
+    // deserialization; the plain run passed by luck). Both are per-site
+    // `static constexpr` now.
+    let out = transpile_str_module(
+        r#"
+        pub struct T<'a> { pub slice: &'a [u8], pub arr: &'a [u8; 4] }
+        pub fn make<'a>() -> T<'a> { T { slice: b"abc", arr: &[1; 4] } }
+        "#,
+        "consumer",
+    );
+    assert!(
+        out.contains("static constexpr std::array<uint8_t, 3> _bs{{ 0x61, 0x62, 0x63 }}; return _bs;"),
+        "the byte string is a static: {out}"
+    );
+    assert!(
+        out.contains("static const auto _rusty_promoted = "),
+        "the constant array behind the borrow is a static: {out}"
+    );
+    assert!(!out.contains(".arr = [](auto _seed)"), "never the prvalue repeat: {out}");
+}
+
+#[test]
+fn test_struct_literal_with_a_reference_member_and_impl_methods_is_brace_initialized() {
+    // serde_bytes's test_derive: `Test` has impl methods (the derive's
+    // serialize/deserialize), so its literal takes the positional form —
+    // `Test(args…)`, C++20 parenthesized aggregate init, which does NOT extend
+    // a temporary bound to a reference member (P0960); Rust extends the
+    // temporary of `borrowed: &ByteArray::new(..)` to the `let`. The member
+    // dangled (ASan stack-use-after-scope). Braces keep the temporary alive
+    // with the aggregate, and the constant array is the promoted static.
+    let out = transpile_str_module(
+        r#"
+        pub struct W { pub v: i32 }
+        impl W { pub fn new(v: i32) -> W { W { v } } }
+        pub struct R<'a> { pub arr: &'a [u8; 4], pub w: &'a W, pub n: i32 }
+        impl<'a> R<'a> { pub fn n(&self) -> i32 { self.n } }
+        pub fn make<'a>() -> R<'a> { R { arr: &[1; 4], w: &W::new(3), n: 1 } }
+        "#,
+        "consumer",
+    );
+    assert!(out.contains("R{"), "braces for the aggregate with a reference member: {out}");
+    assert!(!out.contains("return R("), "never the paren form: {out}");
+    assert!(
+        out.contains("static const auto _rusty_promoted = "),
+        "the constant array is the promoted static: {out}"
+    );
+}
+
+#[test]
+fn test_value_block_yielding_a_reference_carries_the_address_out() {
+    // serde's derive: `__field = Some({ struct __DeserializeWith { value:
+    // &'a [u8; 314], .. } …; match next_value::<__DeserializeWith>(..) {
+    // Ok(w) => w.value, Err(e) => return Err(e) } })`. A GNU statement
+    // expression yields its tail as an RVALUE — a COPY of the 314-byte
+    // referent, bound to the field's `Option<const std::array&>` and dead
+    // with the statement (ASan stack-use-after-return once visit_map
+    // returned the struct). The block carries the address out, dereferenced
+    // by the consumer. A view-typed block (`&[u8]` → span) is unchanged.
+    let out = transpile_str_module(
+        r#"
+        pub struct W<'a> { pub value: &'a [u8; 4], pub view: &'a [u8] }
+        pub fn pick<'a>(w: W<'a>) -> Option<&'a [u8; 4]> { Some({ let x = w; x.value }) }
+        pub fn pick_view<'a>(w: W<'a>) -> Option<&'a [u8]> { Some({ let x = w; x.view }) }
+        pub fn pick_early<'a>(w: W<'a>, ok: bool) -> Option<&'a [u8; 4]> {
+            Some({ if !ok { return None; } w.value })
+        }
+        "#,
+        "consumer",
+    );
+    // The IIFE route (no early exit inside): the lambda returns the reference.
+    assert!(
+        out.contains("-> const std::array<uint8_t, 4>& {") && out.contains("return x.value; }()"),
+        "the IIFE returns the array reference, never a deduced copy: {out}"
+    );
+    assert!(
+        !out.contains("-> std::span<const uint8_t>& {") && !out.contains("deref_if_pointer(x.view)"),
+        "a view-typed block stays a value: {out}"
+    );
+    // The statement-expression route (an early `return` inside): the block
+    // carries the address out, dereferenced by the consumer.
+    assert!(
+        out.contains("*({ ") && out.contains("&rusty::detail::deref_if_pointer(w.value); })"),
+        "the array reference leaves the statement expression as its address: {out}"
+    );
+}
+
+#[test]
+fn test_let_of_a_struct_literal_with_a_reference_member_binds_by_reference() {
+    // Rust extends `let t = T { r: &B::make(), .. }`'s temporary to the block.
+    // clang keeps a temporary bound to a reference member only when the braced
+    // list initializes the variable directly or the prvalue is bound to a
+    // reference; `const auto t = T{..}` drops it at the semicolon (measured,
+    // clang 22). serde_bytes's test_derive `borrowed_byte_array:
+    // &ByteArray::new([0; 314])` was read dead in the comparison after
+    // deserialization (ASan). The binding is `const auto&` / `auto&&`.
+    let out = transpile_str_module(
+        r#"
+        pub struct B { pub a: [u8; 4] }
+        impl B { pub fn make() -> B { B { a: [7; 4] } } }
+        pub struct T<'a> { pub r: &'a B, pub x: i32 }
+        impl<'a> T<'a> { pub fn x(&self) -> i32 { self.x } }
+        pub fn use_it() -> i32 { let t = T { r: &B::make(), x: 1 }; t.r.a[0] as i32 + t.x() }
+        pub fn use_mut() -> i32 { let mut t = T { r: &B::make(), x: 1 }; t.x = 2; t.x() }
+        "#,
+        "consumer",
+    );
+    assert!(out.contains("const auto& t = T{"), "the immutable let binds the literal by reference: {out}");
+    assert!(out.contains("auto&& t = T{"), "the mutable let binds by forwarding reference: {out}");
+}
+
+#[test]
+fn test_module_mode_type_param_assoc_projection_alias_is_the_probe_and_the_method_still_deduces() {
+    // serde_core's `impl Deserializer for SeqAccessDeserializer<A> { type Error =
+    // A::Error; }` in plain module mode: the alias used to be skipped outright
+    // ("Rust-only dependent associated type alias skipped"), so a consumer's
+    // `typename D::Error` did not exist (serde_bytes's derive wrapper). It is
+    // now the probe member — and the method keeps DEDUCING its return: the
+    // explicit spelling is the hard `typename …<A>::Error`, a hard error once
+    // the class is instantiated with a non-conforming `A` (either's
+    // `Either<int, int>` under `impl<L: Deref, R: Deref> Deref`, measured).
+    let out = transpile_str_module(
+        r#"
+        pub trait Access { type Error; fn err(&self) -> Self::Error; }
+        pub struct SeqDe<A> { pub a: A }
+        impl<A: Access> Access for SeqDe<A> {
+            type Error = A::Error;
+            fn err(&self) -> Self::Error { self.a.err() }
+        }
+        "#,
+        "consumer",
+    );
+    assert!(
+        out.contains("using Error = typename rusty::detail::assoc_Error<A>::type;"),
+        "the alias is the probe member: {out}"
+    );
+    assert!(!out.contains("skipped in constrained mode: Error"), "{out}");
+    assert!(
+        !out.contains("std::remove_cvref_t<A>>::Error err("),
+        "the method's return stays deduced, never the hard projection: {out}"
+    );
+}
+
+#[test]
 fn test_no_receiver_lane_body_calls_a_sibling_trait_static_through_its_lane() {
     // alloc's `impl<T, I> SpecFromIter<T, I> for Vec<T> { default fn from_iter(i: I)
     // -> Self { SpecFromIterNested::from_iter(i) } }`: once a no-receiver fn's
@@ -52594,4 +52824,205 @@ fn test_try_into_a_reference_to_an_array_is_the_borrowed_view() {
         out.contains("rusty::try_from<const std::array<uint8_t, 4>&>(v)"),
         "the reference target reaches the runtime's view overload: {out}"
     );
+}
+
+#[test]
+fn test_block_local_deserialize_impl_is_a_closure_seed_and_the_accessor_takes_it() {
+    // serde_derive's `#[serde(with = "…")]` wrapper: a fn-local struct whose
+    // `impl Deserialize` has a generic `deserialize<D>`, inside the visitor's
+    // `visit_seq`, named by `SeqAccess::next_element::<Wrap>(&mut seq)`. A
+    // local class cannot hold the member template, so the impl is a generic
+    // lambda behind `rusty::serde_rt::de::make_fn_seed<Wrap>` and the
+    // accessor takes the `_seed` form with it; the deserializer reaches the
+    // lambda as its pointer representation.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["Deserialize".to_string(), "SeqAccess".to_string()],
+        declared_trait_methods: [
+            ("Deserialize".to_string(), vec!["deserialize".to_string()]),
+            ("SeqAccess".to_string(), vec!["next_element".to_string(), "next_element_seed".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        method_owners: [
+            ("deserialize".to_string(), vec!["Deserialize".to_string()]),
+            ("next_element".to_string(), vec!["SeqAccess".to_string()]),
+            ("next_element_seed".to_string(), vec!["SeqAccess".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    cg.set_crate_name("consumer");
+    let file: syn::File = syn::parse_quote! {
+        use serde_core::de::{Deserialize, SeqAccess};
+        pub fn first<A: SeqAccess>(mut seq: A) -> Result<Option<i32>, A::Error> {
+            let got = {
+                struct Wrap { value: i32 }
+                impl<'de> Deserialize<'de> for Wrap {
+                    fn deserialize<D>(d: D) -> Result<Self, D::Error> where D: Copy {
+                        Ok(Wrap { value: 7 })
+                    }
+                }
+                SeqAccess::next_element::<Wrap>(&mut seq)?
+            };
+            Ok(got.map(|w| w.value))
+        }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("auto __rusty_seed_Wrap = ::rusty::serde_rt::de::make_fn_seed<Wrap>([&](auto d) -> rusty::Result<Wrap, typename std::remove_pointer_t<std::remove_cvref_t<decltype(d)>>::Error> {"),
+        "the impl is a generic lambda behind the seed adapter: {out}"
+    );
+    assert!(
+        out.contains("using D = std::remove_cvref_t<decltype(d)>;"),
+        "the lambda binds its type parameter from the argument: {out}"
+    );
+    assert!(
+        out.contains("SeqAccess_::next_element_seed(") && out.contains("__rusty_seed_Wrap)"),
+        "the accessor takes the `_seed` form with the seed: {out}"
+    );
+    assert!(
+        !out.contains("Rust-only nested impl block skipped in local scope"),
+        "the impl is not skipped: {out}"
+    );
+}
+
+#[test]
+fn test_dependency_slice_tail_wrapper_reference_is_the_view_value_in_a_consumer() {
+    // serde_bytes's `Bytes { bytes: [u8] }` is a slice-tail DST wrapper: in
+    // its own crate `&'a Bytes` lowers to the view VALUE `Bytes` (the lane
+    // for `impl Deserialize for &'a Bytes` is keyed `self_tag<Bytes>`). A
+    // consumer learned nothing of that and spelled `const Bytes&` — a
+    // reference member, and a turbofish `deserialize<const Bytes*>` no lane
+    // answers. The manifest's declared type carries the fact.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_bytes".to_string(),
+        declared_types: vec![crate::transpile::UfcsDeclaredType {
+            name: "Bytes".to_string(),
+            module_path: "bytes".to_string(),
+            arity: 0,
+            args_inline: true,
+            slice_tail_view: Some("bytes".to_string()),
+        }],
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    cg.set_crate_name("consumer");
+    let file: syn::File = syn::parse_quote! {
+        use serde_bytes::Bytes;
+        pub struct Holder<'a> { pub b: &'a Bytes, pub n: i32 }
+        pub fn view(h: &Holder<'_>) -> &Bytes { h.b }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(!out.contains("const Bytes& b;"), "no reference member: {out}");
+    assert!(out.contains("Bytes b;") || out.contains("::serde_bytes::bytes::Bytes b;"), "the view value: {out}");
+}
+
+#[test]
+fn test_byte_visitor_collects_a_byte_vec_through_next_element() {
+    // serde_bytes's `CowVisitor::visit_seq`: `let mut bytes =
+    // Vec::with_capacity(len); while let Some(b) = visitor.next_element()? {
+    // bytes.push(b); }` — the capacity is no element type, and the element
+    // flows BACKWARD from the push target (the Vec of the enclosing return).
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["SeqAccess".to_string()],
+        declared_trait_methods: [("SeqAccess".to_string(), vec!["next_element".to_string(), "size_hint".to_string()])]
+            .into_iter()
+            .collect(),
+        method_owners: [
+            ("next_element".to_string(), vec!["SeqAccess".to_string()]),
+            ("size_hint".to_string(), vec!["SeqAccess".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    cg.set_crate_name("consumer");
+    let file: syn::File = syn::parse_quote! {
+        use serde_core::de::SeqAccess;
+        pub fn collect<V: SeqAccess>(mut visitor: V) -> Result<Vec<u8>, V::Error> {
+            let len = core::cmp::min(visitor.size_hint().unwrap_or(0), 4096);
+            let mut bytes = Vec::with_capacity(len);
+            while let Some(b) = visitor.next_element()? {
+                bytes.push(b);
+            }
+            Ok(bytes)
+        }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(out.contains("rusty::Vec<uint8_t>::with_capacity("), "the element type is the byte, not the capacity's type: {out}");
+    assert!(out.contains("next_element<uint8_t>("), "the accessor's element is the push target's: {out}");
+}
+
+#[test]
+fn test_hoisted_visitor_visit_seq_collects_a_byte_vec_through_next_element() {
+    // The same shape inside a fn-local `impl Visitor` (serde_bytes's
+    // `CowVisitor::visit_seq`, hoisted with its struct): the capacity is no
+    // element type, the element flows from the push target / the return.
+    let manifest = crate::transpile::UfcsTraitManifest {
+        version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
+        module: "serde_core".to_string(),
+        declared_traits: vec!["SeqAccess".to_string(), "Visitor".to_string(), "Deserializer".to_string()],
+        declared_trait_methods: [
+            ("SeqAccess".to_string(), vec!["next_element".to_string(), "size_hint".to_string()]),
+            ("Visitor".to_string(), vec!["visit_seq".to_string(), "expecting".to_string()]),
+            ("Deserializer".to_string(), vec!["deserialize_bytes".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        method_owners: [
+            ("next_element".to_string(), vec!["SeqAccess".to_string()]),
+            ("size_hint".to_string(), vec!["SeqAccess".to_string()]),
+            ("visit_seq".to_string(), vec!["Visitor".to_string()]),
+            ("deserialize_bytes".to_string(), vec!["Deserializer".to_string()]),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![manifest]);
+    cg.set_crate_name("consumer");
+    let file: syn::File = syn::parse_quote! {
+        use serde_core::de::{SeqAccess, Visitor, Deserializer};
+        use std::borrow::Cow;
+        pub fn de<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Cow<'de, [u8]>, D::Error> {
+            struct CowVisitor;
+            impl<'de> Visitor<'de> for CowVisitor {
+                type Value = Cow<'de, [u8]>;
+                fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    formatter.write_str("a byte array")
+                }
+                fn visit_seq<V>(self, mut visitor: V) -> Result<Self::Value, V::Error>
+                where
+                    V: SeqAccess<'de>,
+                {
+                    let len = core::cmp::min(visitor.size_hint().unwrap_or(0), 4096);
+                    let mut bytes = Vec::with_capacity(len);
+                    while let Some(b) = visitor.next_element()? {
+                        bytes.push(b);
+                    }
+                    Ok(Cow::Owned(bytes))
+                }
+            }
+            deserializer.deserialize_bytes(CowVisitor)
+        }
+    };
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    assert!(out.contains("rusty::Vec<uint8_t>::with_capacity("), "the element type is the byte: {out}");
+    assert!(out.contains("next_element<uint8_t>("), "the accessor's element is the push target's: {out}");
 }
