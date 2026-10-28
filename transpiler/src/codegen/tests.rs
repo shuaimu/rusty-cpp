@@ -52499,6 +52499,179 @@ fn test_module_mode_type_param_assoc_projection_alias_is_the_probe_and_the_metho
 }
 
 #[test]
+fn test_module_mode_reference_return_over_a_match_annotates_the_iife_with_the_reference() {
+    // either's `fn deref(&self) -> &Self::Target { match *self { .. } }` in
+    // plain module mode: the method's own return stays deduced (the alias is
+    // the soft probe, `soft_probe_assoc_aliases`), and the match IIFE used to
+    // come out unannotated — a deduced lambda return DECAYS the reference to
+    // a copy of the target (measured at the address level: `&*either` was
+    // not the member). The IIFE now carries the mapped reference spelling,
+    // well-formed in a body (instantiated only when the method is called).
+    let out = transpile_str_module(
+        r#"
+        use std::ops::Deref;
+        pub enum Either<L, R> { Left(L), Right(R) }
+        impl<L: Deref, R: Deref<Target = L::Target>> Deref for Either<L, R> {
+            type Target = L::Target;
+            fn deref(&self) -> &Self::Target {
+                match *self {
+                    Either::Left(ref inner) => &**inner,
+                    Either::Right(ref inner) => &**inner,
+                }
+            }
+        }
+        "#,
+        "either",
+    );
+    assert!(out.contains("decltype(auto) operator*() const {"), "{out}");
+    assert!(
+        out.contains("return [&]() -> decltype(auto) { auto&& _m = (*this);"),
+        "the match IIFE keeps the arms' reference category: {out}"
+    );
+    // The exhaustiveness fallback is the `[[noreturn]]` call as a STATEMENT:
+    // a `return` of the void call conflicts with the deduced reference.
+    assert!(
+        out.contains("rusty::deref_ref(rusty::deref_ref(inner)); } rusty::intrinsics::unreachable_panic(); }();"),
+        "the fallback is a statement: {out}"
+    );
+    // NOT the mapped spelling: a deduced-return `operator*` is instantiated
+    // by every `requires {{ *v; }}` probe, on `Either<int, int>` too.
+    assert!(!out.contains("remove_cvref_t<L>>::Target& {"), "{out}");
+}
+
+#[test]
+fn test_module_mode_deref_over_a_match_hands_out_the_referent_itself_clang_runtime() {
+    // The runtime proof of the pin above, as a C++ module (softening is a
+    // module-mode behaviour): `*either` must be the payload's own target,
+    // not a copy of it.
+    let compiler = ["clang++", "clang++-22", "clang++-21"]
+        .into_iter()
+        .find(|candidate| {
+            std::process::Command::new(candidate)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        });
+    let Some(compiler) = compiler else {
+        eprintln!("skipping the module-mode deref runtime proof: no clang++ in PATH");
+        return;
+    };
+    let cppm = transpile_str_module(
+        r#"
+        use std::ops::Deref;
+        pub struct Cell(pub u32);
+        impl Deref for Cell {
+            type Target = u32;
+            fn deref(&self) -> &u32 { &self.0 }
+        }
+        pub enum Either<L, R> { Left(L), Right(R) }
+        impl<L: Deref, R: Deref<Target = L::Target>> Deref for Either<L, R> {
+            type Target = L::Target;
+            fn deref(&self) -> &Self::Target {
+                match *self {
+                    Either::Left(ref inner) => &**inner,
+                    Either::Right(ref inner) => &**inner,
+                }
+            }
+        }
+        "#,
+        "deref_probe",
+    );
+    let main = r#"
+#include <cstdio>
+#include <variant>
+import deref_probe;
+int main() {
+    Either<Cell, Cell> e = Either<Cell, Cell>::Left(Cell(7));
+    const auto& target = *e;
+    const auto* member = &std::get<0>(e)._0._0;
+    std::printf("%s\n", (&target == member) ? "referent" : "copy");
+    return (&target == member && target == 7) ? 0 : 1;
+}
+"#;
+    let temp = tempfile::tempdir().unwrap();
+    let cppm_path = temp.path().join("deref_probe.cppm");
+    let pcm_path = temp.path().join("deref_probe.pcm");
+    let object_path = temp.path().join("deref_probe.o");
+    let main_path = temp.path().join("main.cpp");
+    let binary_path = temp.path().join("deref_probe_main");
+    std::fs::write(&cppm_path, &cppm).unwrap();
+    std::fs::write(&main_path, main).unwrap();
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("include");
+    let prebuilt = format!("-fprebuilt-module-path={}", temp.path().display());
+    // `-Werror=return-stack-address`: the annotated IIFE must never bind a
+    // temporary to its reference return (the shape the fixture's crate-graph
+    // twin caught before `deref_ref` handed lvalues on by reference).
+    let flags = [
+        "-w",
+        "-Werror=return-stack-address",
+        "-std=c++23",
+        "-DRUSTY_PORTABLE_INTRINSICS=1",
+    ];
+    let precompiled = std::process::Command::new(compiler)
+        .args(flags)
+        .arg("-I")
+        .arg(&include_dir)
+        .args(["-x", "c++-module", "--precompile"])
+        .arg(&cppm_path)
+        .arg("-o")
+        .arg(&pcm_path)
+        .output()
+        .unwrap();
+    assert!(
+        precompiled.status.success(),
+        "precompiling the module failed:
+{}
+{}",
+        String::from_utf8_lossy(&precompiled.stderr),
+        cppm
+    );
+    let compiled = std::process::Command::new(compiler)
+        .args(flags)
+        .arg(&prebuilt)
+        .arg("-c")
+        .arg(&pcm_path)
+        .arg("-o")
+        .arg(&object_path)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "compiling the module failed:
+{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let linked = std::process::Command::new(compiler)
+        .args(flags)
+        .arg(&prebuilt)
+        .arg(&main_path)
+        .arg(&object_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .unwrap();
+    assert!(
+        linked.status.success(),
+        "compiling the importer failed:
+{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    let run = std::process::Command::new(&binary_path).output().unwrap();
+    assert!(
+        run.status.success(),
+        "`*either` is not the referent (exit {:?}):
+{}{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn test_crate_graph_type_param_assoc_projection_return_is_spelled_through_the_probe() {
     // Under --crate-graph the probe alias is a spellable return, and the
     // spelling must be the PROBE, never the hard projection: either's

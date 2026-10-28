@@ -2793,6 +2793,40 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   only reads the text. Still open from (ab): the qself `<&Mine as Tr>::f` traits-map gap, the lone
   `impl Deserialize for &'a X` without a keyed twin, lifetime-arg bounds in
   `ufcs_crate_trait_bound_constraints`.
+- *2026-10-28 — (ad) the module-mode IIFE copy, (ac)'s own follow-up.* In plain module mode a
+  `fn deref(&self) -> &Self::Target { match *self { .. } }` keeps its DECLARATION deduced
+  (`decltype(auto)`, the alias is the soft probe), and the match lowered to an UNANNOTATED lambda
+  (`return [&]() { auto&& _m = (*this); … }()`): a deduced lambda return decays the reference, so
+  `*either` was a COPY of the target — measured at the address level with clang 22 on the module
+  (`&*e != &std::get<0>(e)._0._0`; either's row passed because its targets are `Copy`). The drop was in
+  `expected_lambda_return_annotation`: under softening a type naming an unemitted-or-soft current-struct
+  alias gets no annotation unless `fully_resolved_dependent_spelling` accepts it, and that rejects every
+  `typename` — right for the VALUE positions it was written for (leaf10529's `Option<Self::Item>` ctor),
+  wrong for a reference. A Rust REFERENCE whose mapped spelling ends in `&` now annotates the lambda
+  `-> decltype(auto)`: the arms' category survives (a view such as `std::span` copies by design and
+  stays unannotated). NOT the mapped spelling, measured on the either row: a deduced-return `operator*`
+  is instantiated by every `requires { *v; }` probe (slice.hpp's `deref_if_pointer_like`), on a class
+  instantiated with a NON-conforming parameter too (`Either<int, int>`, which the row compares), and
+  `typename …<int>::Target` inside the body is a hard error there — the declaration-level hazard of
+  (ac), one level down. And `decltype(auto)` needs the arms to AGREE: the row's conforming `Either<String, &str>` (`Target = str`,
+  a VIEW) yielded `string_view` by value from `String::as_str()` beside `const string_view&` from the
+  identity through `deref_ref` — the prelude helper now hands a view (span / string_view, recognised by
+  shape) on BY VALUE from an lvalue too: the view is the Rust reference, and every arm's category
+  matches. With the annotation the exhaustiveness fallback could no longer be
+  `return rusty::intrinsics::unreachable_panic();` (a void `return` conflicts with the deduced
+  reference): the runtime-match assembly emits the `[[noreturn]]` call as a STATEMENT whenever the typed
+  fallback has no spellable type. Variants measured first: `-> &L::Target`, a concrete
+  `type Target = u32`, and a plain `-> &T` all annotated already — only the `Self::Assoc`-over-a-soft-alias
+  shape dropped it. DEPENDENCY, stated plainly: this annotation is safe ONLY because (ac) made
+  `deref_ref` hand an lvalue's target on by reference — over the old by-value helper the deduced
+  category would have been the copy again (and an explicit reference annotation a dangle, the shape the
+  crate-graph fixture caught under `-Werror=return-stack-address`). Guards: the text pin
+  (`test_module_mode_reference_return_over_a_match_annotates_the_iife_with_the_reference`) and a
+  module-mode clang RUNTIME proof (`…_hands_out_the_referent_itself_clang_runtime`: the module is
+  precompiled with the headers, an importer checks `&*e` IS the member, compiled with
+  `-Werror=return-stack-address`); the either row replayed under ASan. Widening to note: the same helper
+  annotates block IIFEs and closures, so a module-mode `|..| -> &Self::Item` or a block-valued
+  `&Self::Target` gets `decltype(auto)` too (the correct semantics).
 
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —

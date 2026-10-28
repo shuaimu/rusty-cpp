@@ -29918,6 +29918,23 @@ impl CodeGen {
             if let Some(mapped) = self.fully_resolved_dependent_spelling(ty) {
                 return format!(" -> {}", mapped);
             }
+            // A Rust REFERENCE carried as a C++ reference (`-> &Self::Target`
+            // over a match in a method whose own return had to stay deduced):
+            // an unannotated lambda deduces `auto` and DECAYS the reference
+            // to a copy of the referent (either's module-mode `deref` handed
+            // out a copy of the target, measured at the address level).
+            // `decltype(auto)` keeps the category the arms produce. NOT the
+            // mapped spelling: a deduced-return `operator*` is instantiated
+            // by every `requires { *v; }` probe, including on a class
+            // instantiated with a NON-conforming parameter (either's
+            // `Either<int, int>`), where `typename …<int>::Target` is a hard
+            // error inside the body (the either row, measured). A view
+            // (`std::span`) copies by design and stays unannotated.
+            if matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_))
+                && self.map_type(ty).trim_end().ends_with('&')
+            {
+                return " -> decltype(auto)".to_string();
+            }
             return String::new();
         }
         let mapped = self.map_type_with_explicit_owner_generic_recovery(ty);
@@ -64974,16 +64991,33 @@ bool is_empty(const T& value) {\n\
     }\n\
 }\n\
 #endif\n\
+// A VIEW (`std::span`, `std::string_view` — recognised by shape, so neither\n\
+// header is required here) IS the Rust reference: it travels by value.\n\
+template<typename T>\n\
+constexpr bool deref_ref_is_view_v =\n\
+    requires(T& v) { typename T::element_type; T::extent; v.subspan(0); }\n\
+    || requires(T& v) { typename T::traits_type; v.remove_prefix(0); v.remove_suffix(0); };\n\
 template<typename T>\n\
 decltype(auto) deref_ref(T&& value) {\n\
     // Rust's `&*x` is a REFERENCE to the target: an lvalue hands its target\n\
     // on by reference (an explicit `-> &Target` return must not dangle); an\n\
-    // rvalue's target cannot outlive it, so that one comes out by value.\n\
+    // rvalue's target cannot outlive it, so that one comes out by value. A\n\
+    // view comes out by value from either, so the arms of a deduced match\n\
+    // (`Either<String, &str>`: `as_str()` beside a `const string_view&`)\n\
+    // agree on one category.\n\
     if constexpr (requires { value.as_str(); }) {\n\
         return value.as_str();\n\
     } else if constexpr (std::is_lvalue_reference_v<T>) {\n\
         if constexpr (requires { *value; }) {\n\
-            return (*value);\n\
+            if constexpr (deref_ref_is_view_v<std::remove_cvref_t<decltype(*value)>>) {\n\
+                auto owned = *value;\n\
+                return owned;\n\
+            } else {\n\
+                return (*value);\n\
+            }\n\
+        } else if constexpr (deref_ref_is_view_v<std::remove_cvref_t<T>>) {\n\
+            auto owned = value;\n\
+            return owned;\n\
         } else {\n\
             return (value);\n\
         }\n\

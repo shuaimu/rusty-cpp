@@ -2198,13 +2198,18 @@ impl CodeGen {
                 resolved
             ));
         } else if let Some(expected) = runtime_match_expected {
-            if runtime_match_return_annotation.is_empty() {
+            let fallback = self.match_expr_unreachable_fallback_with_expected(Some(expected));
+            // A `decltype(auto)` (or otherwise annotated) lambda cannot
+            // `return` the VOID fallback — `[[noreturn]]` as a statement
+            // ends the body the same way (either's `-> &Self::Target` deref,
+            // whose annotation is `decltype(auto)` and whose fallback has no
+            // spellable type).
+            if runtime_match_return_annotation.is_empty()
+                || fallback == self.match_expr_unreachable_fallback()
+            {
                 out.push_str("rusty::intrinsics::unreachable_panic(); }()");
             } else {
-                out.push_str(&format!(
-                    "return {}; }}()",
-                    self.match_expr_unreachable_fallback_with_expected(Some(expected))
-                ));
+                out.push_str(&format!("return {}; }}()", fallback));
             }
         } else {
             out.push_str("rusty::intrinsics::unreachable_panic(); }()");
