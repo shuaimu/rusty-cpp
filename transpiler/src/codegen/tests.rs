@@ -52404,6 +52404,39 @@ fn test_let_of_a_struct_literal_with_a_reference_member_binds_by_reference() {
 }
 
 #[test]
+fn test_two_impls_of_a_generic_trait_for_one_type_keep_their_own_lane_definitions() {
+    // trait_probes_collapse: `impl ConvT<i32> for Tv` and `impl ConvT<u8> for
+    // Tv` are two lanes of one method on one self type, told apart by the
+    // `rusty::tag<…>` key. The declaration/definition agreement cache keyed
+    // on (self, method, free generics) alone made the second definition
+    // adopt the first's parameter list — "redefinition of 'm'", and the real
+    // `tag<uint8_t>` declaration "inline function not defined".
+    let out = transpile_str_module(
+        r#"
+        pub struct Tv { pub v: i32 }
+        pub trait ConvT<A> { fn m(&self, a: A) -> i32; fn conv(&self) -> A; }
+        impl ConvT<i32> for Tv { fn m(&self, a: i32) -> i32 { self.v + a } fn conv(&self) -> i32 { self.v } }
+        impl ConvT<u8> for Tv { fn m(&self, a: u8) -> i32 { self.v + a as i32 } fn conv(&self) -> u8 { self.v as u8 } }
+        "#,
+        "consumer",
+    );
+    assert_eq!(
+        out.matches("rusty::tag<int32_t>) {").count(),
+        2,
+        "two definitions keyed int32_t: {out}"
+    );
+    assert_eq!(
+        out.matches("rusty::tag<uint8_t>) {").count(),
+        2,
+        "two definitions keyed uint8_t: {out}"
+    );
+    assert!(
+        out.contains("uint8_t conv(ConvT_::impl_::tag, const Tv& self_, rusty::tag<uint8_t>) {"),
+        "the u8 lane's own return type: {out}"
+    );
+}
+
+#[test]
 fn test_module_mode_type_param_assoc_projection_alias_is_the_probe_and_the_method_still_deduces() {
     // serde_core's `impl Deserializer for SeqAccessDeserializer<A> { type Error =
     // A::Error; }` in plain module mode: the alias used to be skipped outright

@@ -25204,7 +25204,12 @@ impl CodeGen {
         // bound-derived constraints.
         let requires_prefix = self.ufcs_free_function_requires_prefix(method_spec, &free_generics);
         self.ufcs_lane_declared_signatures.insert(
-            self.ufcs_lane_signature_key(&self_cpp_ty, &method_name, &free_generics),
+            self.ufcs_lane_signature_key(
+                &self_cpp_ty,
+                &method_name,
+                &free_generics,
+                &method_spec.trait_args,
+            ),
             (return_type.clone(), params.clone()),
         );
         self.emit_template_declaration_with_type_defaults(
@@ -26501,7 +26506,12 @@ impl CodeGen {
         // signature it spelled for this lane (`ufcs_lane_declared_signatures`).
         if let Some((declared_return, declared_params)) = self
             .ufcs_lane_declared_signatures
-            .get(&self.ufcs_lane_signature_key(&self_cpp_ty, &method_name, &free_generics))
+            .get(&self.ufcs_lane_signature_key(
+                &self_cpp_ty,
+                &method_name,
+                &free_generics,
+                &method_spec.trait_args,
+            ))
             .cloned()
             && (declared_return != return_type || declared_params != params)
         {
@@ -27219,20 +27229,32 @@ impl CodeGen {
     /// parameter binds (`extension_receiver_param_cpp_type`).
     /// The identity of a lane function across the declaration and definition
     /// passes (`ufcs_lane_declared_signatures`).
+    /// The TRAIT ARGUMENTS are part of it: `impl ConvT<i32> for Tv` and
+    /// `impl ConvT<u8> for Tv` are two lanes of one method name on one self
+    /// type, told apart by the `rusty::tag<…>` key (trait_probes_collapse —
+    /// without them the second definition adopted the first's parameter
+    /// list: "redefinition of 'm'", the real one "inline function not
+    /// defined").
     fn ufcs_lane_signature_key(
         &self,
         self_cpp_ty: &str,
         method_name: &str,
         free_generics: &syn::Generics,
+        trait_args: &[syn::Type],
     ) -> String {
         format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}",
             self.ufcs_dependency_lane_root.as_deref().unwrap_or(""),
             self.ufcs_tag_namespace.as_deref().unwrap_or(""),
             self.ufcs_impl_module_path.join("::"),
             self_cpp_ty,
             method_name,
-            free_generics.to_token_stream()
+            free_generics.to_token_stream(),
+            trait_args
+                .iter()
+                .map(|t| t.to_token_stream().to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         )
     }
 
