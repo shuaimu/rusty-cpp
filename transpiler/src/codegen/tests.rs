@@ -52437,6 +52437,36 @@ fn test_two_impls_of_a_generic_trait_for_one_type_keep_their_own_lane_definition
 }
 
 #[test]
+fn test_path_mapper_calls_the_payloads_own_method_before_looking_through_it() {
+    // `.map(Type::method)`: alloc's linked_list `pop_front_node().map(Node::
+    // into_element)` — `into_element(self: Box<Self>)` lives on Node, the
+    // payload is a `Box<Node>`, so the box is looked through; serde_bytes's
+    // `.map(ByteBuf::into_vec)` — ByteBuf is Deref-able and must NOT be
+    // looked through. Rust's order: the receiver's own method, then
+    // auto-deref. Gate-found both ways (alloc red with a plain
+    // `deref_if_pointer`, serde_bytes red with a plain `deref_if_pointer_like`).
+    let out = transpile_str_module(
+        r#"
+        pub struct Node<T> { pub element: T }
+        impl<T> Node<T> { pub fn into_element(self: Box<Self>) -> T { self.element } }
+        pub fn pop<T>(o: Option<Box<Node<T>>>) -> Option<T> { o.map(Node::into_element) }
+        pub struct Buf { pub v: Vec<u8> }
+        impl Buf { pub fn into_vec(self) -> Vec<u8> { self.v } }
+        pub fn take(o: Option<Buf>) -> Option<Vec<u8>> { o.map(Buf::into_vec) }
+        "#,
+        "consumer",
+    );
+    for m in ["into_element", "into_vec"] {
+        assert!(
+            out.contains(&format!(
+                "if constexpr (requires {{ std::forward<decltype(_v)>(_v).{m}(); }}) {{ return std::forward<decltype(_v)>(_v).{m}(); }} else {{ return rusty::detail::deref_if_pointer_like(std::forward<decltype(_v)>(_v)).{m}(); }}"
+            )),
+            "the mapper ladder for {m}: {out}"
+        );
+    }
+}
+
+#[test]
 fn test_module_mode_type_param_assoc_projection_alias_is_the_probe_and_the_method_still_deduces() {
     // serde_core's `impl Deserializer for SeqAccessDeserializer<A> { type Error =
     // A::Error; }` in plain module mode: the alias used to be skipped outright

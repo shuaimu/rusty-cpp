@@ -13932,10 +13932,7 @@ impl CodeGen {
                 return Some(lambda);
             }
             let escaped_method = escape_cpp_keyword_in_member_position(&method);
-            return Some(format!(
-                "[](auto&& _v) -> decltype(auto) {{ return rusty::detail::deref_if_pointer(std::forward<decltype(_v)>(_v)).{}(); }}",
-                escaped_method
-            ));
+            return Some(Self::path_mapper_member_call_lambda(&escaped_method));
         }
         if !owner_is_known {
             return None;
@@ -14008,12 +14005,21 @@ impl CodeGen {
                 owner_cpp, escaped_method
             ));
         }
-        // The mapped payload may arrive as a POINTER (iterator Options carry
-        // `Bucket*` payloads) — probe-deref before the member call.
-        Some(format!(
-            "[](auto&& _v) -> decltype(auto) {{ return rusty::detail::deref_if_pointer(std::forward<decltype(_v)>(_v)).{}(); }}",
-            escaped_method
-        ))
+        Some(Self::path_mapper_member_call_lambda(&escaped_method))
+    }
+
+    /// `.map(Type::method)` as a member call on the payload: Rust's method
+    /// resolution takes the receiver's OWN method first (`ByteBuf::into_vec`
+    /// on a `ByteBuf`, a Deref-able value that must not be looked through —
+    /// serde_bytes), then auto-derefs (`Node::into_element(self: Box<Self>)`
+    /// on a `Box<Node>`, alloc's linked_list; an iterator Option's `Bucket*`
+    /// payload). The ladder is that order; `deref_if_pointer_like` looks
+    /// through pointers and smart pointers.
+    fn path_mapper_member_call_lambda(escaped_method: &str) -> String {
+        format!(
+            "[](auto&& _v) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(_v)>(_v).{m}(); }}) {{ return std::forward<decltype(_v)>(_v).{m}(); }} else {{ return rusty::detail::deref_if_pointer_like(std::forward<decltype(_v)>(_v)).{m}(); }} }}",
+            m = escaped_method
+        )
     }
 
     pub(super) fn try_emit_data_enum_variant_map_callable_with_target(
