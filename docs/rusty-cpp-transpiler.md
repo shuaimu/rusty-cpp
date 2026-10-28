@@ -2716,8 +2716,11 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   `const auto&`; the helper hands back an xvalue of its argument, the prvalue dies with the declaration,
   and the slot read a dead stack frame (stack-use-after-scope, 16 bytes of `ref.tmp`; the plain run passed
   by luck, and the alloc port regenerated before the aliasing-slot change still held the value). A CALL
-  operand's view is now HELD (`slice_view_slot_holds_the_value`); a place operand keeps the aliasing
-  reference slot; the two vendored vec_port lines hand-patched to what the emitter now produces. (11) ASan
+  operand's view is now HELD (`slice_view_slot_holds_the_value` — only for the span producers
+  `rusty::from_raw_parts*` / `std::span<…>` or a call whose own Rust type is a slice reference or raw
+  slice pointer: a call yielding a pointer to an OWNER is an lvalue through the helper, and holding it
+  would copy the owner, the aliasing-slot class); a place operand keeps the aliasing reference slot; the
+  two vendored vec_port lines hand-patched to what the emitter now produces. (11) ASan
   again, in the TEST BODY: Rust's rvalue static promotion was missing — `Test { slice: b"...",
   borrowed_array: &[1; 314], .. }` viewed (a `std::span` field) and bound (a `const std::array&` member)
   prvalues that died with the declaration, read back in the comparison after deserialization. Three
@@ -2749,6 +2752,14 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   binding, so `decltype(local)` spellings downstream are unchanged (itertools' PutBackOnDrop pins). After all of it: serde_bytes 4/4 under ASan with
   no memory errors; LeakSanitizer's 18 bytes in 6 allocations are the boxed-slice model's documented leak
   (`Box<[T]>` is `Box<std::span<T>>`, the element buffer does not ride the Box's destructor — box.hpp).
+  (14) Gate-found on landing (smallvec): the probe alias the module-mode route emits resolves to
+  `missing_assoc_type` where the parameter has no `Item` of its own (`SmallVec<std::array<u32, 2>>` —
+  the C++ std::array has `value_type`, never `Item`; Rust's `<[T; N] as Array>::Item` is a trait impl the
+  probe cannot see), and array.hpp's `has_container_item` took it as THE item — every
+  `std::array<associated_item_t<SmallVec<..>>, N>` had an incomplete element. The resolver skips a probe
+  alias that resolved to nothing and keeps its fallbacks (value_type, the first type argument, the
+  `next()` payload). Rule to remember: a probe alias is VISIBLE to every `requires { typename T::X; }`
+  probe; a resolver with fallbacks must treat `missing_assoc_type` as absent.
 
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
