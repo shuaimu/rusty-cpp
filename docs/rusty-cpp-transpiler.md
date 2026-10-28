@@ -2760,6 +2760,39 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   alias that resolved to nothing and keeps its fallbacks (value_type, the first type argument, the
   `next()` payload). Rule to remember: a probe alias is VISIBLE to every `requires { typename T::X; }`
   probe; a resolver with fallbacks must treat `missing_assoc_type` as absent.
+- *2026-10-28 — (ac) the crate-graph hard assoc spelling, (ab)'s first follow-up.* Under --crate-graph a
+  probe alias (`type Target = L::Target;` → `using Target = typename rusty::detail::assoc_Target<L>::type;`)
+  is a spellable return, and the spelling RECORDED for its uses was `map_type(L::Target)`, the hard
+  `typename std::remove_pointer_t<std::remove_cvref_t<L>>::Target`: every `-> &Self::Target` member
+  declaration carried it, a hard error the moment a conditional impl's class is instantiated with a
+  non-conforming parameter (either's `Either<int, int>` under `impl<L: Deref, R: Deref> Deref`; measured
+  standalone with clang 22.1.8: the probe form instantiates, the hard form errors on the class — the
+  incomplete `missing_assoc_type` behind a reference is an error only where it is USED). The recorded
+  spelling under --crate-graph is now the probe itself (`recorded_probe_assoc_alias_cpp_type`, at the
+  struct's two record sites AND in `resolve_assoc_type_from_impl_blocks` — the route a data enum's
+  methods take, since no assoc scope is pushed for them; the fixture enum reproduced the hard spelling
+  after the struct sites alone were fixed). Plain module mode is unchanged: its returns still deduce and
+  its bodies keep the mapped projection they always had — the narrow variant, chosen so no matrix body
+  moves for a crate-graph fix. Exactly the four probed names (`Output`, `Item`, `Error`, `Target`); any
+  other assoc name under --crate-graph is still skipped and its returns deduce. Found by the fixture, a
+  second general bug: the deref body `&**l` lowers to `rusty::deref_ref(rusty::deref_ref(l))`, and the
+  prelude's `deref_ref` returned BY VALUE (`auto`) — under a deduced return that was a silent COPY of the
+  target (a `decltype(auto)` over a prvalue), under the now-explicit `const Target&` a reference to a
+  local temporary (clang's `-Werror=return-stack-address`, the fixture's flags). `deref_ref` is now
+  `decltype(auto)` over a forwarding reference: an lvalue hands its target on BY REFERENCE (`(*value)` /
+  `(value)`), an rvalue — whose target cannot outlive it — still comes out by value; `as_str()` views
+  stay by value. Census: the helper is emitted only for `.deref()` calls and `*x` inside a `deref` body
+  (either, itertools, alloc's `clone(deref_ref(alloc))` and `PeekMut`'s Debug — an lvalue reference binds
+  wherever the value did). The crate-graph fixture gains either's shape (`dep-core/src/conditional.rs` — not a module named
+  `either`: the hardcoded `either`-crate import rewrites (`rewrite_either_import`,
+  `is_supported_external_import_mapping`, the `either::` head in path resolution) shadow a same-named
+  LOCAL module, so its crate-root re-export came out Rust-only — a follow-up of its own):
+  the conditional impl with `Either<u32, u32>` instantiated beside a conforming `Either<Cell, Cell>`
+  deref'd through it, folded into `run()` (rustc on `conditional.rs`: 45 → 10703) — a COMPILE-level guard,
+  where the unit pin (`test_crate_graph_type_param_assoc_projection_return_is_spelled_through_the_probe`)
+  only reads the text. Still open from (ab): the qself `<&Mine as Tr>::f` traits-map gap, the lone
+  `impl Deserialize for &'a X` without a keyed twin, lifetime-arg bounds in
+  `ufcs_crate_trait_bound_constraints`.
 
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —

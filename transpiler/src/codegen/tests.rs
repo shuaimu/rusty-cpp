@@ -52499,6 +52499,47 @@ fn test_module_mode_type_param_assoc_projection_alias_is_the_probe_and_the_metho
 }
 
 #[test]
+fn test_crate_graph_type_param_assoc_projection_return_is_spelled_through_the_probe() {
+    // Under --crate-graph the probe alias is a spellable return, and the
+    // spelling must be the PROBE, never the hard projection: either's
+    // `impl<L: Deref, R: Deref> Deref for Either<L, R> { type Target =
+    // L::Target; fn deref(&self) -> &Self::Target }` instantiated as
+    // `Either<int, int>` (a conditional impl's class with a non-conforming
+    // parameter) is a hard error on the member declaration with
+    // `typename …<int>::Target`, and well-formed with the probe (an
+    // incomplete `missing_assoc_type` is an error only where it is used).
+    let file: syn::File = syn::parse_str(
+        r#"
+        use std::ops::Deref;
+        pub enum Either<L, R> { Left(L), Right(R) }
+        impl<L: Deref, R: Deref<Target = L::Target>> Deref for Either<L, R> {
+            type Target = L::Target;
+            fn deref(&self) -> &Self::Target {
+                match self { Either::Left(l) => &**l, Either::Right(r) => &**r }
+            }
+        }
+        "#,
+    )
+    .unwrap();
+    let mut cg = test_codegen();
+    cg.set_crate_graph_mode(true);
+    cg.emit_file(&file, Some("demo"));
+    let out = cg.into_output();
+    assert!(
+        out.contains("using Target = typename rusty::detail::assoc_Target<L>::type;"),
+        "the alias is the probe member: {out}"
+    );
+    assert!(
+        !out.contains("std::remove_cvref_t<L>>::Target"),
+        "no hard projection anywhere in the class: {out}"
+    );
+    assert!(
+        out.contains("const typename rusty::detail::assoc_Target<L>::type& operator*() const {"),
+        "the explicit return is the probe spelling: {out}"
+    );
+}
+
+#[test]
 fn test_no_receiver_lane_body_calls_a_sibling_trait_static_through_its_lane() {
     // alloc's `impl<T, I> SpecFromIter<T, I> for Vec<T> { default fn from_iter(i: I)
     // -> Self { SpecFromIterNested::from_iter(i) } }`: once a no-receiver fn's

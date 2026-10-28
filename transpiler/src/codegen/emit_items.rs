@@ -2810,12 +2810,19 @@ impl CodeGen {
                 if let syn::ImplItem::Type(t) = impl_item {
                     let alias_rust_name = t.ident.to_string();
                     let alias_name = escape_cpp_keyword(&t.ident.to_string());
-                    let alias_cpp_type = Self::rewrite_private_keyword_namespace_in_type_path(
-                        &self.normalize_assoc_alias_target_type(
-                            &alias_rust_name,
-                            self.map_type(&t.ty),
-                        ),
-                    );
+                    // Under --crate-graph a probe alias's uses spell the
+                    // probe (see `probe_assoc_alias_cpp_type`), not the hard
+                    // projection; plain module mode keeps its bodies as they
+                    // were (the returns there deduce, `soft_probe_assoc_aliases`).
+                    let alias_cpp_type =
+                        self.recorded_probe_assoc_alias_cpp_type(&t.ty).unwrap_or_else(|| {
+                            Self::rewrite_private_keyword_namespace_in_type_path(
+                                &self.normalize_assoc_alias_target_type(
+                                    &alias_rust_name,
+                                    self.map_type(&t.ty),
+                                ),
+                            )
+                        });
                     self.emit_impl_item(impl_item);
                     // Even when constrained mode skips emitting the alias as a C++ member,
                     // keep its mapped type available for subsequent method return/projection
@@ -3740,12 +3747,15 @@ impl CodeGen {
                 if let syn::ImplItem::Type(t) = impl_item {
                     let alias_rust_name = t.ident.to_string();
                     let alias_name = escape_cpp_keyword(&alias_rust_name);
-                    let alias_cpp_type = Self::rewrite_private_keyword_namespace_in_type_path(
-                        &self.normalize_assoc_alias_target_type(
-                            &alias_rust_name,
-                            self.map_type(&t.ty),
-                        ),
-                    );
+                    let alias_cpp_type =
+                        self.recorded_probe_assoc_alias_cpp_type(&t.ty).unwrap_or_else(|| {
+                            Self::rewrite_private_keyword_namespace_in_type_path(
+                                &self.normalize_assoc_alias_target_type(
+                                    &alias_rust_name,
+                                    self.map_type(&t.ty),
+                                ),
+                            )
+                        });
                     if let Some(scope) = self.current_struct_assoc_cpp_types.last_mut() {
                         scope.insert(alias_rust_name, alias_cpp_type.clone());
                         scope.insert(alias_name, alias_cpp_type);
@@ -8466,6 +8476,38 @@ impl CodeGen {
             .then(|| (escape_cpp_keyword(&param), assoc_name))
     }
 
+    /// The C++ spelling of an impl's associated-type alias when it is the
+    /// probe member (`type Target = L::Target;` in a constrained mode):
+    /// `typename rusty::detail::assoc_Target<L>::type`, well-formed for every
+    /// `L` — `missing_assoc_type` where the member does not exist, an error
+    /// only where it is USED. This is also what the alias's uses spell
+    /// (a method's explicit return under --crate-graph), never the hard
+    /// `typename std::remove_pointer_t<std::remove_cvref_t<L>>::Target`:
+    /// that is an error on the member DECLARATION the moment a conditional
+    /// impl's class is instantiated with a non-conforming parameter
+    /// (either's `Either<int, int>` under `impl<L: Deref, R: Deref> Deref`).
+    pub(super) fn probe_assoc_alias_cpp_type(&self, ty: &syn::Type) -> Option<String> {
+        if !self.should_soften_dependent_assoc_mode() {
+            return None;
+        }
+        let (param, assoc) = self.type_param_std_assoc_projection(ty)?;
+        Some(format!(
+            "typename rusty::detail::assoc_{}<{}>::type",
+            assoc, param
+        ))
+    }
+
+    /// The spelling RECORDED for the alias's uses (`current_struct_assoc_cpp_
+    /// types`): the probe under --crate-graph, where the alias is a spellable
+    /// return; `None` in plain module mode, whose returns deduce and whose
+    /// bodies keep the mapped projection they always had.
+    pub(super) fn recorded_probe_assoc_alias_cpp_type(&self, ty: &syn::Type) -> Option<String> {
+        if !self.crate_graph_mode {
+            return None;
+        }
+        self.probe_assoc_alias_cpp_type(ty)
+    }
+
     /// A module whose only item is a public glob re-export
     /// (`pub mod log { pub use dep::events::*; }`), which emit_mod lowers to a
     /// namespace alias in a namespace-wrapped crate.
@@ -10836,15 +10878,10 @@ impl CodeGen {
                 // A::Error; }` was skipped outright, so `typename …::Error` of
                 // that deserializer did not exist and a consumer's seed could
                 // not take it (serde_bytes's derive wrapper, measured).
-                if self.should_soften_dependent_assoc_mode()
-                    && let Some((param, assoc)) = self.type_param_std_assoc_projection(&t.ty)
-                {
+                if let Some(probe) = self.probe_assoc_alias_cpp_type(&t.ty) {
                     let name = escape_cpp_keyword(&t.ident.to_string());
                     if self.mark_emitted_non_method_member_name(&name) {
-                        self.writeln(&format!(
-                            "using {} = typename rusty::detail::assoc_{}<{}>::type;",
-                            name, assoc, param
-                        ));
+                        self.writeln(&format!("using {} = {};", name, probe));
                         // Plain module mode keeps the methods DEDUCING as before
                         // the alias existed (`type_current_struct_assoc_aliases_
                         // emitted`): the member alias is the probe, but the

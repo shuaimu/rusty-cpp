@@ -15965,7 +15965,17 @@ impl CodeGen {
                 if let syn::ImplItem::Type(assoc_type) = item
                     && assoc_type.ident == assoc_name
                 {
-                    return Some(self.map_type(&assoc_type.ty));
+                    // A probe alias (`type Target = L::Target;` under
+                    // --crate-graph) is spelled as the probe wherever it is
+                    // used — this is the route a data enum's methods take
+                    // (no assoc scope is pushed for them), and the hard
+                    // `typename …<L>::Target` on a member declaration is an
+                    // error for `Either<int, int>` (either's conditional
+                    // `impl Deref`, measured).
+                    return Some(
+                        self.recorded_probe_assoc_alias_cpp_type(&assoc_type.ty)
+                            .unwrap_or_else(|| self.map_type(&assoc_type.ty)),
+                    );
                 }
             }
             None

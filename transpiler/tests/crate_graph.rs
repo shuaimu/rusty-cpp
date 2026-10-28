@@ -23,7 +23,10 @@
 //! `Duration` in the root beside `dep_core::time::Duration` (rustc on
 //! `time.rs` and the root's `micros`: 1507), and 3068 from
 //! `dep_core::park_total`, lion-executor's Runtime and Executor shapes over
-//! dep-base (rustc on `park.rs` with `dep-base`: 3068).
+//! dep-base (rustc on `park.rs` with `dep-base`: 3068), 2117 from the root's
+//! `fd_total`, and 45 from `dep_core::either_total`, either's conditional
+//! `impl Deref` with the enum instantiated for a non-conforming parameter
+//! (`conditional.rs`: 45).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -309,7 +312,7 @@ fn crate_graph_emits_one_module_per_needed_crate_and_runs() {
     assert_success(&linked, "compiling and linking the importer");
     let ran = Command::new(&binary).output().unwrap();
     assert_success(&ran, "running the graph");
-    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "10658\n");
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "10703\n");
 }
 
 #[test]

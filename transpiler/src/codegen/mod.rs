@@ -64975,13 +64975,24 @@ bool is_empty(const T& value) {\n\
 }\n\
 #endif\n\
 template<typename T>\n\
-auto deref_ref(const T& value) {\n\
+decltype(auto) deref_ref(T&& value) {\n\
+    // Rust's `&*x` is a REFERENCE to the target: an lvalue hands its target\n\
+    // on by reference (an explicit `-> &Target` return must not dangle); an\n\
+    // rvalue's target cannot outlive it, so that one comes out by value.\n\
     if constexpr (requires { value.as_str(); }) {\n\
         return value.as_str();\n\
+    } else if constexpr (std::is_lvalue_reference_v<T>) {\n\
+        if constexpr (requires { *value; }) {\n\
+            return (*value);\n\
+        } else {\n\
+            return (value);\n\
+        }\n\
     } else if constexpr (requires { *value; }) {\n\
-        return *value;\n\
+        auto owned = *value;\n\
+        return owned;\n\
     } else {\n\
-        return value;\n\
+        auto owned = std::forward<T>(value);\n\
+        return owned;\n\
     }\n\
 }\n\
 template<typename T>\n\

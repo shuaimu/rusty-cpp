@@ -61,6 +61,7 @@ pub fn run() -> u32 {
         + dep_core::tick_total() as u32
         + dep_core::park_total() as u32
         + fd_total()
+        + dep_core::either_total()
 }
 
 /// std's `Duration`, beside `dep_core::time::Duration`.
