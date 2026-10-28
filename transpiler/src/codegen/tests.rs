@@ -52605,9 +52605,10 @@ int main() {
     let prebuilt = format!("-fprebuilt-module-path={}", temp.path().display());
     // `-Werror=return-stack-address`: the annotated IIFE must never bind a
     // temporary to its reference return (the shape the fixture's crate-graph
-    // twin caught before `deref_ref` handed lvalues on by reference).
+    // twin caught before `deref_ref` handed lvalues on by reference). NO `-w`
+    // beside it: `-w` silences every promoted diagnostic too (measured with
+    // clang 22 on `const int& f() { int x = 1; return x; }`).
     let flags = [
-        "-w",
         "-Werror=return-stack-address",
         "-std=c++23",
         "-DRUSTY_PORTABLE_INTRINSICS=1",

@@ -2824,7 +2824,9 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   (`test_module_mode_reference_return_over_a_match_annotates_the_iife_with_the_reference`) and a
   module-mode clang RUNTIME proof (`…_hands_out_the_referent_itself_clang_runtime`: the module is
   precompiled with the headers, an importer checks `&*e` IS the member, compiled with
-  `-Werror=return-stack-address`); the either row replayed under ASan. Widening to note: the same helper
+  `-Werror=return-stack-address` — and WITHOUT `-w`, which silences a promoted diagnostic too (the proof
+  first landed with both, the compile-time half dead; measured, corrected the same day); the either row
+  replayed under ASan. Widening to note: the same helper
   annotates block IIFEs and closures, so a module-mode `|..| -> &Self::Item` or a block-valued
   `&Self::Target` gets `decltype(auto)` too (the correct semantics).
 
