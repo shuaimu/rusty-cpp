@@ -52270,6 +52270,21 @@ fn test_slice_view_of_a_raw_parts_call_is_held_not_referenced() {
         !out.contains("auto&& _slice_ref_tmp = rusty::detail::deref_if_pointer_like(rusty::from_raw_parts_mut("),
         "the mutable call view is held too: {out}"
     );
+    // A call yielding a POINTER TO AN OWNER is an lvalue through the helper:
+    // holding it would copy the owner (a span over the copy, mutations
+    // lost). The aliasing reference slot stays.
+    let out = transpile_str_module(
+        r#"
+        pub struct H { pub data: [u8; 4] }
+        pub fn arr_ptr(h: &mut H) -> *mut [u8; 4] { &mut h.data }
+        pub fn via_ptr_fn(h: &mut H) -> &mut [u8] { unsafe { &mut *arr_ptr(h) } }
+        "#,
+        "consumer",
+    );
+    assert!(
+        !out.contains("auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(arr_ptr("),
+        "an owner behind a pointer-yielding call is never held by value: {out}"
+    );
 }
 
 #[test]

@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <iterator>
 #include <type_traits>
+
+namespace rusty { namespace detail { struct missing_assoc_type; } }  // traits.hpp
 #include <utility>
 #include <optional>
 #include <cstring>
@@ -383,8 +385,18 @@ using container_item_t = typename std::remove_reference_t<Container>::Item;
 template<typename Container, typename = void>
 struct has_container_item : std::false_type {};
 
+// A probe alias (`using Item = typename rusty::detail::assoc_Item<A>::type;`,
+// traits.hpp — the transpiler's dependent-projection member in module mode)
+// resolves to `missing_assoc_type` where the parameter has no `Item` of its
+// own (`SmallVec<std::array<u32, 2>>`: the C++ std::array has `value_type`,
+// never `Item`). Such an alias is NOT an item: the resolver keeps its own
+// fallbacks (value_type, the first type argument, the `next()` payload)
+// instead of handing an incomplete type to every `std::array<Item, N>`.
 template<typename Container>
-struct has_container_item<Container, std::void_t<container_item_t<Container>>> : std::true_type {};
+struct has_container_item<Container, std::void_t<container_item_t<Container>>>
+    : std::bool_constant<!std::is_same_v<
+          std::remove_cv_t<std::remove_reference_t<container_item_t<Container>>>,
+          rusty::detail::missing_assoc_type>> {};
 
 template<typename Container>
 using container_value_type_t = typename std::remove_reference_t<Container>::value_type;

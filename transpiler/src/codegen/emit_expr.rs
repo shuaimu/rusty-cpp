@@ -17768,8 +17768,27 @@ impl CodeGen {
     /// operand keeps the aliasing reference slot (the `&mut xs` rule above);
     /// a method call stays as it was (its result may be a reference).
     fn slice_view_slot_holds_the_value(&self, operand: &syn::Expr, inner: &str) -> bool {
-        if !inner.starts_with("rusty::detail::deref_if_pointer_like(") {
+        const HELPER: &str = "rusty::detail::deref_if_pointer_like(";
+        if !inner.starts_with(HELPER) {
             return false;
+        }
+        // Only a VIEW prvalue is held: a call yielding a pointer to an OWNER
+        // (`&mut *arr_ptr(h)`, the pointee an array/Vec) is an lvalue through
+        // the helper, and holding it would COPY the owner — a span over the
+        // copy, every mutation lost (the aliasing-slot class). The emitted
+        // operand's head names the span producers; otherwise the call's own
+        // Rust type must be a slice reference or a raw slice pointer.
+        let arg = &inner[HELPER.len()..];
+        if [
+            "rusty::from_raw_parts(",
+            "rusty::from_raw_parts_mut(",
+            "rusty::slice_from_raw_parts",
+            "std::span<",
+        ]
+        .iter()
+        .any(|head| arg.starts_with(head))
+        {
+            return true;
         }
         let mut root = self.peel_paren_group_expr(operand);
         while let syn::Expr::Unary(un) = root
@@ -17777,7 +17796,17 @@ impl CodeGen {
         {
             root = self.peel_paren_group_expr(&un.expr);
         }
-        matches!(root, syn::Expr::Call(_) | syn::Expr::Macro(_))
+        if !matches!(root, syn::Expr::Call(_) | syn::Expr::Macro(_)) {
+            return false;
+        }
+        self.infer_simple_expr_type(root).is_some_and(|ty| {
+            let elem = match self.peel_paren_group_type(&ty) {
+                syn::Type::Reference(r) => r.elem.as_ref(),
+                syn::Type::Ptr(p) => p.elem.as_ref(),
+                _ => return false,
+            };
+            matches!(self.peel_paren_group_type(elem), syn::Type::Slice(_))
+        })
     }
 
     /// An array literal / repeat whose every element is a literal (nested
