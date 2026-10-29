@@ -2867,7 +2867,8 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   FOUND, NOT FOLDED IN (different mechanism): a local tuple struct named `Left` is spelled as the fmt
   `Alignment::Left(..)` variant at its construction site, with ANY module name
   (`use foo::Left; Left(1).0` → `Alignment::Left(static_cast<uint32_t>(1))._0`) — the `Left`/`Right`
-  single-segment special case resolves to the prelude's enum before the local declaration.
+  single-segment special case resolves to the prelude's enum before the local declaration — closed by
+  (af) below, which also corrects this attribution (that block is not the cause).
   RESIDUALS, both narrow to a crate that has BOTH a root `mod either` AND the either dependency (no
   matrix input): (1) the predicate is FILE-scoped, not lexically scoped — a root `mod either` makes a
   bare `either::X` inside a nested inline module take the local branch where Rust 2018 would reach the
@@ -2939,9 +2940,24 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   `if (/* TODO transpiler: unresolved bare-glob variant `Foo` … */ true)` for ANY tuple struct
   (irrefutable, so the single-arm form behaves; a multi-arm match over tuple-struct patterns would
   not); `let Foo(v) = l;` is fine.
-  RESIDUAL: `item_const_types` keeps a bare key for every module's consts, so at the crate ROOT a
-  nested module's `const Left` counts as root-owned (a root `use Alignment::*;` + bare `Left` beside
-  a nested `const Left` is the only victim; contrived).
+  CRATE MODE (second cut, bd3928c4 → the follow-up commit): under `--crate` (one TU per file
+  module) the ROOT's `use either::Left; Left(2).0` was still `Alignment::Left(2)._0` while
+  `--crate-graph` was clean — the import-branch's relative-owner fallback (`crate_enum_has_variant_named`)
+  consulted the crate-graph fixture's own `either.rs` `enum Either { Left(L), Right(R) }`, a sibling
+  module's enum. Rule now: an import whose owner segment is a module the crate declares
+  (`path_root_is_local_module`) is that module's item outright; the enum-variant fallback applies
+  only to a relative owner (`crate` / `self` / `super`, or none — the either crate's own
+  `use super::{Left, Right};`). Pin: `tests/crate_value_item_named_like_std_variant.rs` (a `--crate`
+  crate whose `either.rs` declares both the enum and `struct Left`, every emitted file byte-equal to
+  the `LeftX` oracle). Measured clean afterwards on the scratch fixture copy under both `--crate` and
+  `--crate-graph`.
+  RESIDUALS: (1) `item_const_types` keeps a bare key for every module's consts, so at the crate ROOT
+  a nested module's `const Left` counts as root-owned (a root `use Alignment::*;` + bare `Left`
+  beside a nested `const Left` is the only victim; contrived). (2) `--crate` mode, a sibling FILE
+  module's `use crate::Right;` of a ROOT tuple struct `Right` while some module declares an enum with
+  a `Right` variant: the sibling TU cannot see the root's declarations (the crate manifests carry
+  traits and modules, no types), the owner is relative, so the fallback wins and it is spelled
+  `Alignment::Right(3)._0` (measured on the scratch fixture copy; needs all three conditions).
 
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —

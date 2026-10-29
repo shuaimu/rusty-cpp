@@ -652,9 +652,21 @@ impl CodeGen {
             if root_is_external {
                 return false;
             }
-            let owner_owns_variant = segments.len() >= 2
-                && self.enum_name_owns_variant(segments[segments.len() - 2], last);
-            return !owner_owns_variant && !self.crate_enum_has_variant_named(last);
+            let owner = (segments.len() >= 2).then(|| segments[segments.len() - 2]);
+            if owner.is_some_and(|owner| self.enum_name_owns_variant(owner, last)) {
+                return false;
+            }
+            // A module the crate declares owns the item outright. Only a
+            // relative owner (`super` / `self` / `crate`, or none) leaves the
+            // owner open; then a crate enum's variant of that name is that
+            // variant (the either crate's own `use super::{Left, Right};`).
+            // That fallback must never reach a declared module's item: a
+            // sibling module may declare its own `enum Either { Left, Right }`
+            // (the crate-graph fixture's `either.rs` does) beside the struct.
+            let owner_is_local_module = owner.is_some_and(|owner| {
+                !matches!(owner, "crate" | "self" | "super") && self.path_root_is_local_module(owner)
+            });
+            return owner_is_local_module || !self.crate_enum_has_variant_named(last);
         }
         false
     }
