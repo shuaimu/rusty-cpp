@@ -16355,6 +16355,7 @@ impl CodeGen {
         // — the call-arg sibling of the match-level recovery in
         // emit_runtime_match_expr.
         if matches!(variant_name.as_str(), "Left" | "Right")
+            && self.variant_ctor_name_from_path(path).is_some()
             && call.args.len() == 1
             && (path.segments.len() == 1
                 || path

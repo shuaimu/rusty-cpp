@@ -1021,6 +1021,9 @@ impl CodeGen {
                 reject!("body-func")
             };
             let ctor_variant = func_path.path.segments.last()?.ident.to_string();
+            if self.variant_ctor_name_from_path(&func_path.path).is_none() {
+                reject!("body-variant-owned")
+            }
             let slot = match ctor_variant.as_str() {
                 "Left" => 0usize,
                 "Right" => 1usize,

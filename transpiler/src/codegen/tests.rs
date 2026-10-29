@@ -53406,3 +53406,111 @@ fn test_a_local_file_module_named_either_is_not_the_either_crate_in_crate_mode()
         .replace("foo", "either")
     );
 }
+
+/// A crate-declared VALUE item named like a well-known std enum variant —
+/// `Left`/`Right`/`Center` (`fmt::Alignment`), `Less`/`Equal`/`Greater`
+/// (`cmp::Ordering`) — is that item wherever it is referenced: a tuple
+/// struct, a unit struct, a const, a static, a free function, a nested
+/// module's own struct, and an imported struct. The bare-variant routes
+/// spelled every one of them as the std variant (`Alignment::Left(1)._0`,
+/// `Ordering::Less(3)._0`, `Alignment::Left.v()`). The oracle is the same
+/// crate with neutral names (`LeftX`, …), compared byte for byte.
+#[test]
+fn test_a_local_value_item_named_like_a_std_enum_variant_is_that_item() {
+    const SRC: &str = r#"
+        pub struct Left(pub u32);
+        pub struct Right;
+        impl Right { pub fn v(&self) -> u32 { 7 } }
+        pub const Center: u32 = 9;
+        pub static Less: u32 = 3;
+        pub fn Greater(x: u32) -> u32 { x + 1 }
+        pub mod m {
+            pub struct Equal(pub u32);
+            pub fn g() -> u32 { Equal(2).0 }
+        }
+        pub mod user {
+            use crate::Left;
+            pub fn h() -> u32 { Left(4).0 }
+        }
+        pub fn run() -> u32 {
+            Left(1).0 + Right.v() + Center + Less + Greater(1) + m::g() + user::h()
+        }
+    "#;
+    let names = ["Left", "Right", "Center", "Less", "Equal", "Greater"];
+    let mut neutral = SRC.to_string();
+    for name in names {
+        neutral = neutral.replace(name, &format!("{name}X"));
+    }
+    let out = transpile_str(SRC);
+    for bad in [
+        "Alignment::Left",
+        "Alignment::Right",
+        "Alignment::Center",
+        "Ordering::Less(",
+        "Ordering::Equal(",
+        "Ordering::Greater(",
+    ] {
+        assert!(
+            !out.contains(&format!("{bad}(static_cast")) && !out.contains(&format!("{bad}.v(")),
+            "{bad} spelled for a crate item: {out}"
+        );
+    }
+    assert!(out.contains("(Left(static_cast<uint32_t>(1)))"), "{out}");
+    assert!(out.contains("Right{}.v()"), "{out}");
+    assert!(out.contains("(Equal(static_cast<uint32_t>(2)))"), "{out}");
+    assert!(!out.contains("Either"), "a local `Left(1)` typed as either's: {out}");
+    let mut oracle = transpile_str(&neutral);
+    for name in names {
+        oracle = oracle.replace(&format!("{name}X"), name);
+    }
+    assert_eq!(out, oracle);
+
+    let module = transpile_str_module(SRC, "probe");
+    let mut oracle = transpile_str_module(&neutral, "probe");
+    for name in names {
+        oracle = oracle.replace(&format!("{name}X"), name);
+    }
+    assert_eq!(module, oracle);
+}
+
+/// The variant routes still own a bare name the crate does NOT declare:
+/// a glob of the std enum with no return-type hint, an explicit import of
+/// the std variant, and a crate data enum's own glob-imported variant.
+#[test]
+fn test_a_bare_std_enum_variant_stays_the_variant_when_the_crate_declares_nothing() {
+    let out = transpile_str(
+        r#"
+        use std::cmp::Ordering::*;
+        pub fn f(o: std::cmp::Ordering) -> bool { o == Less }
+        "#,
+    );
+    assert!(out.contains("deref_if_pointer_like(Ordering::Less)"), "{out}");
+
+    let out = transpile_str(
+        r#"
+        use std::fmt::Alignment::*;
+        pub fn g(a: std::fmt::Alignment) -> bool { a == Left }
+        "#,
+    );
+    assert!(out.contains("deref_if_pointer_like(Alignment::Left)"), "{out}");
+
+    let out = transpile_str(
+        r#"
+        use std::cmp::Ordering::{Less, Greater};
+        use std::cmp::Ordering;
+        pub fn f(a: u32, b: u32) -> Ordering { if a < b { Less } else { Greater } }
+        "#,
+    );
+    assert!(out.contains("return Ordering::Less;"), "{out}");
+    assert!(out.contains("return Ordering::Greater;"), "{out}");
+
+    let out = transpile_str(
+        r#"
+        pub enum Side { Left(i32), Right(i32) }
+        use Side::*;
+        pub fn f(c: bool) -> Side { if c { Left(1) } else { Right(2) } }
+        "#,
+    );
+    assert!(out.contains("Side{Side_Left{static_cast<int32_t>(1)}}"), "{out}");
+    assert!(!out.contains("Alignment::"), "{out}");
+}

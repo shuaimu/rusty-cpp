@@ -3632,10 +3632,15 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             {
                 return name;
             }
+            // The variant routes below model `use Enum::*;` globs; a name
+            // the crate owns here (a tuple/unit struct ctor, a fn, a const,
+            // an explicit non-variant import) is that item, never a variant
+            // (`bare_value_name_is_crate_owned_here`).
             if name
                 .chars()
                 .next()
                 .is_some_and(|ch| ch.is_ascii_uppercase())
+                && !self.bare_value_name_is_crate_owned_here(&name)
             {
                 if let Some(owner_cpp) =
                     self.resolve_c_like_enum_owner_for_variant_from_return_hint(&name)
@@ -4316,6 +4321,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 "Left" | "Right"
             )
             && !emitted.contains("::")
+            && !self.bare_name_is_crate_value_item_here(&path.segments[0].ident.to_string())
         {
             let variant_name = path.segments[0].ident.to_string();
             let scope_key = self.module_stack.join("::");

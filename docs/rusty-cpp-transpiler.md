@@ -2876,6 +2876,73 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   drops the `::` before classification, so beside a local `mod either` it is emitted `using either::Either;`
   (measured on the probe; the expression-path arm does see `path.leading_colon`).
 
+*2026-10-29 — (af) a local value item named like a std enum variant — `Left`/`Right`/`Center`
+(`fmt::Alignment`), `Less`/`Equal`/`Greater` (`cmp::Ordering`) — was spelled as the std variant; the
+(ae) FOUND item, closed.*
+  SYMPTOMS (single-file, module, and crate mode alike — the mechanism is scope-blind): a local
+  `struct Left(u32)` constructed as `Alignment::Left(static_cast<uint32_t>(1))._0`; `struct Right;`
+  called as `Alignment::Right.v()`; `const Center` / `static Less` read as `Alignment::Center` /
+  `Ordering::Less`; `fn Greater(1)` → `Ordering::Greater(1)`; `struct Less(u32)` →
+  `Ordering::Less(3)._0`; a nested module's own `struct Equal`, an imported `use foo::Left;`, a root
+  `enum Dir { Left, Right }` beside `struct Left(u32)` → `Dir::Left(1)`; and `Left(1)` was TYPED as
+  `Either<u32, u32>` (so `Left(1).0` took the typed `._0` route instead of the tuple-struct view
+  lambda `Foo(1).0` takes). Also: a crate data enum's glob-imported variant in VALUE position
+  (`use Side::*; x.map(Left)`) was `Alignment::Left` while `x.map(Both)` was bare.
+  MECHANISM — not the `Left`/`Right` single-segment re-resolution block the (ae) note blamed (it
+  only runs when `emitted` has no `::`, by which time it is already `Alignment::Left`): the
+  uppercase single-segment arm of `emit_expr_path_to_string_inner` (paths.rs ~3645) runs four
+  bare-VARIANT routes — return-hint C-like owner, `unique_c_like_enum_owner_for_variant_name`,
+  `glob_imported_enum_tails`, and a well-known std fallback (`Less|Equal|Greater → Ordering`,
+  `Left|Right|Center → Alignment`) — with no check that the crate owns the name. The routes model
+  `use Enum::*;` globs; in Rust a glob never shadows a declared item or an explicit import, and a
+  local item plus an explicit import of the same name is a rustc error, so no legitimate input needs
+  a variant route for a name the crate owns in that scope. Separately the either-shaped routes
+  (`variant_ctor_name_from_path`, `extract_constructor_call_expr`, and the inline `"Left" | "Right"`
+  matches they feed in emit_expr / inference / emit_stmt) assumed any `Left(x)` / `Right(x)` is
+  either's.
+  FIX (inference.rs, beside `path_root_is_local_module`): `bare_name_is_crate_value_item_here(name)`
+  — a tuple/unit struct ctor declared in the EXACT lexical module (`module_path_declares_type_name_exact`,
+  or block-local via `is_local_type_name_in_scope`), a free fn (`is_known_free_function_path` on the
+  scoped key / `current_scope_declares_function_name`), a const/static (`item_const_types`, scoped
+  key when nested), or an exact-scope `use` binding whose target is not rooted outside the crate
+  (`rusty` / `either` / `winnow` unless `path_root_is_local_module`, `std` / `core` / `alloc`,
+  `name_resolver.external_crate_target`) and names neither its owner's variant
+  (`enum_name_owns_variant`) nor any crate enum's (`crate_enum_has_variant_named`).
+  `bare_value_name_is_crate_owned_here(name)` = that, OR a crate DATA enum's variant reached by an
+  explicit import or a glob (`data_enum_name_matches` + `enum_name_owns_variant`) — its bare ctor
+  function already exists, like every variant name outside the std set. Gates: the uppercase
+  variant-route block (owned) and the `Left`/`Right` re-resolution block (value item) in paths.rs;
+  `variant_ctor_name_from_path`'s single-segment arm, `extract_constructor_call_expr`,
+  `try_emit_data_enum_variant_call_with_expected`, the `VariantTypeContext` either inference, and
+  the Result-arm either-slot shape in emit_stmt stand down for a value item. Unchanged:
+  `is_external`, the either/winnow import rewrites, `in_either_crate`,
+  `should_emit_data_enum_variant_ctor_helper`.
+  GUARDS: `test_a_local_value_item_named_like_a_std_enum_variant_is_that_item` — one crate with all
+  six names across the shapes above, byte-equal to the neutral-name oracle (`LeftX`, …) in
+  single-file and module mode (the prelude's own `Alignment::Left` / `Ordering::Less` text is in
+  both outputs, so the replace runs oracle → subject only);
+  `test_a_bare_std_enum_variant_stays_the_variant_when_the_crate_declares_nothing` — the no-hint std
+  globs (`o == Less`, `a == Left`), the explicit `use std::cmp::Ordering::{Less, Greater}`, and a
+  crate data enum's glob call form keep their spellings. Replay (`st_work/replay_left.sh`): probe
+  outputs identical to their oracles, the negatives unchanged vs the pre-fix binary, clang 22
+  `-fsyntax-only` OK on every fixed output, the either/itertools matrix inputs byte-identical old vs
+  new (the one itertools delta is a pre-existing `is_send` conjunct-order nondeterminism — the
+  pre-fix binary differs from itself run to run).
+  CONSUMER SIDE (measured, unchanged by design — an externally rooted import binding is not a
+  crate item): `use either::{Left, Right}` call form `rusty::either::Left<uint32_t, uint32_t>(std::move(x))`
+  byte-identical; its VALUE form `x.map(Left)` is still `Alignment::Left` (wrong before and after —
+  the either crate itself gets a ctor lambda from its in-crate method-arg lowering, a consumer gets
+  nothing: OPEN); `use itertools::EitherOrBoth::{Left, Right, Both}` in single-file mode still
+  `Alignment::Right(2)` (crate mode spells it bare; the matrix row is unaffected).
+  FOUND, NOT FOLDED: (1) that consumer value form of either's `Left` / `Right`; (2) a tuple-struct
+  PATTERN in a match arm — `match l { Foo(v) => v }` — emits
+  `if (/* TODO transpiler: unresolved bare-glob variant `Foo` … */ true)` for ANY tuple struct
+  (irrefutable, so the single-arm form behaves; a multi-arm match over tuple-struct patterns would
+  not); `let Foo(v) = l;` is fine.
+  RESIDUAL: `item_const_types` keeps a bare key for every module's consts, so at the crate ROOT a
+  nested module's `const Left` counts as root-owned (a root `use Alignment::*;` + bare `Left` beside
+  a nested `const Left` is the only victim; contrived).
+
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
   needs a pointer or reference-wrapper element spelling; phase 0, the `dyn` coercion family) and the

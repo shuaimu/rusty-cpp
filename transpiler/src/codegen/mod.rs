@@ -50599,7 +50599,8 @@ impl CodeGen {
             return None;
         }
         if path.segments.len() == 1 {
-            return Some(last);
+            // A crate's own `struct Left(..)` / `fn Left` is not either's.
+            return (!self.bare_name_is_crate_value_item_here(&last)).then_some(last);
         }
         let first = path.segments.first()?.ident.to_string();
         if matches!(first.as_str(), "crate" | "self" | "super") {

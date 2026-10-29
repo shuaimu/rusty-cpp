@@ -2379,6 +2379,12 @@ impl CodeGen {
         if !matches!(ctor_name.as_str(), "Left" | "Right" | "Ok" | "Err") {
             return None;
         }
+        if func_path.segments.len() == 1
+            && matches!(ctor_name.as_str(), "Left" | "Right")
+            && self.bare_name_is_crate_value_item_here(&ctor_name)
+        {
+            return None;
+        }
         Some((ctor_name, &call.args[0]))
     }
 

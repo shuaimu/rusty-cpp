@@ -558,6 +558,125 @@ impl CodeGen {
             .then_some(candidate)
     }
 
+    /// A bare uppercase single-segment EXPRESSION path that this crate owns
+    /// where it stands: a tuple-struct or unit-struct constructor, a free
+    /// function, a const or static declared in the exact lexical module (or
+    /// block-locally), or an explicit `use` in that scope binding the name
+    /// to something that is not an enum variant. The bare-variant routes of
+    /// `emit_expr_path_to_string_inner` (return-hint owner, unique C-like
+    /// owner, glob-imported tails, and the well-known std set spelling
+    /// `Alignment::Left` / `Ordering::Less`) model `use Enum::*;` globs, and
+    /// in Rust a glob never shadows a declared item or an explicit import —
+    /// so a local `struct Left(u32)` was constructed as
+    /// `Alignment::Left(..)`, a local `struct Less(u32)` as
+    /// `Ordering::Less(..)`, with any module name.
+    pub(super) fn bare_value_name_is_crate_owned_here(&self, name: &str) -> bool {
+        if self.bare_name_is_crate_value_item_here(name) {
+            return true;
+        }
+        // A crate DATA enum's variant, reached by an explicit import or a
+        // glob, is its constructor function — bare, like every variant
+        // name outside the well-known std set (`x.map(Both)` was bare
+        // while `x.map(Left)` became `Alignment::Left`). C-like and std
+        // variants keep the variant routes.
+        let scope_key = self.module_stack.join("::");
+        if let Some(target) =
+            self.resolve_scope_import_binding_target_for_exact_scope(&scope_key, name)
+        {
+            let segments: Vec<&str> = target.split("::").filter(|seg| !seg.is_empty()).collect();
+            return segments.len() >= 2
+                && self.data_enum_name_matches(segments[segments.len() - 2])
+                && self.enum_name_owns_variant(segments[segments.len() - 2], name);
+        }
+        self.glob_imported_enum_tails
+            .iter()
+            .any(|owner| self.data_enum_name_matches(owner) && self.enum_name_owns_variant(owner, name))
+    }
+
+    /// `name` is a VALUE ITEM of this crate where it stands — a tuple-struct
+    /// or unit-struct constructor, a free function, a const or static in the
+    /// exact lexical module (or block-local), or an explicit `use` in that
+    /// scope binding it to such an item — and so never a prelude/either
+    /// variant: the either-shaped routes (`variant_ctor_name_from_path`,
+    /// `extract_constructor_call_expr`) stand down for it too, where a local
+    /// `struct Left(u32)` had `Left(1)` typed as `Either<u32, u32>`.
+    pub(super) fn bare_name_is_crate_value_item_here(&self, name: &str) -> bool {
+        if name.is_empty() || name == "Self" {
+            return false;
+        }
+        let scope_key = self.module_stack.join("::");
+        let scoped = (!self.module_stack.is_empty()).then(|| format!("{scope_key}::{name}"));
+        let declared_here = |bare: &dyn Fn(&str) -> bool| match scoped.as_deref() {
+            Some(scoped) => bare(scoped),
+            None => bare(name),
+        };
+        let is_ctor_struct = self.tuple_struct_arities.contains_key(name)
+            || self.unit_struct_types.contains(name)
+            || scoped.as_deref().is_some_and(|scoped| {
+                self.tuple_struct_arities.contains_key(scoped)
+                    || self.unit_struct_types.contains(scoped)
+            });
+        if is_ctor_struct
+            && (self.module_path_declares_type_name_exact(&self.module_stack, name)
+                || self.is_local_type_name_in_scope(name))
+        {
+            return true;
+        }
+        if declared_here(&|key| self.is_known_free_function_path(key))
+            || self.current_scope_declares_function_name(name)
+            || declared_here(&|key| self.item_const_types.contains_key(key))
+        {
+            return true;
+        }
+        // `use foo::Left;` binds the name to an item; a consumer's
+        // `use either::Left;` (the either crate's re-exported variant — a
+        // local `mod either` is `path_root_is_local_module`'s call),
+        // `use std::cmp::Ordering::Less;`, and a crate enum's own
+        // `use Either::{Left, Right};` / `use super::{Left, Right};` bind a
+        // variant.
+        if let Some(target) =
+            self.resolve_scope_import_binding_target_for_exact_scope(&scope_key, name)
+        {
+            let segments: Vec<&str> = target.split("::").filter(|seg| !seg.is_empty()).collect();
+            let Some(last) = segments.last().copied() else {
+                return false;
+            };
+            // A target rooted outside the crate — the runtime (`rusty::…`,
+            // where a consumer's `use either::Left;` is recorded), std, or
+            // an external crate root — binds nothing the crate owns.
+            let root = segments[0];
+            let root_is_external = (matches!(root, "rusty" | "either" | "winnow")
+                && !self.path_root_is_local_module(root))
+                || matches!(root, "std" | "core" | "alloc")
+                || self.name_resolver.external_crate_target(root).is_some();
+            if root_is_external {
+                return false;
+            }
+            let owner_owns_variant = segments.len() >= 2
+                && self.enum_name_owns_variant(segments[segments.len() - 2], last);
+            return !owner_owns_variant && !self.crate_enum_has_variant_named(last);
+        }
+        false
+    }
+
+    /// Some enum this crate declares (data or C-like) has a variant named
+    /// `variant` (or its constructor alias).
+    fn crate_enum_has_variant_named(&self, variant: &str) -> bool {
+        let canonical = self.canonical_variant_name(variant).to_string();
+        if self
+            .data_enum_variants_by_enum
+            .values()
+            .any(|variants| variants.contains(variant) || variants.contains(&canonical))
+        {
+            return true;
+        }
+        let suffixes = [format!("_{variant}"), format!("_{canonical}")];
+        self.c_like_enum_variants.iter().any(|key| {
+            let tail = key.rsplit("::").next().unwrap_or(key);
+            suffixes.iter().any(|suffix| tail.ends_with(suffix.as_str()))
+        })
+    }
+
     /// `root`, the first segment of a use or expression path, names a
     /// MODULE of the crate being transpiled: an inline module of this file
     /// (top-level, or in the current lexical module), a file module of a
@@ -4184,7 +4303,9 @@ impl CodeGen {
                             let ty = self.lookup_local_binding_type(&func_name)?;
                             return self.infer_variant_type_context_from_type(&ty);
                         }
-                        if call.args.len() == 1 && matches!(func_name.as_str(), "Left" | "Right") {
+                        if call.args.len() == 1
+                            && self.variant_ctor_name_from_path(&path.path).is_some()
+                        {
                             let arg_ty = self.infer_simple_expr_type(&call.args[0])?;
                             let mapped = self.map_type(&arg_ty);
                             return Some(VariantTypeContext {
