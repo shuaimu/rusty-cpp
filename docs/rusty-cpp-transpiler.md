@@ -2845,8 +2845,7 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   `path_root_is_local_module(root)` — an inline module of this file (top level, or in the current
   lexical module), a file module of a crate-mode run (`crate_module_names` via
   `resolve_crate_root_child_module_path`), or a module the crate's own manifest declares. Only MODULES
-  count: a FUNCTION named `either` (the either crate's own `Either::either` method, itertools has
-  `fn either`-shaped free functions too) lives in the value namespace and shadows nothing in a path, so
+  count: a FUNCTION named `either` (the either crate's own `Either::either` method) lives in the value namespace and shadows nothing in a path, so
   `declared_item_names` is deliberately NOT consulted. `classify_use_import` (a free function, ~15
   callers) gained `classify_use_import_with(path, dependency_rewrites)` that skips the either AND winnow
   rewrites (same bug class) and threads the flag through its alias recursion; the eight callers that
