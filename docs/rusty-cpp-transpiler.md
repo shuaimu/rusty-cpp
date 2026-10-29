@@ -2868,6 +2868,13 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   `Alignment::Left(..)` variant at its construction site, with ANY module name
   (`use foo::Left; Left(1).0` → `Alignment::Left(static_cast<uint32_t>(1))._0`) — the `Left`/`Right`
   single-segment special case resolves to the prelude's enum before the local declaration.
+  RESIDUALS, both narrow to a crate that has BOTH a root `mod either` AND the either dependency (no
+  matrix input): (1) the predicate is FILE-scoped, not lexically scoped — a root `mod either` makes a
+  bare `either::X` inside a nested inline module take the local branch where Rust 2018 would reach the
+  extern crate (a root module is not in a child's scope without an import); (2) the explicit
+  `use ::either::Either;` escape does NOT reach the classifier's leading-colon check — `flatten_use_tree`
+  drops the `::` before classification, so beside a local `mod either` it is emitted `using either::Either;`
+  (measured on the probe; the expression-path arm does see `path.leading_colon`).
 
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
