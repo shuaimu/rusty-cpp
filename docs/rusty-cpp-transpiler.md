@@ -2929,12 +2929,17 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   `-fsyntax-only` OK on every fixed output, the either/itertools matrix inputs byte-identical old vs
   new (the one itertools delta is a pre-existing `is_send` conjunct-order nondeterminism — the
   pre-fix binary differs from itself run to run).
-  CONSUMER SIDE (measured, unchanged by design — an externally rooted import binding is not a
-  crate item): `use either::{Left, Right}` call form `rusty::either::Left<uint32_t, uint32_t>(std::move(x))`
-  byte-identical; its VALUE form `x.map(Left)` is still `Alignment::Left` (wrong before and after —
-  the either crate itself gets a ctor lambda from its in-crate method-arg lowering, a consumer gets
-  nothing: OPEN); `use itertools::EitherOrBoth::{Left, Right, Both}` in single-file mode still
-  `Alignment::Right(2)` (crate mode spells it bare; the matrix row is unaffected).
+  CONSUMER SIDE (measured): the either consumer is unchanged — its `use either::{Left, Right}`
+  binding is recorded runtime-rooted (`rusty::…`) after the import rewrite, so it is never a crate
+  item: the call form `rusty::either::Left<uint32_t, uint32_t>(std::move(x))` is byte-identical and
+  the VALUE form `x.map(Left)` is still `Alignment::Left` (wrong before and after — the either crate
+  itself gets a ctor lambda from its in-crate method-arg lowering, a consumer gets nothing: OPEN).
+  The itertools consumer DID change in single-file mode: `itertools` is not registered as an
+  external crate there, so `use itertools::EitherOrBoth::{Left, Right, Both}` is classified a crate
+  value item, and that names the right entity — zip's `Alignment::Right(2)` → `Right(2)` and
+  `rusty::Option<rusty::Either<…>>(rusty::either::Left<…>(6))` → `rusty::Some(Left(6))` (the old
+  output had mistaken EitherOrBoth's `Left` for either's); crate mode already spelled it bare, the
+  matrix row is unaffected (gate33).
   FOUND, NOT FOLDED: (1) that consumer value form of either's `Left` / `Right`; (2) a tuple-struct
   PATTERN in a match arm — `match l { Foo(v) => v }` — emits
   `if (/* TODO transpiler: unresolved bare-glob variant `Foo` … */ true)` for ANY tuple struct
@@ -2951,9 +2956,12 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   crate whose `either.rs` declares both the enum and `struct Left`, every emitted file byte-equal to
   the `LeftX` oracle). Measured clean afterwards on the scratch fixture copy under both `--crate` and
   `--crate-graph`.
-  RESIDUALS: (1) `item_const_types` keeps a bare key for every module's consts, so at the crate ROOT
-  a nested module's `const Left` counts as root-owned (a root `use Alignment::*;` + bare `Left`
-  beside a nested `const Left` is the only victim; contrived). (2) `--crate` mode, a sibling FILE
+  RESIDUALS: (1) at the crate ROOT the ownership checks are bare-name lenient: `item_const_types`
+  keeps a bare key for every module's consts, and `module_path_declares_type_name_exact` with an
+  empty module path is `local_declared_types.contains(name)`, which `record_local_declared_type`
+  fills with every module's bare type names — so a nested module's `const Left` OR `struct Left(u32)`
+  counts as root-owned (a root `use Alignment::*;` + bare `Left` beside such a nested item is the
+  only victim; contrived; `root_declared_type_names` would be the exact check). (2) `--crate` mode, a sibling FILE
   module's `use crate::Right;` of a ROOT tuple struct `Right` while some module declares an enum with
   a `Right` variant: the sibling TU cannot see the root's declarations (the crate manifests carry
   traits and modules, no types), the owner is relative, so the fallback wins and it is spelled
