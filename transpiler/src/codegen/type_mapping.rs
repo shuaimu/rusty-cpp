@@ -199,7 +199,7 @@ impl CodeGen {
         {
             return mapped_crate_single;
         }
-        match classify_use_import(normalized) {
+        match self.classify_use_import_here(normalized) {
             UseImportAction::Using(mapped) => mapped,
             UseImportAction::Raw(raw_stmt) => raw_stmt
                 .strip_prefix("namespace ")

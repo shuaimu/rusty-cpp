@@ -9430,7 +9430,7 @@ impl CodeGen {
                 ));
                 continue;
             }
-            let use_action = classify_use_import(&resolved_path);
+            let use_action = self.classify_use_import_here(&resolved_path);
             // `use <dep_crate> as <alias>;` — a CRATE rename (serde_yaml's
             // `use unsafe_libyaml as sys;`). classify_use_import would emit a
             // TYPE alias (`using sys = unsafe_libyaml;` — ill-formed: the

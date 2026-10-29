@@ -1930,7 +1930,7 @@ impl CodeGen {
         {
             let normalized = bound_owner_type.trim_start_matches("::");
             if !normalized.is_empty()
-                && !matches!(classify_use_import(normalized), UseImportAction::RustOnly)
+                && !matches!(self.classify_use_import_here(normalized), UseImportAction::RustOnly)
             {
                 return false;
             }

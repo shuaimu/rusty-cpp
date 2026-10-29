@@ -53319,3 +53319,90 @@ fn test_hoisted_visitor_visit_seq_collects_a_byte_vec_through_next_element() {
     assert!(out.contains("rusty::Vec<uint8_t>::with_capacity("), "the element type is the byte: {out}");
     assert!(out.contains("next_element<uint8_t>("), "the accessor's element is the push target's: {out}");
 }
+
+/// A local `mod either` is that module, never the either crate: the
+/// hardcoded dependency rewrites (`either::…` onto the runtime's `rusty::…`)
+/// stand down for a path rooted at a module of the crate being transpiled.
+/// Before, the root re-export and `use either::Cell;` were dropped as
+/// Rust-only, `use either::Left;` bound the runtime's `rusty::either::Left`,
+/// and the bound call was spelled `rusty::either_total()`. The oracle is the
+/// same crate under a neutral module name: the outputs agree byte for byte.
+#[test]
+fn test_a_local_module_named_either_is_not_the_either_crate() {
+    const SRC: &str = r#"
+        pub mod MOD {
+            pub fn MOD_total() -> u32 { 45 }
+            pub struct Cell(pub u32);
+        }
+        pub use MOD::MOD_total;
+        use MOD::Cell;
+        pub mod user {
+            use crate::MOD::Cell;
+            pub fn g() -> u32 { Cell(2).0 + super::MOD::MOD_total() }
+        }
+        pub fn run() -> u32 { MOD::MOD_total() + MOD_total() + Cell(1).0 + user::g() }
+    "#;
+    let either = SRC.replace("MOD", "either");
+    let neutral = SRC.replace("MOD", "foo");
+
+    let out = transpile_str(&either);
+    assert!(out.contains("using either::either_total;"), "{out}");
+    assert!(out.contains("using either::Cell;"), "{out}");
+    assert!(
+        out.contains("either::either_total() + either::either_total()"),
+        "the bound call is the local module's: {out}"
+    );
+    assert!(!out.contains("rusty::either_total("), "{out}");
+    assert!(!out.contains("rusty::either::"), "{out}");
+    assert!(!out.contains("Rust-only: using either::"), "{out}");
+    assert_eq!(out, transpile_str(&neutral).replace("foo", "either"));
+
+    let module = transpile_str_module(&either, "probe");
+    assert!(module.contains("export using either::either_total;"), "{module}");
+    assert_eq!(
+        module,
+        transpile_str_module(&neutral, "probe").replace("foo", "either")
+    );
+}
+
+/// The same under crate mode, where `either` is a sibling FILE module: the
+/// root's re-export of it, and a sibling's `use crate::either::Cell;` (that
+/// file declares no module at all; only the crate's module names carry
+/// `dep_core.either`), both agree with the neutral-name oracle.
+#[test]
+fn test_a_local_file_module_named_either_is_not_the_either_crate_in_crate_mode() {
+    const ROOT: &str = "pub mod MOD;\npub use MOD::MOD_total;\n";
+    let out = transpile_str_module_with_sibling_modules(
+        &ROOT.replace("MOD", "either"),
+        "dep_core",
+        &["dep_core", "dep_core.either"],
+    );
+    assert!(!out.contains("Rust-only: using either::"), "{out}");
+    assert_eq!(
+        out,
+        transpile_str_module_with_sibling_modules(
+            &ROOT.replace("MOD", "foo"),
+            "dep_core",
+            &["dep_core", "dep_core.foo"],
+        )
+        .replace("foo", "either")
+    );
+
+    const SIBLING: &str = "use crate::MOD::Cell;\npub fn g() -> u32 { Cell(2).0 }\n";
+    let out = transpile_str_module_with_sibling_modules(
+        &SIBLING.replace("MOD", "either"),
+        "dep_core.park",
+        &["dep_core", "dep_core.either", "dep_core.park"],
+    );
+    assert!(!out.contains("Rust-only: using either::"), "{out}");
+    assert!(!out.contains("rusty::either::"), "{out}");
+    assert_eq!(
+        out,
+        transpile_str_module_with_sibling_modules(
+            &SIBLING.replace("MOD", "foo"),
+            "dep_core.park",
+            &["dep_core", "dep_core.foo", "dep_core.park"],
+        )
+        .replace("foo", "either")
+    );
+}

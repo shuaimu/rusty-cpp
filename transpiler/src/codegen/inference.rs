@@ -558,6 +558,67 @@ impl CodeGen {
             .then_some(candidate)
     }
 
+    /// `root`, the first segment of a use or expression path, names a
+    /// MODULE of the crate being transpiled: an inline module of this file
+    /// (top-level, or in the current lexical module), a file module of a
+    /// crate-mode run, or a module the crate's own manifest declares. Rust
+    /// resolves such a path to that module and never to a dependency crate
+    /// of the same name (the ambiguous spelling is a rustc error), so the
+    /// hardcoded dependency rewrites (`either::…` → `rusty::…`,
+    /// `winnow::stream::…`) must stand down for it. Only MODULES count: a
+    /// function named `either` lives in the value namespace and shadows
+    /// nothing in a path (the either crate's own `Either::either` method).
+    pub(super) fn path_root_is_local_module(&self, root: &str) -> bool {
+        if root.is_empty() || matches!(root, "crate" | "self" | "super") {
+            return false;
+        }
+        if self.declared_module_names.contains(root) {
+            return true;
+        }
+        if !self.module_stack.is_empty()
+            && self
+                .declared_module_paths
+                .contains(&format!("{}::{}", self.module_stack.join("::"), root))
+        {
+            return true;
+        }
+        if self.resolve_crate_root_child_module_path(root).is_some() {
+            return true;
+        }
+        if let Some(crate_name) = self.crate_name.as_deref()
+            && self.dependency_ufcs_trait_manifests.iter().any(|m| {
+                m.module == crate_name
+                    && m.declared_modules.iter().any(|declared| {
+                        declared == root
+                            || declared
+                                .strip_prefix(root)
+                                .is_some_and(|rest| rest.starts_with("::"))
+                    })
+            })
+        {
+            return true;
+        }
+        false
+    }
+
+    /// `classify_use_import` with the dependency-crate rewrites switched off
+    /// when the path's root is a module of this crate
+    /// (`path_root_is_local_module`). An explicit `::either::…` names the
+    /// extern crate and keeps them.
+    pub(super) fn classify_use_import_here(&self, path: &str) -> UseImportAction {
+        let normalized = normalize_use_import_path(path);
+        let target = split_use_import_alias(normalized)
+            .map(|(_, target)| target)
+            .unwrap_or(normalized)
+            .trim();
+        let dependency_rewrites = target.starts_with("::")
+            || !target
+                .split("::")
+                .next()
+                .is_some_and(|root| self.path_root_is_local_module(root));
+        classify_use_import_with(path, dependency_rewrites)
+    }
+
     /// Resolve a `use` path that names a MODULE of this crate (rather
     /// than an item inside one) to that module's C++ module name.
     ///
@@ -14994,7 +15055,7 @@ impl CodeGen {
                         && normalized_bound != name
                         && normalized_bound.contains("::")
                         && !matches!(
-                            classify_use_import(normalized_bound.as_str()),
+                            self.classify_use_import_here(normalized_bound.as_str()),
                             UseImportAction::RustOnly
                         )
                     {

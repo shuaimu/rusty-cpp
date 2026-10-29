@@ -1,5 +1,7 @@
-//! either's shape (the module is not named `either`: that name is the
-//! runtime-mapped crate): a conditional `impl Deref` whose `Target` is a type
+//! either's shape, in a module named `either` on purpose: that is also the
+//! name of the runtime-mapped crate, and a local module must win over the
+//! crate's hardcoded rewrites (the root re-export `pub use either::either_total;`
+//! was dropped as Rust-only). A conditional `impl Deref` whose `Target` is a type
 //! parameter's projection, and the enum instantiated with a parameter that
 //! does NOT satisfy the bound. The C++ class template merges the impl
 //! unconditionally, so its member declarations must be well-formed for

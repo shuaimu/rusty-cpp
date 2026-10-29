@@ -1907,7 +1907,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     .next()
                     .is_some_and(|tail| tail == first);
                 let direct_import_has_cpp_surface = !matches!(
-                    classify_use_import(normalized_bound_target),
+                    self.classify_use_import_here(normalized_bound_target),
                     UseImportAction::RustOnly
                 );
                 let force_qualified_import_alias =
@@ -2555,7 +2555,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                             .next()
                             .is_some_and(|tail| tail == first_local);
                         let direct_import_has_cpp_surface = !matches!(
-                            classify_use_import(normalized_bound_target),
+                            self.classify_use_import_here(normalized_bound_target),
                             UseImportAction::RustOnly
                         );
                         if direct_import_alias && direct_import_has_cpp_surface && !from_root_scope
@@ -2991,7 +2991,13 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             }
             return resolved.join("::");
         }
-        if segments.len() >= 2 && segments[0] == "either" {
+        // A local `mod either` owns `either::…` (`path_root_is_local_module`);
+        // only the crate's own spelling, or an explicit `::either::…`, maps
+        // onto the runtime.
+        if segments.len() >= 2
+            && segments[0] == "either"
+            && (path.leading_colon.is_some() || !self.path_root_is_local_module("either"))
+        {
             let mut resolved = vec!["rusty".to_string()];
             if matches!(segments[1].as_str(), "Left" | "Right") {
                 resolved.push("either".to_string());

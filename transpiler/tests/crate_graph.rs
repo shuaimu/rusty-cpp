@@ -26,7 +26,9 @@
 //! dep-base (rustc on `park.rs` with `dep-base`: 3068), 2117 from the root's
 //! `fd_total`, and 45 from `dep_core::either_total`, either's conditional
 //! `impl Deref` with the enum instantiated for a non-conforming parameter
-//! (`conditional.rs`: 45).
+//! (`either.rs`: 45; the module is named `either` on purpose, so the root's
+//! `pub use either::either_total;` must resolve to the local module and not
+//! to the runtime-mapped either crate).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

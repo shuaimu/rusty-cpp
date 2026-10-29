@@ -14578,7 +14578,7 @@ impl CodeGen {
         if use_import_is_underscore_alias(&resolved_path) {
             return None;
         }
-        let use_action = classify_use_import(&resolved_path);
+        let use_action = self.classify_use_import_here(&resolved_path);
         match use_action {
             UseImportAction::Raw(statement) => {
                 parse_namespace_alias_name(&statement)?;
@@ -15292,7 +15292,7 @@ impl CodeGen {
             let paths = self.flatten_use_tree(&u.tree, "");
             for path in paths {
                 let normalized = normalize_use_import_path(path.as_str());
-                let mapped_path = match classify_use_import(normalized) {
+                let mapped_path = match self.classify_use_import_here(normalized) {
                     UseImportAction::Using(mapped) => mapped,
                     _ => continue,
                 };
@@ -65274,10 +65274,21 @@ fn cpp_module_path_to_import_name(path: &str) -> String {
 }
 
 fn classify_use_import(path: &str) -> UseImportAction {
+    classify_use_import_with(path, true)
+}
+
+/// `dependency_rewrites` enables the hardcoded dependency-crate rewrites
+/// (`either::…` onto the runtime's `rusty::Either` family, `winnow::stream::…`).
+/// A caller that can see the crate turns them off when the path's root
+/// names a MODULE of the crate being transpiled (`CodeGen::classify_use_import_here`):
+/// `use either::Cell;` beside a local `mod either` names that module, not the
+/// crate — rustc rejects the ambiguous spelling — and the rewrite dropped the
+/// import as Rust-only, or bound `use either::Left;` to `rusty::either::Left`.
+fn classify_use_import_with(path: &str, dependency_rewrites: bool) -> UseImportAction {
     let namespace_import = path.trim_start().starts_with("namespace ");
     let normalized = normalize_use_import_path(path);
     if let Some((alias, target_path)) = split_use_import_alias(normalized) {
-        return match classify_use_import(target_path) {
+        return match classify_use_import_with(target_path, dependency_rewrites) {
             UseImportAction::RustOnly => UseImportAction::RustOnly,
             UseImportAction::Using(mapped_target) => {
                 if alias_target_requires_template_alias(&mapped_target) {
@@ -65326,11 +65337,13 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if is_either_variant_reexport(normalized) {
         return UseImportAction::RustOnly;
     }
-    if let Some(action) = rewrite_winnow_import(normalized) {
-        return action;
-    }
-    if let Some(action) = rewrite_either_import(normalized) {
-        return action;
+    if dependency_rewrites {
+        if let Some(action) = rewrite_winnow_import(normalized) {
+            return action;
+        }
+        if let Some(action) = rewrite_either_import(normalized) {
+            return action;
+        }
     }
     if let Some(action) = rewrite_std_panic_import(normalized) {
         return action;

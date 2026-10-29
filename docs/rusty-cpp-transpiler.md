@@ -2830,6 +2830,46 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   annotates block IIFEs and closures, so a module-mode `|..| -> &Self::Item` or a block-valued
   `&Self::Target` gets `decltype(auto)` too (the correct semantics).
 
+- *2026-10-28 — (ae) the `either` module-name shadowing, the follow-up (ac) recorded.* The hardcoded
+  dependency rewrites that map the either crate onto the runtime (`use either::Either;` →
+  `using rusty::Either;`, `either::Left` → `rusty::either::Left`, `either::f` → `rusty::f`;
+  `rewrite_either_import`, the `segments[0] == "either"` arm of `emit_path_to_string`) fired on EVERY
+  path rooted at `either`, including one naming a MODULE of the crate being transpiled. Rust resolves
+  that path to the local module — the ambiguous spelling is a rustc error, so no legitimate input has
+  both in scope — but beside `pub mod either { .. }` the root re-export `pub use either::either_total;`
+  was dropped as Rust-only (a consumer's `dep_core::either_total()` then had no such member: the
+  crate-graph fixture had dodged this by naming its module `conditional`), `use either::Cell;` was
+  dropped, `use either::Left;` bound the runtime's `rusty::either::Left`, and the bound call
+  `either_total()` was spelled `rusty::either_total()`. Oracle: the same crate under a neutral module
+  name (`foo`); the diff of the two outputs was exactly the five deltas above. Fix: one predicate,
+  `path_root_is_local_module(root)` — an inline module of this file (top level, or in the current
+  lexical module), a file module of a crate-mode run (`crate_module_names` via
+  `resolve_crate_root_child_module_path`), or a module the crate's own manifest declares. Only MODULES
+  count: a FUNCTION named `either` (the either crate's own `Either::either` method, itertools has
+  `fn either`-shaped free functions too) lives in the value namespace and shadows nothing in a path, so
+  `declared_item_names` is deliberately NOT consulted. `classify_use_import` (a free function, ~15
+  callers) gained `classify_use_import_with(path, dependency_rewrites)` that skips the either AND winnow
+  rewrites (same bug class) and threads the flag through its alias recursion; the eight callers that
+  can see the crate (`emit_use`, `namespace_alias_statement_for_use_path`, the module-mode re-export
+  loop, `type_mapping`, `predicates`, `inference`, both `direct_import_has_cpp_surface` sites in
+  `paths.rs`) go through `classify_use_import_here`, which computes the flag from the path's root (an
+  explicit `::either::…` keeps the rewrites — that spelling names the extern crate); the std facade
+  callers keep the plain form. The expression-path arm takes the same gate (`path.leading_colon` or
+  not-local). `is_external` needed no change: it already excludes a declared local module (file
+  modules included — `collect_passes` registers every `syn::Item::Mod`). Guards: the fixture module is
+  `either` again, so `crate_graph_emits_one_module_per_needed_crate_and_runs` proves the shape end to
+  end (10703); two unit pins compare the output against the neutral-name oracle BYTE FOR BYTE in
+  single-file, module, and crate mode (root re-export of a sibling file module, and a sibling's
+  `use crate::either::Cell;` where only `crate_module_names` carries the module); the fixed probe
+  outputs compile under clang 22 (plain `-fsyntax-only`, module `--precompile`), so the global
+  `namespace either` beside the prelude's `rusty::either` is not ambiguous (the outputs carry no
+  `using namespace rusty;`). itertools' `macros_hygiene.rs` declares an empty `mod either {}` and now
+  takes the local branch; its TU references nothing under `either::` (measured on the row's output).
+  FOUND, NOT FOLDED IN (different mechanism): a local tuple struct named `Left` is spelled as the fmt
+  `Alignment::Left(..)` variant at its construction site, with ANY module name
+  (`use foo::Left; Left(1).0` → `Alignment::Left(static_cast<uint32_t>(1))._0`) — the `Left`/`Right`
+  single-segment special case resolves to the prelude's enum before the local declaration.
+
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
   needs a pointer or reference-wrapper element spelling; phase 0, the `dyn` coercion family) and the
