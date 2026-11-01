@@ -2944,7 +2944,9 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   PATTERN in a match arm — `match l { Foo(v) => v }` — emits
   `if (/* TODO transpiler: unresolved bare-glob variant `Foo` … */ true)` for ANY tuple struct
   (irrefutable, so the single-arm form behaves; a multi-arm match over tuple-struct patterns would
-  not); `let Foo(v) = l;` is fine.
+  not); `let Foo(v) = l;` is fine. — (2) closed by (ag) below, which corrects this description:
+  the expression form was functionally right even multi-arm (the marker was the defect); the
+  statement form, `..`, and unit-struct patterns were the broken ones.
   CRATE MODE (second cut, bd3928c4 → the follow-up commit): under `--crate` (one TU per file
   module) the ROOT's `use either::Left; Left(2).0` was still `Alignment::Left(2)._0` while
   `--crate-graph` was clean — the import-branch's relative-owner fallback (`crate_enum_has_variant_named`)
@@ -2966,6 +2968,96 @@ never wrong *provided its tier-1 arms test the base, not the name* (§3.2.3).
   a `Right` variant: the sibling TU cannot see the root's declarations (the crate manifests carry
   traits and modules, no types), the owner is relative, so the fallback wins and it is spelled
   `Alignment::Right(3)._0` (measured on the scratch fixture copy; needs all three conditions).
+
+*2026-11-01 — (ag) a tuple-struct pattern in a match arm is a struct destructure; a unit-struct
+pattern is irrefutable; `..` keeps the tail slots — the (af) FOUND item, closed.*
+  SYMPTOMS (7 runnable probes in `st_work/probe_tsp`, clang 22 + run, old binary `st_work/
+  rct_before_ag`): a tuple struct the crate declares, matched by its constructor pattern, took the
+  unresolved-bare-glob-variant fallback. Expression position: `if (/* TODO transpiler: unresolved
+  bare-glob variant `P` (no enum decl visible in this TU; patch arm manually) */ true) { auto&& a =
+  …(_m)._0; … }` — the (af) description was wrong about this form: it is FUNCTIONALLY RIGHT (the
+  head of a tuple-struct pattern is irrefutable, `true` is the correct condition, the fields are
+  `._N`, literal elements add their own conditions; multi-arm, `&P(a, b)`, `ref`, nested
+  `N(P(a, b), c)`, guards, `@`, `if let`, `let`, tuples `(P(a, _), n)`, closure params all ran
+  green pre-fix) — the marker and its "patch arm manually" advice were the defect. Statement
+  position (`match p { P(a, b) => { s += a * b; } }`): `try_emit_runtime_match_stmt` rejected the
+  arm (`return false` unless the variant-with-refutable-payload shape) and `emit_match` fell to
+  `emit_match_as_visit` → `std::visit` over a struct, ill-formed ("no matching function for call to
+  'visit'"). `..` inside the pattern (`N(.., c)`): the collectors recursed into `Pat::Rest` →
+  `None` → the visit fallback with no matching overload → `rusty::intrinsics::unreachable_panic()`
+  — for a data enum too: `E::V(.., c) => c` COMPILED and ABORTED at runtime ("unreachable"), the
+  arm silently dropped. Unit-struct patterns: `match u { m::U => 1 }` → `_m == ::m::U` (a TYPE;
+  "expected '(' for function-style cast"), `match z { Z => 2 }` → `_m == Z`, `(Z, n)` → `_m0 == Z`,
+  `E::D(Z)` → `._0 == Z`, statement form `switch (u) { case ::m::U:`; module mode's lambda-form
+  switch emitter has an ALL-CAPS heuristic (`U` = a constant → `_m == U`; `Unit` = a binding
+  `const auto& Unit = _m`).
+  MECHANISM: no pattern route knew what a tuple or unit struct is.
+  `collect_runtime_match_binding_stmts_and_condition` (+ its `_with_cpp_name_map` twin,
+  collect_passes.rs) asked only `path_is_known_data_enum_variant_with_ctx`; everything else was "an
+  unresolved variant". `tuple_pattern_elem_value_condition` / `path_pattern_value_condition` /
+  `const_value_ident_pattern_condition` compared against the emitted path (a type name);
+  `pattern_ident_is_const_value` knew `unit_struct_types` (so `Z` was not a binding) but the
+  condition builders did not.
+  FIX (6e7b117e): inference.rs `crate_ctor_struct_arity_for_pattern_path(path) -> Option<usize>`
+  (unit = 0): bare → `tuple_struct_arities` / `unit_struct_types` by the scoped key then the bare
+  key (LENIENT by design — the registries hold every module's bare names; in pattern position the
+  only alternative lowering was the marker, which assumed the same struct shape, and the callers
+  consult the enum-variant routes first), then the crate-wide cross-file tables
+  (`cross_file_unit_struct_tails`; `cross_file_struct_field_types` minus
+  `cross_file_struct_field_order` = a tuple struct's field list; both drop ambiguous tails) for a
+  sibling FILE module under `--crate`; qualified → an enum owner is a variant path;
+  `crate::`/`self::`/`super::` normalized against `module_stack`, then the scoped key, the
+  child-module key, `cross_file_struct_qualified_paths` (`["crate", module…, name]`, also
+  module_stack-prefixed), finally bare when the root is a declared module.
+  `pattern_path_is_shadowing_crate_ctor_struct`: a bare name this exact scope owns
+  (`bare_name_is_crate_value_item_here`, the (af) predicate) shadows the variant routes unless a
+  variant context pins the scrutinee (Rust: a glob never shadows a declared item) — pinned by
+  `struct Left(u32)` beside `enum Side { Left(u32), Right(u32) }`. The collectors:
+  `is_data_enum_variant && !shadowing`; a ctor struct → `payload_base_expr = scrutinee_base`, no
+  condition, no marker, fields `._{slot}`; `..` → `rest_pos`, slots after it =
+  `field_count - (elems.len() - idx)` with `field_count` = the arity or
+  `data_enum_variant_field_count_for_path` (the variant's recorded `data_enum_variant_field_types`),
+  an unknown count keeps the historical `None`. Statement form: `try_emit_runtime_match_stmt`
+  routes a ctor-struct arm (peeled through `&`/parens/type) through the collector like the
+  nested-payload shape; a unit-struct `Pat::Path` arm is `true`. Unit structs:
+  `path_pattern_is_irrefutable_unit_struct` (arity 0, no runtime method, no C-like owner unless
+  shadowing, no variant unless shadowing) → `Some(None)` in `tuple_pattern_elem_value_condition`
+  (Path + Ident), `"true"` in `path_pattern_value_condition` / `const_value_ident_pattern_condition`,
+  `{ body }` in the lambda-form switch emitter (before its ALL-CAPS heuristic), never
+  switch-compatible in `all_arms_are_switch_compatible`.
+  GUARDS: `test_a_tuple_struct_pattern_in_a_match_arm_is_a_struct_destructure` (every shape above;
+  the statement body has `_m_matched` and no `std::visit`; the shadowing pair),
+  `test_a_rest_pattern_in_a_data_enum_variant_keeps_the_tail_slots` (`E::V(.., c)` →
+  `std::get<0>(…)._2`), `test_a_unit_struct_pattern_is_irrefutable` (single-file + module mode
+  `Z`/`Unit`), `tests/crate_tuple_struct_pattern.rs` (`--crate` crate: root `use shapes::P` /
+  `shapes::P(..)` / statement form, sibling `use crate::R` / `crate::shapes::P(..)`, the sibling's
+  own `U`: no marker, no multi-line `std::visit`, no `== U)` in any TU). The three existing marker
+  pins (`Internal`/`Leaf` undeclared, ambiguous `Foo` across two enums) stay green. chain92: unit
+  2706 ok (the new pin reran 6/6 after its expected heads were corrected), crate_graph 7/7, the new
+  integration 1/1, suite = the 2 standing reds + the harness flake (7/7 serially). Runtime: probes
+  a–g4 (26 asserts) all pass post-fix; pre-fix a and d (expression forms) were green, e/f/g
+  compile-failed or aborted.
+  MATRIX REPLAY (old vs new binary on every `.rusty-parity-matrix/*/targets/*/expanded.rs`, 55
+  inputs, `st_work/replay_tsp`): byte-identical except itertools/itertools — two `EitherOrBoth`
+  matches with a `Both(..) => None` arm moved from `std::visit` to the runtime if-chain
+  (`variant_index(_m) == 1` …): the intended effect of the `..` fix on a case the visit route also
+  handled (plus the known `is_send` conjunct-order nondeterminism); the gate's itertools row is
+  the compile proof.
+  FOUND, NOT FOLDED: (1) FUNCTION-PARAMETER patterns — `fn f(P(a, b): P)`, `fn f((a, b): (u32,
+  u32))`, `fn f(S { a, b }: S)` — emit `P _` and an unbound body ("use of undeclared identifier
+  'a'"); closures already body-destructure (`_destruct_param{i}` via
+  `closure_param_needs_body_destructure`), free functions and methods go through `map_fn_params`
+  (its declaration and definition callers must agree) — a separate class; the clean route is an
+  AST pre-pass beside `let_tuple_uninit.rs` rewriting the param to `_param{i}` plus
+  `let <pat> = _param{i};` (Rust's own desugaring; the `let` lowering is right for every pattern).
+  (2) `let m::U = u;` (a unit-struct `let`) emits `// TODO: complex pattern binding` — harmless,
+  nothing to bind. (3) Single-file mode has no `rusty::Vec` (vec.hpp is an empty header since the
+  module-only Vec) — a probe-side limitation, the probe moved to a slice. (4) The expression-form
+  acceptance in `emit_runtime_match_expr` is per arm (`collected?`), so one rejected element
+  pattern still sends the WHOLE match to `std::visit`, which drops the arms it has no overload for
+  — `..` inside a plain tuple pattern (`(a, .., z)`, arity unknown) still takes that route.
+  (5) Module mode softens a unit-struct parameter to `auto u` (`local_unit(auto u)`), a
+  pre-existing param rule, compiles.
 
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
