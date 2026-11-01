@@ -3043,6 +3043,14 @@ pattern is irrefutable; `..` keeps the tail slots — the (af) FOUND item, close
   (`variant_index(_m) == 1` …): the intended effect of the `..` fix on a case the visit route also
   handled (plus the known `is_send` conjunct-order nondeterminism); the gate's itertools row is
   the compile proof.
+  SECOND CUT (9217d15b, the advisor's scope check): `Self(..)` inside an impl — the common newtype
+  spelling `match self { Self(a, b) => a + b }` — was still the marker in expression position,
+  `std::visit` over a literal `Self` type in statement position (`unknown type name 'Self'`), and
+  `_m == Z` for a unit struct's `Self` arm: the resolver looked the path up by its last segment.
+  A single-segment `Self` now resolves through the enclosing impl's type (`current_struct`:
+  scoped key, bare, then cross-file); pinned (`Self(a, b)`, `&Self(a, _)` on `&self`,
+  `Self(.., b)`, the statement form, a unit struct's `Self`), probe `i.rs` runs green; the
+  member head is emitted `uint32_t P::stmt_self() {` (out of line), a pin-text trap.
   FOUND, NOT FOLDED: (1) FUNCTION-PARAMETER patterns — `fn f(P(a, b): P)`, `fn f((a, b): (u32,
   u32))`, `fn f(S { a, b }: S)` — emit `P _` and an unbound body ("use of undeclared identifier
   'a'"); closures already body-destructure (`_destruct_param{i}` via
