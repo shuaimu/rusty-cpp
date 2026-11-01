@@ -32811,7 +32811,10 @@ impl CodeGen {
         }
         arms.iter().all(|arm| match &arm.pat {
             syn::Pat::Lit(_) | syn::Pat::Wild(_) | syn::Pat::Ident(_) | syn::Pat::Range(_) => true,
-            syn::Pat::Path(pp) => !self.path_pattern_requires_visit(&pp.path, variant_ctx),
+            syn::Pat::Path(pp) => {
+                !self.path_pattern_requires_visit(&pp.path, variant_ctx)
+                    && self.crate_ctor_struct_arity_for_pattern_path(&pp.path) != Some(0)
+            }
             syn::Pat::Or(or_pat) => or_pat.cases.iter().all(|case| match case {
                 // `Pat::Ident` in an or-pattern is always a CONSTANT (a unit
                 // C-like-enum variant by bare name) — you can't bind differing
@@ -32820,7 +32823,10 @@ impl CodeGen {
                 syn::Pat::Lit(_) | syn::Pat::Wild(_) | syn::Pat::Ident(_) | syn::Pat::Range(_) => {
                     true
                 }
-                syn::Pat::Path(pp) => !self.path_pattern_requires_visit(&pp.path, variant_ctx),
+                syn::Pat::Path(pp) => {
+                    !self.path_pattern_requires_visit(&pp.path, variant_ctx)
+                        && self.crate_ctor_struct_arity_for_pattern_path(&pp.path) != Some(0)
+                }
                 _ => false,
             }),
             _ => false,
@@ -33550,6 +33556,45 @@ impl CodeGen {
             || enum_name.rsplit("::").next().is_some_and(|tail| {
                 self.should_rewrite_by_value_cycle_field_declaration(tail, field_key)
             })
+    }
+
+    /// Field count of the data-enum variant a pattern path names, when its
+    /// field types were recorded.
+    fn data_enum_variant_field_count_for_path(
+        &self,
+        path: &syn::Path,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> Option<usize> {
+        let (enum_name, variant_name) =
+            self.data_enum_variant_owner_and_name_from_path_with_ctx(path, variant_ctx)?;
+        self.data_enum_variant_field_types
+            .get(&format!("{}::{}", enum_name, variant_name))
+            .map(|fields| fields.len())
+    }
+
+    /// A path pattern naming a crate unit struct that no enum-variant route
+    /// claims: one value exists, so the pattern is irrefutable and
+    /// contributes no condition (`_m == Z` compared against a TYPE).
+    fn path_pattern_is_irrefutable_unit_struct(
+        &self,
+        path: &syn::Path,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> bool {
+        if self.crate_ctor_struct_arity_for_pattern_path(path) != Some(0)
+            || self.runtime_path_match_condition_method(path, variant_ctx).is_some()
+        {
+            return false;
+        }
+        let shadowing = self.pattern_path_is_shadowing_crate_ctor_struct(path, variant_ctx);
+        if path.segments.len() == 1
+            && !shadowing
+            && self
+                .unique_c_like_enum_owner_for_variant_name(&path.segments[0].ident.to_string())
+                .is_some()
+        {
+            return false;
+        }
+        shadowing || !self.path_is_known_data_enum_variant_with_ctx(path, variant_ctx)
     }
 
     fn data_enum_variant_tuple_field_binding_expr(
@@ -36649,11 +36694,17 @@ impl CodeGen {
                 value_expr,
                 self.emit_lit(&lit_pat.lit)
             ))),
-            syn::Pat::Path(path_pat) => Some(Some(self.path_pattern_value_condition(
-                &path_pat.path,
-                value_expr,
-                None,
-            ))),
+            syn::Pat::Path(path_pat) => {
+                if self.path_pattern_is_irrefutable_unit_struct(&path_pat.path, None) {
+                    Some(None)
+                } else {
+                    Some(Some(self.path_pattern_value_condition(
+                        &path_pat.path,
+                        value_expr,
+                        None,
+                    )))
+                }
+            }
             syn::Pat::Range(range_pat) => {
                 let mut range_conds = Vec::new();
                 if let Some(start) = &range_pat.start {
@@ -36691,6 +36742,11 @@ impl CodeGen {
                     self.runtime_ident_match_condition_method(pi, None)
                 {
                     Some(Some(format!("{}.{}()", value_expr, cond_method)))
+                } else if self.path_pattern_is_irrefutable_unit_struct(
+                    &syn::Path::from(pi.ident.clone()),
+                    None,
+                ) {
+                    Some(None)
                 } else if self.pattern_ident_is_const_value(&pi.ident.to_string()) {
                     Some(Some(self.const_value_ident_pattern_condition(
                         &pi.ident, value_expr, None,
@@ -36877,7 +36933,10 @@ impl CodeGen {
                     variant_cpp, value_expr
                 )
             }
-        } else if Self::path_is_fmt_error(path) {
+        } else if Self::path_is_fmt_error(path)
+            || self.crate_ctor_struct_arity_for_pattern_path(path) == Some(0)
+        {
+            // A crate unit struct: the only value, irrefutable.
             "true".to_string()
         } else {
             let value = self.emit_switch_pattern_path_value(path, variant_ctx);
@@ -37691,6 +37750,10 @@ impl CodeGen {
                 variant_ctx,
                 &matched_base,
             );
+        }
+        if self.crate_ctor_struct_arity_for_pattern_path(&ident_path) == Some(0) {
+            // A crate unit struct: the only value, irrefutable.
+            return "true".to_string();
         }
         format!("{} == {}", source_expr, escape_cpp_keyword(&ident_name))
     }

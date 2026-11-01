@@ -1587,6 +1587,48 @@ impl CodeGen {
             let mut arm_payload_setup_lines = Vec::new();
             let mut arm_binding_lines = Vec::new();
             let mut arm_binding_map = HashMap::new();
+            // A tuple struct this crate declares (`P(a, b) => ..`,
+            // `&P(a, _) => ..`): the runtime condition collector lowers it as
+            // a struct destructure. The std::visit fallback is ill-formed on
+            // a struct, so no compiling match takes this route today.
+            if let syn::Pat::TupleStruct(ts) = self.peel_pat_type_ref_paren(&arm.pat)
+                && self
+                    .runtime_tuple_struct_match_methods(&ts.path, variant_ctx)
+                    .is_none()
+                && (!self.path_is_known_data_enum_variant_with_ctx(&ts.path, variant_ctx)
+                    || self.pattern_path_is_shadowing_crate_ctor_struct(&ts.path, variant_ctx))
+                && self
+                    .crate_ctor_struct_arity_for_pattern_path(&ts.path)
+                    .is_some()
+            {
+                let Some(cond) = self
+                    .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                        &arm.pat,
+                        "_m",
+                        &mut arm_binding_lines,
+                        &mut arm_binding_map,
+                        variant_ctx,
+                    )
+                else {
+                    return false;
+                };
+                let arm_condition = cond.unwrap_or_else(|| "true".to_string());
+                let mut arm_binding_types = HashMap::new();
+                if let Some(scrutinee_ty) = match_scrutinee_ty.as_ref() {
+                    self.bind_pattern_types_into_env(&arm.pat, scrutinee_ty, &mut arm_binding_types);
+                    arm_binding_types.retain(|name, _| arm_binding_map.contains_key(name));
+                }
+                arm_plans.push((
+                    arm_condition,
+                    arm_pre_lines,
+                    arm_payload_condition,
+                    arm_payload_setup_lines,
+                    arm_binding_lines,
+                    arm_binding_map,
+                    arm_binding_types,
+                ));
+                continue;
+            }
             let arm_condition = match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let Some((cond_method, unwrap_method)) =
@@ -1755,6 +1797,8 @@ impl CodeGen {
                             return false;
                         };
                         cond.unwrap_or_else(|| "true".to_string())
+                    } else if self.path_pattern_is_irrefutable_unit_struct(&pp.path, variant_ctx) {
+                        "true".to_string()
                     } else {
                         return false;
                     }
@@ -3500,7 +3544,18 @@ impl CodeGen {
                             && ident_str.chars().all(|c| {
                                 c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'
                             });
-                        if is_const_style {
+                        // A crate unit struct is the only value of its type:
+                        // irrefutable — neither a comparison against the TYPE
+                        // (`_m == U`) nor a binding.
+                        let is_unit_struct = pi.by_ref.is_none()
+                            && pi.mutability.is_none()
+                            && self.path_pattern_is_irrefutable_unit_struct(
+                                &syn::Path::from(pi.ident.clone()),
+                                variant_ctx,
+                            );
+                        if is_unit_struct {
+                            parts.push(format!("{{ {}{};  }}", ret_prefix, body));
+                        } else if is_const_style {
                             // A bare C-like enum variant (`use Enum::*`) must be
                             // compared against the scoped `Enum::VARIANT` — C++20
                             // `enum class` does not flatten variants into scope.

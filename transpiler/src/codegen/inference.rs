@@ -570,6 +570,125 @@ impl CodeGen {
     /// so a local `struct Left(u32)` was constructed as
     /// `Alignment::Left(..)`, a local `struct Less(u32)` as
     /// `Ordering::Less(..)`, with any module name.
+    /// A pattern path (`P(..)`, `m::P(..)`, `U`, `m::U`) naming a tuple or
+    /// unit struct this crate declares: the pattern is a struct destructure —
+    /// irrefutable at its head, fields at `._N` — never an enum variant.
+    /// `Some(arity)`; a unit struct is arity 0.
+    ///
+    /// The registries hold every module's bare names, so a bare name resolves
+    /// leniently: in pattern position the only alternative lowering is the
+    /// unresolved-variant marker, which assumes the same struct shape anyway,
+    /// and the callers consult the enum-variant routes first. A qualified path
+    /// is normalized against the current module (`crate::`/`self::`/`super::`),
+    /// then looked up by its scoped key, as a child module path, and bare when
+    /// its root is a declared module.
+    pub(super) fn crate_ctor_struct_arity_for_pattern_path(&self, path: &syn::Path) -> Option<usize> {
+        let segments: Vec<String> = path.segments.iter().map(|seg| seg.ident.to_string()).collect();
+        let (last, owners) = segments.split_last()?;
+        let lookup = |key: &str| -> Option<usize> {
+            if let Some(&arity) = self.tuple_struct_arities.get(key) {
+                return Some(arity);
+            }
+            self.unit_struct_types.contains(key).then_some(0)
+        };
+        // Sibling-file structs (crate mode, one TU per file module): the
+        // cross-file pre-pass carries every struct's tail with its field
+        // list — named structs also record a field order, ambiguous tails
+        // are dropped — so a tuple struct is a field list without an order.
+        let cross_file = |name: &str| -> Option<usize> {
+            if self.cross_file_unit_struct_tails.contains(name) {
+                return Some(0);
+            }
+            if self.cross_file_struct_field_order.contains_key(name) {
+                return None;
+            }
+            self.cross_file_struct_field_types
+                .get(name)
+                .map(|fields| fields.len())
+        };
+        if owners.is_empty() {
+            return lookup(&self.scoped_type_key(last))
+                .or_else(|| lookup(last))
+                .or_else(|| cross_file(last));
+        }
+        // An enum owner makes this a variant path.
+        if owners.last().is_some_and(|owner| self.data_enum_name_matches(owner)) {
+            return None;
+        }
+        let mut module: Vec<String> = Vec::new();
+        let mut skip = 0;
+        match owners[0].as_str() {
+            "crate" => skip = 1,
+            "self" => {
+                module = self.module_stack.clone();
+                skip = 1;
+            }
+            "super" => {
+                module = self.module_stack.clone();
+                while skip < owners.len() && owners[skip] == "super" {
+                    module.pop();
+                    skip += 1;
+                }
+            }
+            _ => {}
+        }
+        module.extend(owners[skip..].iter().cloned());
+        let scoped = if module.is_empty() {
+            last.clone()
+        } else {
+            format!("{}::{}", module.join("::"), last)
+        };
+        if let Some(arity) = lookup(&scoped) {
+            return Some(arity);
+        }
+        // A child module path (`m::P` inside `n`, declared as `n::m::P`).
+        if skip == 0 && !self.module_stack.is_empty() {
+            let nested = format!("{}::{}", self.module_stack.join("::"), scoped);
+            if let Some(arity) = lookup(&nested) {
+                return Some(arity);
+            }
+        }
+        // The crate-wide qualified struct paths settle a sibling file's
+        // struct exactly (`crate::shapes::P`, `shapes::P` from the root).
+        let mut qualified: Vec<String> = vec!["crate".to_string()];
+        qualified.extend(module.iter().cloned());
+        qualified.push(last.clone());
+        if self.cross_file_struct_qualified_paths.contains(&qualified) {
+            return cross_file(last);
+        }
+        if skip == 0 && !self.module_stack.is_empty() {
+            let mut nested: Vec<String> = vec!["crate".to_string()];
+            nested.extend(self.module_stack.iter().cloned());
+            nested.extend(module.iter().cloned());
+            nested.push(last.clone());
+            if self.cross_file_struct_qualified_paths.contains(&nested) {
+                return cross_file(last);
+            }
+        }
+        module
+            .first()
+            .is_some_and(|root| self.path_root_is_local_module(root))
+            .then(|| lookup(last).or_else(|| cross_file(last)))
+            .flatten()
+    }
+
+    /// In pattern position a bare name this exact scope owns as a tuple or
+    /// unit struct shadows the enum-variant routes — a glob never shadows a
+    /// declared item or an explicit import — unless a variant context pins
+    /// the scrutinee to an enum.
+    pub(super) fn pattern_path_is_shadowing_crate_ctor_struct(
+        &self,
+        path: &syn::Path,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> bool {
+        if variant_ctx.is_some() || path.segments.len() != 1 {
+            return false;
+        }
+        let name = path.segments[0].ident.to_string();
+        self.crate_ctor_struct_arity_for_pattern_path(path).is_some()
+            && self.bare_name_is_crate_value_item_here(&name)
+    }
+
     pub(super) fn bare_value_name_is_crate_owned_here(&self, name: &str) -> bool {
         if self.bare_name_is_crate_value_item_here(name) {
             return true;

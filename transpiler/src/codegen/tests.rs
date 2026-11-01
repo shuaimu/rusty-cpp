@@ -53514,3 +53514,157 @@ fn test_a_bare_std_enum_variant_stays_the_variant_when_the_crate_declares_nothin
     assert!(out.contains("Side{Side_Left{static_cast<int32_t>(1)}}"), "{out}");
     assert!(!out.contains("Alignment::"), "{out}");
 }
+
+/// The emitted body of the function whose head is `head`, up to its closing
+/// brace at column 0.
+fn emitted_fn_body<'a>(out: &'a str, head: &str) -> &'a str {
+    let start = out.find(head).unwrap_or_else(|| panic!("no `{head}` in\n{out}"));
+    let rest = &out[start..];
+    let end = rest.find("\n}\n").unwrap_or(rest.len());
+    &rest[..end]
+}
+
+#[test]
+fn test_a_tuple_struct_pattern_in_a_match_arm_is_a_struct_destructure() {
+    // (ag) A tuple struct the crate declares, matched by its constructor
+    // pattern, took the unresolved-bare-glob-variant fallback: a
+    // `/* TODO transpiler: unresolved bare-glob variant `P` ... */ true`
+    // condition in expression position, an ill-formed `std::visit` over the
+    // struct in statement position, and a dropped arm for `..`. The head of
+    // such a pattern is irrefutable; its fields sit at `._N` on the
+    // scrutinee.
+    let out = transpile_str(
+        r#"
+        struct P(u32, u32);
+        struct N(P, u32);
+        struct Left(u32);
+        enum Side { Left(u32), Right(u32) }
+        mod m { pub struct Q(pub u32, pub u32); }
+        use m::Q;
+        fn single(p: P) -> u32 { match p { P(a, b) => a + b } }
+        fn multi(p: P) -> u32 { match p { P(0, b) => b, P(a, _) => a } }
+        fn by_ref(p: &P) -> u32 { match p { &P(a, b) => a + b } }
+        fn nested(n: N) -> u32 { match n { N(P(a, b), c) => a + b + c } }
+        fn rest(n: N) -> u32 { match n { N(.., c) => c } }
+        fn qualified(q: m::Q) -> u32 { match q { m::Q(a, _) => a } }
+        fn imported(q: Q) -> u32 { match q { Q(_, b) => b } }
+        fn guard(p: P) -> u32 { match p { P(a, b) if a > b => a, P(_, b) => b } }
+        fn stmt(p: P) -> u32 { let mut s = 0; match p { P(a, b) => { s += a * b; } } s }
+        fn left(l: Left) -> u32 { match l { Left(v) => v } }
+        fn side(s: Side) -> u32 { match s { Side::Left(v) => v, Side::Right(v) => v + 1 } }
+        "#,
+    );
+    assert!(!out.contains("unresolved bare-glob variant"), "{out}");
+    // The head is irrefutable; the fields are `._N` on the scrutinee.
+    assert!(
+        out.contains("if (true) { auto&& a = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m)._0); auto&& b = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m)._1);"),
+        "{out}"
+    );
+    // A literal element keeps its own condition.
+    assert!(
+        out.contains("if (rusty::detail::deref_if_pointer(_m)._0 == 0)"),
+        "{out}"
+    );
+    // `..` keeps the element after it at the tail slot.
+    let rest_body = emitted_fn_body(&out, "uint32_t rest(N n) {");
+    assert!(
+        rest_body.contains("auto&& c = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m)._1); return c;"),
+        "{rest_body}"
+    );
+    // A nested tuple struct destructures through its slot.
+    assert!(
+        out.contains("rusty::detail::deref_if_pointer(_m)._0)._1)"),
+        "{out}"
+    );
+    // Qualified and imported module structs resolve the same way.
+    let qualified_body = emitted_fn_body(&out, "uint32_t qualified(m::Q q) {");
+    assert!(qualified_body.contains("if (true) { auto&& a = "), "{qualified_body}");
+    let imported_body = emitted_fn_body(&out, "uint32_t imported(Q q) {");
+    assert!(imported_body.contains("if (true) { auto&& b = "), "{imported_body}");
+    // Statement position takes the runtime if-chain, never std::visit.
+    let stmt_body = emitted_fn_body(&out, "uint32_t stmt(P p) {");
+    assert!(stmt_body.contains("bool _m_matched = false;"), "{stmt_body}");
+    assert!(!stmt_body.contains("std::visit"), "{stmt_body}");
+    assert!(stmt_body.contains("._1"), "{stmt_body}");
+    // The crate's own `Left` struct shadows the sibling enum's `Left`
+    // variant in pattern position; the owner-qualified variant still
+    // dispatches on the variant index.
+    let left_body = emitted_fn_body(&out, "uint32_t left(Left l) {");
+    assert!(left_body.contains("if (true) { auto&& v = "), "{left_body}");
+    assert!(!left_body.contains("variant_index"), "{left_body}");
+    let side_body = emitted_fn_body(&out, "uint32_t side(Side s) {");
+    assert!(
+        side_body.contains("rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0"),
+        "{side_body}"
+    );
+}
+
+#[test]
+fn test_a_rest_pattern_in_a_data_enum_variant_keeps_the_tail_slots() {
+    // (ag) `E::V(.., c)` took the std::visit fallback with no overload for
+    // the variant — the arm was silently dropped (runtime "unreachable").
+    // The recorded field count places the elements after `..` at the tail.
+    let out = transpile_str(
+        r#"
+        enum E { V(u32, u32, u32), W }
+        fn tail(e: E) -> u32 { match e { E::V(.., c) => c, E::W => 0 } }
+        fn ends(e: E) -> u32 { match e { E::V(a, .., c) => a * 10 + c, E::W => 0 } }
+        "#,
+    );
+    let tail_body = emitted_fn_body(&out, "uint32_t tail(E e) {");
+    assert!(
+        tail_body.contains("auto&& c = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._2); return c;"),
+        "{tail_body}"
+    );
+    let ends_body = emitted_fn_body(&out, "uint32_t ends(E e) {");
+    assert!(ends_body.contains("(_m))._0);"), "{ends_body}");
+    assert!(ends_body.contains("(_m))._2);"), "{ends_body}");
+    assert!(!out.contains("unresolved bare-glob variant"), "{out}");
+}
+
+#[test]
+fn test_a_unit_struct_pattern_is_irrefutable() {
+    // (ag) A unit struct pattern compared the scrutinee against the TYPE
+    // (`_m == Z`, `== ::m::U`, `case ::m::U:`). One value exists, so the
+    // pattern contributes no condition.
+    let out = transpile_str(
+        r#"
+        mod m { pub struct U; }
+        struct Z;
+        enum E { C(m::U), D(Z) }
+        fn unit_q(u: m::U) -> u32 { match u { m::U => 1 } }
+        fn unit_bare(z: Z) -> u32 { match z { Z => 2 } }
+        fn unit_in_tuple(t: (Z, u32)) -> u32 { match t { (Z, n) => n } }
+        fn unit_in_enum(e: E) -> u32 { match e { E::C(m::U) => 3, E::D(Z) => 4 } }
+        fn unit_stmt(u: m::U) -> u32 { let mut s = 0; match u { m::U => { s += 1; } } s }
+        "#,
+    );
+    assert!(!out.contains(" == ::m::U"), "{out}");
+    assert!(!out.contains(" == Z)"), "{out}");
+    assert!(!out.contains("case ::m::U"), "{out}");
+    assert!(!out.contains("switch (u)"), "{out}");
+    let in_tuple_body = emitted_fn_body(&out, "uint32_t unit_in_tuple(std::tuple<Z, uint32_t> t) {");
+    assert!(in_tuple_body.contains("if (true) { auto&& n = "), "{in_tuple_body}");
+    let in_enum_body = emitted_fn_body(&out, "uint32_t unit_in_enum(E e) {");
+    assert!(
+        in_enum_body.contains("(rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1 && true)"),
+        "{in_enum_body}"
+    );
+    let stmt_body = emitted_fn_body(&out, "uint32_t unit_stmt(::m::U u) {");
+    assert!(stmt_body.contains("bool _m_matched = false;"), "{stmt_body}");
+    // Module mode takes the lambda-form switch emitter, whose all-caps
+    // heuristic read a single-letter unit struct `Z` as a constant.
+    let out = transpile_str_module(
+        r#"
+        pub struct Z;
+        pub struct Unit;
+        pub fn z(z: Z) -> u32 { match z { Z => 2 } }
+        pub fn unit(u: Unit) -> u32 { match u { Unit => 3 } }
+        "#,
+        "probe",
+    );
+    assert!(!out.contains(" == Z)"), "{out}");
+    assert!(!out.contains("const auto& Unit = _m;"), "{out}");
+    assert!(out.contains("{ return static_cast<uint32_t>(2);  }"), "{out}");
+    assert!(out.contains("{ return static_cast<uint32_t>(3);  }"), "{out}");
+}

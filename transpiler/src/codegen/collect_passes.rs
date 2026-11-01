@@ -12315,7 +12315,16 @@ impl CodeGen {
                 }
 
                 let is_data_enum_variant = self
-                    .path_is_known_data_enum_variant_with_ctx(&tuple_struct_pat.path, variant_ctx);
+                    .path_is_known_data_enum_variant_with_ctx(&tuple_struct_pat.path, variant_ctx)
+                    && !self.pattern_path_is_shadowing_crate_ctor_struct(
+                        &tuple_struct_pat.path,
+                        variant_ctx,
+                    );
+                // A tuple struct this crate declares: the head is irrefutable
+                // and the fields sit at `._N` on the scrutinee itself.
+                let ctor_struct_arity = (!is_data_enum_variant)
+                    .then(|| self.crate_ctor_struct_arity_for_pattern_path(&tuple_struct_pat.path))
+                    .flatten();
                 let scrutinee_base = format!("rusty::detail::deref_if_pointer({})", source_expr);
                 let mut conditions = Vec::new();
                 let payload_base_expr = if is_data_enum_variant {
@@ -12329,6 +12338,8 @@ impl CodeGen {
                         variant_ctx,
                         &scrutinee_base,
                     )
+                } else if ctor_struct_arity.is_some() {
+                    scrutinee_base
                 } else {
                     // Bare-glob unresolved variant (common pattern when a Rust
                     // enum is glob-imported across files via `use Foo::*;` and
@@ -12353,13 +12364,40 @@ impl CodeGen {
                     }
                     scrutinee_base
                 };
+                // `..` keeps the elements after it at the tail of the field
+                // count (a tuple struct's arity, a variant's recorded field
+                // count); an unknown count keeps the historical rejection.
+                let field_count = if is_data_enum_variant {
+                    self.data_enum_variant_field_count_for_path(&tuple_struct_pat.path, variant_ctx)
+                } else {
+                    ctor_struct_arity
+                };
+                let rest_pos = tuple_struct_pat.elems.iter().position(|elem| {
+                    matches!(self.peel_pat_type_ref_paren(elem), syn::Pat::Rest(_))
+                });
+                if rest_pos.is_some() && field_count.is_none() {
+                    return None;
+                }
                 for (idx, elem_pat) in tuple_struct_pat.elems.iter().enumerate() {
-                    let field_expr = self.data_enum_variant_tuple_field_binding_expr(
-                        &tuple_struct_pat.path,
-                        variant_ctx,
-                        &payload_base_expr,
-                        idx,
-                    );
+                    if rest_pos == Some(idx) {
+                        continue;
+                    }
+                    let slot = match (rest_pos, field_count) {
+                        (Some(rest), Some(count)) if idx > rest => {
+                            count.checked_sub(tuple_struct_pat.elems.len() - idx)?
+                        }
+                        _ => idx,
+                    };
+                    let field_expr = if ctor_struct_arity.is_some() {
+                        format!("{}._{}", payload_base_expr, slot)
+                    } else {
+                        self.data_enum_variant_tuple_field_binding_expr(
+                            &tuple_struct_pat.path,
+                            variant_ctx,
+                            &payload_base_expr,
+                            slot,
+                        )
+                    };
                     let field_condition = self.collect_runtime_match_binding_stmts_and_condition(
                         elem_pat,
                         &field_expr,
@@ -12761,7 +12799,16 @@ impl CodeGen {
                 }
 
                 let is_data_enum_variant = self
-                    .path_is_known_data_enum_variant_with_ctx(&tuple_struct_pat.path, variant_ctx);
+                    .path_is_known_data_enum_variant_with_ctx(&tuple_struct_pat.path, variant_ctx)
+                    && !self.pattern_path_is_shadowing_crate_ctor_struct(
+                        &tuple_struct_pat.path,
+                        variant_ctx,
+                    );
+                // A tuple struct this crate declares: the head is irrefutable
+                // and the fields sit at `._N` on the scrutinee itself.
+                let ctor_struct_arity = (!is_data_enum_variant)
+                    .then(|| self.crate_ctor_struct_arity_for_pattern_path(&tuple_struct_pat.path))
+                    .flatten();
                 let scrutinee_base = format!("rusty::detail::deref_if_pointer({})", source_expr);
                 let mut conditions = Vec::new();
                 let payload_base_expr = if is_data_enum_variant {
@@ -12775,6 +12822,8 @@ impl CodeGen {
                         variant_ctx,
                         &scrutinee_base,
                     )
+                } else if ctor_struct_arity.is_some() {
+                    scrutinee_base
                 } else {
                     // Bare-glob unresolved variant (common pattern when a Rust
                     // enum is glob-imported across files via `use Foo::*;` and
@@ -12799,13 +12848,40 @@ impl CodeGen {
                     }
                     scrutinee_base
                 };
+                // `..` keeps the elements after it at the tail of the field
+                // count (a tuple struct's arity, a variant's recorded field
+                // count); an unknown count keeps the historical rejection.
+                let field_count = if is_data_enum_variant {
+                    self.data_enum_variant_field_count_for_path(&tuple_struct_pat.path, variant_ctx)
+                } else {
+                    ctor_struct_arity
+                };
+                let rest_pos = tuple_struct_pat.elems.iter().position(|elem| {
+                    matches!(self.peel_pat_type_ref_paren(elem), syn::Pat::Rest(_))
+                });
+                if rest_pos.is_some() && field_count.is_none() {
+                    return None;
+                }
                 for (idx, elem_pat) in tuple_struct_pat.elems.iter().enumerate() {
-                    let field_expr = self.data_enum_variant_tuple_field_binding_expr(
-                        &tuple_struct_pat.path,
-                        variant_ctx,
-                        &payload_base_expr,
-                        idx,
-                    );
+                    if rest_pos == Some(idx) {
+                        continue;
+                    }
+                    let slot = match (rest_pos, field_count) {
+                        (Some(rest), Some(count)) if idx > rest => {
+                            count.checked_sub(tuple_struct_pat.elems.len() - idx)?
+                        }
+                        _ => idx,
+                    };
+                    let field_expr = if ctor_struct_arity.is_some() {
+                        format!("{}._{}", payload_base_expr, slot)
+                    } else {
+                        self.data_enum_variant_tuple_field_binding_expr(
+                            &tuple_struct_pat.path,
+                            variant_ctx,
+                            &payload_base_expr,
+                            slot,
+                        )
+                    };
                     let field_condition = self
                         .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                             elem_pat,
