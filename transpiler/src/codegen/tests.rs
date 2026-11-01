@@ -53552,9 +53552,20 @@ fn test_a_tuple_struct_pattern_in_a_match_arm_is_a_struct_destructure() {
         fn stmt(p: P) -> u32 { let mut s = 0; match p { P(a, b) => { s += a * b; } } s }
         fn left(l: Left) -> u32 { match l { Left(v) => v } }
         fn side(s: Side) -> u32 { match s { Side::Left(v) => v, Side::Right(v) => v + 1 } }
+        impl P {
+            fn sum(self) -> u32 { match self { Self(a, b) => a + b } }
+            fn first(&self) -> u32 { match self { &Self(a, _) => a } }
+            fn tail(self) -> u32 { match self { Self(.., b) => b } }
+            fn stmt_self(self) -> u32 { let mut s = 0; match self { Self(a, _) => { s += a; } } s }
+        }
         "#,
     );
     assert!(!out.contains("unresolved bare-glob variant"), "{out}");
+    // `Self(..)` inside the impl names the enclosing tuple struct.
+    assert!(!out.contains("std::visit(overloaded {\n"), "{out}");
+    assert!(!out.contains("Self&"), "{out}");
+    assert!(out.contains("uint32_t P::stmt_self() {"), "{out}");
+    assert_eq!(out.matches("bool _m_matched = false;").count(), 2, "{out}");
     // The head is irrefutable; the fields are `._N` on the scrutinee.
     assert!(
         out.contains("if (true) { auto&& a = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m)._0); auto&& b = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m)._1);"),
@@ -53637,10 +53648,12 @@ fn test_a_unit_struct_pattern_is_irrefutable() {
         fn unit_in_tuple(t: (Z, u32)) -> u32 { match t { (Z, n) => n } }
         fn unit_in_enum(e: E) -> u32 { match e { E::C(m::U) => 3, E::D(Z) => 4 } }
         fn unit_stmt(u: m::U) -> u32 { let mut s = 0; match u { m::U => { s += 1; } } s }
+        impl Z { fn one(self) -> u32 { match self { Self => 1 } } }
         "#,
     );
     assert!(!out.contains(" == ::m::U"), "{out}");
     assert!(!out.contains(" == Z)"), "{out}");
+    assert!(!out.contains(" == Self"), "{out}");
     assert!(!out.contains("case ::m::U"), "{out}");
     assert!(!out.contains("switch (u)"), "{out}");
     let in_tuple_body = emitted_fn_body(&out, "uint32_t unit_in_tuple(std::tuple<Z, uint32_t> t) {");

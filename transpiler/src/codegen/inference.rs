@@ -606,6 +606,15 @@ impl CodeGen {
                 .get(name)
                 .map(|fields| fields.len())
         };
+        // `Self(..)` / `Self` inside an impl names the enclosing type.
+        if owners.is_empty() && last == "Self" {
+            let current = self.current_struct.as_deref()?;
+            let tail = current.rsplit("::").next().unwrap_or(current);
+            return lookup(current)
+                .or_else(|| lookup(&self.scoped_type_key(tail)))
+                .or_else(|| lookup(tail))
+                .or_else(|| cross_file(tail));
+        }
         if owners.is_empty() {
             return lookup(&self.scoped_type_key(last))
                 .or_else(|| lookup(last))
