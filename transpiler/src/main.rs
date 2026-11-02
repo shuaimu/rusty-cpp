@@ -9,6 +9,7 @@ use std::process::{self, Output};
 mod alias_impl_inline;
 mod primitive_qself;
 mod let_tuple_uninit;
+mod fn_param_patterns;
 mod cmake;
 mod codegen;
 mod cpp_abi;

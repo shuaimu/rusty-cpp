@@ -53681,3 +53681,105 @@ fn test_a_unit_struct_pattern_is_irrefutable() {
     assert!(out.contains("{ return static_cast<uint32_t>(2);  }"), "{out}");
     assert!(out.contains("{ return static_cast<uint32_t>(3);  }"), "{out}");
 }
+
+#[test]
+fn test_a_function_parameter_pattern_is_destructured_in_the_body() {
+    // (ah) A destructuring pattern in a free function's parameter emitted a
+    // bare `_` parameter and a body naming its bindings undeclared; two `_`
+    // parameters in one signature were a C++ parameter redefinition. The
+    // fn_param_patterns.rs pre-pass makes the parameter `_argN` and lets the
+    // let lowering destructure it; methods keep their own route.
+    let out = transpile_str(
+        r#"
+        pub struct P(pub u32, pub u32);
+        pub struct S { pub x: u32, pub y: u32 }
+        pub struct W(pub P);
+        pub struct Q(pub u32, pub u32, pub u32);
+        pub fn tuple_struct(P(a, b): P) -> u32 { a * b }
+        pub fn plain_tuple((a, b): (u32, u32)) -> u32 { a + b }
+        pub fn ref_tuple(&(a, b): &(u32, u32)) -> u32 { a - b }
+        pub fn named_struct(S { x, y }: S) -> u32 { x + y }
+        pub fn nested(W(P(a, b)): W) -> u32 { a + b }
+        pub fn mut_binding(P(mut a, b): P) -> u32 { a += b; a }
+        pub fn by_ref_param(P(a, b): &P) -> u32 { *a + *b }
+        pub fn wilds(_: u32, _: u32) -> u32 { 1 }
+        pub fn mixed(n: u32, _: u32, P(a, _): P) -> u32 { n + a }
+        pub fn rest_param(Q(.., c): Q) -> u32 { c }
+        pub fn outer() -> u32 { fn inner(P(a, b): P) -> u32 { a + b } inner(P(1, 2)) }
+        impl P { pub fn add(&self, P(a, b): P) -> u32 { self.0 + a + self.1 + b } }
+        "#,
+    );
+    assert!(!out.contains("// TODO: complex pattern binding"), "{out}");
+    assert!(!out.contains("(P _)"), "{out}");
+    assert!(out.contains("uint32_t tuple_struct(P _arg0);"), "{out}");
+    let body = emitted_fn_body(&out, "uint32_t tuple_struct(P _arg0) {");
+    assert!(body.contains(" = _arg0;"), "{body}");
+    assert!(body.contains("auto&& a = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_let_pat"), "{body}");
+    assert!(body.contains(")._0);"), "{body}");
+    assert!(body.contains(")._1);"), "{body}");
+    let body = emitted_fn_body(&out, "uint32_t plain_tuple(std::tuple<uint32_t, uint32_t> _arg0) {");
+    assert!(body.contains("[a, b]") || body.contains("std::get<0>("), "{body}");
+    let body = emitted_fn_body(&out, "uint32_t ref_tuple(const std::tuple<uint32_t, uint32_t>& _arg0) {");
+    assert!(body.contains("std::get<0>(") && body.contains("std::get<1>("), "{body}");
+    let body = emitted_fn_body(&out, "uint32_t named_struct(S _arg0) {");
+    assert!(body.contains(".x);") && body.contains(".y);"), "{body}");
+    let body = emitted_fn_body(&out, "uint32_t nested(W _arg0) {");
+    assert!(body.contains(")._0)._0);") && body.contains(")._0)._1);"), "{body}");
+    let body = emitted_fn_body(&out, "uint32_t mut_binding(P _arg0) {");
+    assert!(body.contains("auto a = std::move("), "{body}");
+    let body = emitted_fn_body(&out, "uint32_t by_ref_param(const P& _arg0) {");
+    assert!(body.contains(")._0);") && body.contains(")._1);"), "{body}");
+    assert!(out.contains("uint32_t wilds(uint32_t _arg0, uint32_t _arg1);"), "{out}");
+    assert!(out.contains("uint32_t wilds(uint32_t _arg0, uint32_t _arg1) {"), "{out}");
+    assert!(out.contains("uint32_t mixed(uint32_t n, uint32_t _arg1, P _arg2) {"), "{out}");
+    let body = emitted_fn_body(&out, "uint32_t rest_param(Q _arg0) {");
+    assert!(body.contains(")._2);"), "{body}");
+    let body = emitted_fn_body(&out, "uint32_t outer() {");
+    assert!(body.contains("_arg0") && body.contains("auto&& a = "), "{body}");
+    // The member route is untouched: a direct binding off `_arg1`, no let temp.
+    let body = emitted_fn_body(&out, "uint32_t P::add(P _arg1) const {");
+    assert!(
+        body.contains("auto&& a = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_arg1)._0);"),
+        "{body}"
+    );
+    assert!(!body.contains("_let_pat"), "{body}");
+
+    let module = transpile_str_module(
+        r#"
+        pub struct P(pub u32, pub u32);
+        pub fn tuple_struct(P(a, b): P) -> u32 { a * b }
+        pub fn wilds(_: u32, _: u32) -> u32 { 1 }
+        "#,
+        "probe",
+    );
+    assert!(module.contains("tuple_struct(P _arg0)"), "{module}");
+    assert!(module.contains("wilds(uint32_t _arg0, uint32_t _arg1)"), "{module}");
+    assert!(
+        module.contains("auto&& a = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_let_pat"),
+        "{module}"
+    );
+}
+
+#[test]
+fn test_a_rest_pattern_in_a_tuple_struct_let_keeps_the_tail_slots() {
+    // (ah) `let Q(.., c) = q;` took the complex-pattern marker; the elements
+    // after `..` now map to the tail of the struct's field count.
+    let out = transpile_str(
+        r#"
+        pub struct Q(pub u32, pub u32, pub u32);
+        pub fn lead(q: Q) -> u32 { let Q(a, ..) = q; a }
+        pub fn tail(q: Q) -> u32 { let Q(.., c) = q; c }
+        pub fn both(q: Q) -> u32 { let Q(a, .., c) = q; a + c }
+        impl Q { pub fn last(self) -> u32 { let Self(.., c) = self; c } }
+        "#,
+    );
+    assert!(!out.contains("// TODO: complex pattern binding"), "{out}");
+    let body = emitted_fn_body(&out, "uint32_t lead(Q q) {");
+    assert!(body.contains(")._0);") && !body.contains("._1") && !body.contains("._2"), "{body}");
+    let body = emitted_fn_body(&out, "uint32_t tail(Q q) {");
+    assert!(body.contains(")._2);") && !body.contains("._0") && !body.contains("._1"), "{body}");
+    let body = emitted_fn_body(&out, "uint32_t both(Q q) {");
+    assert!(body.contains(")._0);") && body.contains(")._2);") && !body.contains("._1"), "{body}");
+    let body = emitted_fn_body(&out, "uint32_t Q::last() const {");
+    assert!(body.contains(")._2);"), "{body}");
+}

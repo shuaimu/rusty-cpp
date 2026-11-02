@@ -8390,9 +8390,12 @@ impl CodeGen {
             // path every route lowers (primitive_qself.rs).
             // `let (a, b);` → one deferred-init `let` per binding
             // (let_tuple_uninit.rs).
+            // `fn f(P(a, b): P)` → `fn f(_arg0: P) { let P(a, b) = _arg0; .. }`
+            // (fn_param_patterns.rs).
             let changed = crate::alias_impl_inline::inline_alias_impl_headers(&mut candidate, &aliases, &nominal)
                 + crate::primitive_qself::rewrite_primitive_qself_paths(&mut candidate)
-                + crate::let_tuple_uninit::split_uninit_tuple_lets(&mut candidate);
+                + crate::let_tuple_uninit::split_uninit_tuple_lets(&mut candidate)
+                + crate::fn_param_patterns::rewrite_fn_param_patterns(&mut candidate);
             if changed > 0 {
                 alias_inlined_file = candidate;
                 &alias_inlined_file

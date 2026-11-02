@@ -13264,8 +13264,28 @@ impl CodeGen {
                     }
                 }
                 let base_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                // `P(a, ..)` / `P(.., c)` / `P(a, .., c)`: the elements after
+                // the rest map to the TAIL of the struct's field count (the
+                // crate tuple-struct registries, the cross-file tables,
+                // `Self`); trailing bindings on an unknown count keep the
+                // marker.
+                let rest_pos = tuple_struct_pat
+                    .elems
+                    .iter()
+                    .position(|elem| matches!(self.peel_pat_type_ref_paren(elem), syn::Pat::Rest(_)));
+                let field_count = rest_pos
+                    .and_then(|_| self.crate_ctor_struct_arity_for_pattern_path(&tuple_struct_pat.path));
+                let elem_count = tuple_struct_pat.elems.len();
                 for (i, elem) in tuple_struct_pat.elems.iter().enumerate() {
-                    let field_expr = format!("{}._{}", base_expr, i);
+                    let slot = match rest_pos {
+                        Some(pos) if i == pos => continue,
+                        Some(pos) if i > pos => match field_count.and_then(|count| count.checked_sub(elem_count - i)) {
+                            Some(slot) => slot,
+                            None => return false,
+                        },
+                        _ => i,
+                    };
+                    let field_expr = format!("{}._{}", base_expr, slot);
                     if !self.collect_pattern_binding_stmts_with_cpp_name_map(
                         elem,
                         &field_expr,
