@@ -3130,6 +3130,16 @@ a rest pattern in a tuple-struct `let` keeps the tail slots — the (ag) FOUND i
   regular factory emission (a strict improvement over an unbound body; not observed in the
   matrix). (3) `(a, .., z)` inside a plain tuple pattern still takes the visit route in match
   position ((ag) item 4); in let position the `_nested_tuple` route handles a leading rest only.
+  (4) A TRAIT method with a default body and a destructuring parameter (`trait T { fn t(&self,
+  (a, b): (u32, u32)) -> u32 { a + b } }`, probe `traitdef.rs`): the interface-traits emitter
+  inlines the default body on the trait class as `virtual uint32_t t(std::tuple<…> _) const {
+  return …(a) + …(b); }` — `a`/`b` undeclared (emit_items.rs ~7465 names the parameter `_` and
+  `maybe_inline_trait_default_method_body` emits the body with no binding prelude), while the
+  UFCS lane beside it already spells `_arg1`; method-side, out of this lane's scope. LIMITS: no
+  destructuring free-function parameter was COMPILED in module or crate mode (the matrix has
+  none; the crate fixture is text-only, as (ag)'s is) — the body is byte-identical to the
+  single-file form and the only module-mode delta is the qualified parameter type, which the
+  fixture pins.
 
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
