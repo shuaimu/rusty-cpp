@@ -3051,9 +3051,9 @@ pattern is irrefutable; `..` keeps the tail slots — the (af) FOUND item, close
   scoped key, bare, then cross-file); pinned (`Self(a, b)`, `&Self(a, _)` on `&self`,
   `Self(.., b)`, the statement form, a unit struct's `Self`), probe `i.rs` runs green; the
   member head is emitted `uint32_t P::stmt_self() {` (out of line), a pin-text trap.
-  FOUND, NOT FOLDED: (1) FUNCTION-PARAMETER patterns — `fn f(P(a, b): P)`, `fn f((a, b): (u32,
-  u32))`, `fn f(S { a, b }: S)` — emit `P _` and an unbound body ("use of undeclared identifier
-  'a'"); closures already body-destructure (`_destruct_param{i}` via
+  FOUND, NOT FOLDED: (1) FUNCTION-PARAMETER patterns — closed by (ah) below — `fn f(P(a, b): P)`,
+  `fn f((a, b): (u32, u32))`, `fn f(S { a, b }: S)` — emit `P _` and an unbound body ("use of
+  undeclared identifier 'a'"); closures already body-destructure (`_destruct_param{i}` via
   `closure_param_needs_body_destructure`), free functions and methods go through `map_fn_params`
   (its declaration and definition callers must agree) — a separate class; the clean route is an
   AST pre-pass beside `let_tuple_uninit.rs` rewriting the param to `_param{i}` plus
@@ -3066,6 +3066,70 @@ pattern is irrefutable; `..` keeps the tail slots — the (af) FOUND item, close
   — `..` inside a plain tuple pattern (`(a, .., z)`, arity unknown) still takes that route.
   (5) Module mode softens a unit-struct parameter to `auto u` (`local_unit(auto u)`), a
   pre-existing param rule, compiles.
+
+*2026-11-02 — (ah) a destructuring pattern in a free function's parameter is a let destructure;
+a rest pattern in a tuple-struct `let` keeps the tail slots — the (ag) FOUND item (1), closed.*
+  SYMPTOMS (probes in `st_work/probe_fpp`, clang 22 + run, old binary `st_work/rct_before_ah`):
+  `fn tuple_struct(P(a, b): P) -> u32 { a * b }` emitted `uint32_t tuple_struct(P _)` — the
+  declaration and the definition — with the body reading `a` and `b` ("use of undeclared
+  identifier"); the same for `(a, b): (u32, u32)`, `&(a, b): &(u32, u32)`, `S { x, y }: S`,
+  nested `W(P(a, b)): W`, `P(mut a, b)`, `P(a, b): &P`, a nested `fn inner(P(a, b): P)` inside a
+  body (emitted as a lambda), and two patterns in one signature. `fn wilds(_: u32, _: u32)` emitted
+  `uint32_t wilds(uint32_t _, uint32_t _)` — "redefinition of parameter '_'" (clang 22 in C++23
+  mode; `_` is a placeholder name only from C++26). Methods were already right:
+  `uint32_t P::add(P _arg1) const { auto&& a = …(_arg1)._0; … }` (emit_items.rs ~11766 names
+  the parameter `_argN` and emits a binding prelude; the UFCS lane at mod.rs ~26689 likewise);
+  closures body-destructure (`_destruct_param{i}`). `let Q(.., c) = q;` / `let Q(a, ..) = q;`
+  emitted `// TODO: complex pattern binding` and bound nothing.
+  MECHANISM: every free-function parameter emitter names a parameter from a `Pat::Ident`
+  (emit_items.rs ~7465 and the free-fn `map_fn_params` callers, the nested-fn lambda at mod.rs
+  ~20188: `_ => "_"`); any other pattern had no route at all, and `Pat::Wild` had the same literal
+  spelling for every occurrence. The let lowering's tuple-struct arm
+  (`collect_pattern_binding_stmts_with_cpp_name_map`, collect_passes.rs ~13265) enumerated the
+  elements as `._{i}` and recursed into `Pat::Rest` → `false` → the marker.
+  FIX (ab1762df): `fn_param_patterns.rs`, an AST pre-pass in `emit_file`'s candidate chain beside
+  `let_tuple_uninit.rs` (so every collector and emitter downstream sees a plain identifier): for
+  every `ItemFn` (nested ones included — syn's `visit_item_fn_mut` reaches a fn inside any body),
+  each `FnArg::Typed` whose pattern is not a `Pat::Ident` becomes the positional placeholder
+  `_argN` the member emitters already spell (`N` = the input's position in `sig.inputs`, so
+  declaration, definition and every lane agree), and `let <pattern> = _argN;` is prepended to the
+  body — Rust's own desugaring; the let lowering destructures every shape (tuple struct `._N`,
+  tuple `auto&& [a, b]` / `std::get<N>`, struct `.x`, reference, nested, `mut` → `auto a =
+  std::move(…)`, `_`, through a reference). A `Pat::Wild` parameter is renamed with no `let`.
+  `Pat::Ident` with `mut`/`ref`/`@` is left alone (`x @ P(a, b)` already works through the let
+  route: `const auto x = std::move(p); auto&& _let_pat = x; …`). Free functions ONLY: impl and
+  trait methods keep the member route (its direct `…(_arg1)._0` prelude is pinned by
+  `test_leaf10541_method_tuple_parameter_pattern_emits_destructure_prelude`; rewriting them would
+  insert the `_let_pat` indirection for no gain and spray the replay). The let tuple-struct arm
+  now mirrors the (ag) collectors: `rest_pos`, slots after it = `field_count - (elems.len() - i)`
+  with `field_count` = `crate_ctor_struct_arity_for_pattern_path` (registries, cross-file tables,
+  `Self` through the enclosing impl); trailing bindings on an unknown count keep the marker.
+  GUARDS: `test_a_function_parameter_pattern_is_destructured_in_the_body` (every shape above in
+  single-file mode — declaration `uint32_t tuple_struct(P _arg0);` and definition, `wilds(uint32_t
+  _arg0, uint32_t _arg1)`, `mixed(uint32_t n, uint32_t _arg1, P _arg2)`, `rest_param(Q(.., c): Q)`
+  → `._2`, the nested fn, the method route untouched — plus module mode),
+  `test_a_rest_pattern_in_a_tuple_struct_let_keeps_the_tail_slots` (`Q(a, ..)`, `Q(.., c)`,
+  `Q(a, .., c)`, `Self(.., c)` in a method — head `uint32_t Q::last() const {`, a pin-text trap),
+  three token-stream tests in the pass file (placeholder + let; wild rename; nested fns rewritten,
+  methods and closures not), `tests/crate_tuple_struct_pattern.rs` (`--crate`: root `P(a, b): P`
+  through `use shapes::P`, the sibling's own `P(a, _): P, _: u32, _: u32`, another sibling's
+  `crate::shapes::P(a, b)` and `P(.., b): P` whose tail slot needs the cross-file arity; no `P _`,
+  no marker in any TU). Runtime: probes `a.rs` (14 shapes incl. a trait impl, `Self(a, b)` in a
+  static method, a closure), `edge.rs`, `rest.rs` compile and run green post-fix (pre-fix: `a`
+  undeclared ×20, the `_` redefinition). chain95: unit 2712 ok (incl. the 3 pass tests and the 2 pins), crate_graph 7/7, the extended fixture 1/1 (after two pin-text fixes), suite = the 2 standing reds + the harness flake (harness95 7/7 serially).
+  MATRIX REPLAY (old vs new on the 55 `expanded.rs` inputs, `st_work/replay_fpp`): byte-identical
+  except `_` → `_arg0` on three nested free functions with a wild parameter (either's `is_str`,
+  itertools test_core's `is_esi`/`is_dei_esi`, all lambdas) and the known `is_send` conjunct-order
+  nondeterminism; no method body changed; 10 inputs fail in both binaries (pre-existing). gate36 (main @ ab1762df): BASELINE — unit = the standing missing-rustc red only, matrix total=28 pass=25 fail=0 known-fail=3.
+  FOUND, NOT FOLDED: (1) a TRAIT method with two `_` parameters (`fn t(&self, _: u32, _: u32)`,
+  default body) emits `virtual uint32_t t(uint32_t _, uint32_t _)` on the trait class and its dyn
+  adapters (`T_::t(value_, _, _)`) — the same redefinition, method-side (interface-traits emitter,
+  emit_items.rs ~7465, and the adapter's forwarding list built elsewhere); the inherent-impl
+  member route already spells `_argN`. (2) A `#[cpp_ctor]` free-standing factory whose body is a
+  single struct literal and whose parameter destructures now has a `let` first, so it takes the
+  regular factory emission (a strict improvement over an unbound body; not observed in the
+  matrix). (3) `(a, .., z)` inside a plain tuple pattern still takes the visit route in match
+  position ((ag) item 4); in let position the `_nested_tuple` route handles a leading rest only.
 
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
