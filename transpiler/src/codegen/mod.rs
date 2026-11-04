@@ -150,6 +150,16 @@ impl AssocMethodProjection {
     }
 }
 
+/// How `maybe_inline_trait_default_method_body` found a trait default
+/// inlinable on the interface class.
+pub(crate) enum TraitDefaultInline {
+    /// A lone tail expression: the one-line `{ return <expr>; }` slot.
+    Tail(String),
+    /// `let <pattern> = <parameter>;` statements ahead of the tail (the
+    /// parameter pattern pre-pass): the body is emitted as a block.
+    Block,
+}
+
 /// One vtable slot of a trait interface class (book §3.2.10): the C++
 /// signature the interface declared it with. The trait's three generic
 /// forwarders override every slot — their own and every base trait's — with a
@@ -21512,28 +21522,59 @@ impl CodeGen {
 
 
 
-    /// Return the C++ expression text for a trait default-method body if it
-    /// is safe to emit inline on the interface class (non-pure virtual).
-    /// "Safe" here means: the body is a single trailing expression and every
-    /// `self.<m>(...)` / `Self::<m>(...)` call inside it references a method
-    /// declared on the *same* trait — which guarantees the call dispatches
-    /// virtually on the interface class without depending on foreign or
-    /// skipped supertrait surfaces. Returns `None` for any other shape; the
-    /// caller falls back to emitting `= 0;` (defer to Adapter).
+    /// Return how a trait default-method body is emitted inline on the
+    /// interface class (non-pure virtual), if it is safe to. "Safe" here
+    /// means: the body is a single trailing expression — optionally behind
+    /// `let <pattern> = <parameter>;` statements, the parameter pattern
+    /// pre-pass's spelling of a destructuring parameter
+    /// (fn_param_patterns.rs) — and every `self.<m>(...)` / `Self::<m>(...)`
+    /// call inside it references a method declared on the *same* trait —
+    /// which guarantees the call dispatches virtually on the interface class
+    /// without depending on foreign or skipped supertrait surfaces. Returns
+    /// `None` for any other shape; the caller falls back to emitting `= 0;`
+    /// (defer to Adapter).
     fn maybe_inline_trait_default_method_body(
         &self,
         body: &syn::Block,
         t: &syn::ItemTrait,
-        current_method: &syn::Ident,
-    ) -> Option<String> {
-        // Only single-expression bodies. No `let` statements, no inner
-        // blocks, no multi-statement sequences.
-        if body.stmts.len() != 1 {
-            return None;
-        }
-        let syn::Stmt::Expr(tail_expr, None) = &body.stmts[0] else {
+        sig: &syn::Signature,
+    ) -> Option<TraitDefaultInline> {
+        let current_method = &sig.ident;
+        // The tail expression, behind lets that only re-bind a parameter:
+        // no other statement, no inner block, no multi-statement sequence.
+        let (lets, tail) = body.stmts.split_at(body.stmts.len().checked_sub(1)?);
+        let [syn::Stmt::Expr(tail_expr, None)] = tail else {
             return None;
         };
+        let param_names: HashSet<String> = sig
+            .inputs
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::FnArg::Typed(pt) => match pt.pat.as_ref() {
+                    syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+                    _ => None,
+                },
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect();
+        let rebinds_a_parameter = |stmt: &syn::Stmt| {
+            let syn::Stmt::Local(local) = stmt else {
+                return false;
+            };
+            let Some(init) = local.init.as_ref() else {
+                return false;
+            };
+            init.diverge.is_none()
+                && matches!(
+                    init.expr.as_ref(),
+                    syn::Expr::Path(path)
+                        if path.qself.is_none()
+                            && path.path.get_ident().is_some_and(|id| param_names.contains(&id.to_string()))
+                )
+        };
+        if !lets.iter().all(rebinds_a_parameter) {
+            return None;
+        }
 
         // Collect the set of method names declared on this same trait.
         let mut trait_method_names: HashSet<String> = t
@@ -21559,7 +21600,11 @@ impl CodeGen {
             return None;
         }
 
-        Some(self.emit_expr_to_string(tail_expr))
+        Some(if lets.is_empty() {
+            TraitDefaultInline::Tail(self.emit_expr_to_string(tail_expr))
+        } else {
+            TraitDefaultInline::Block
+        })
     }
 
     /// Helper for `maybe_inline_trait_default_method_body`. Recursively

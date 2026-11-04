@@ -53783,3 +53783,99 @@ fn test_a_rest_pattern_in_a_tuple_struct_let_keeps_the_tail_slots() {
     let body = emitted_fn_body(&out, "uint32_t Q::last() const {");
     assert!(body.contains(")._2);"), "{body}");
 }
+
+#[test]
+fn test_a_trait_default_method_destructures_its_parameter_pattern() {
+    // (ai) A trait default with a destructuring parameter was copied onto the
+    // interface class as `virtual R t(std::tuple<..> _) const { return a + b; }`
+    // — `a`/`b` undeclared — and two `_` parameters on a trait method were one
+    // C++ name twice (a redefinition under C++23) on the interface class and
+    // its adapters. The parameter pattern pre-pass now covers trait methods
+    // (`_argN` + `let <pattern> = _argN;`), the interface class spells
+    // `_argN`, and a let-prefixed inlinable default is emitted as a block.
+    let src = r#"
+        pub struct P(pub u32, pub u32);
+        pub struct Q(pub u32);
+        pub trait T {
+            fn w(&self, _: u32, _: u32) -> u32;
+            fn t(&self, n: u32, (a, b): (u32, u32)) -> u32 { n + a + b + self.w(0, 0) }
+            fn s(&self, P(a, b): P) -> u32 { a * b }
+            fn m(&self, (a, b): (u32, u32)) -> u32 { let s = a + b; s + 1 }
+        }
+        impl T for P { fn w(&self, _: u32, _: u32) -> u32 { self.0 } }
+        impl T for Q {
+            fn w(&self, x: u32, _: u32) -> u32 { x + self.0 }
+            fn s(&self, P(a, _): P) -> u32 { a + self.0 }
+        }
+        pub fn via_dyn(d: &dyn T) -> u32 { d.t(1, (2, 3)) + d.s(P(2, 5)) + d.w(1, 1) }
+    "#;
+    let out = transpile_str_interface_traits(src);
+    assert!(!out.contains("// TODO: complex pattern binding"), "{out}");
+    // No parameter is a bare `_` any more: not on the interface class, not on
+    // an adapter, not on a lane.
+    assert!(!out.contains("uint32_t _,") && !out.contains("uint32_t _)"), "{out}");
+    assert!(!out.contains("> _)") && !out.contains("(P _)"), "{out}");
+    assert!(!out.contains("std::move(_)"), "{out}");
+    // The required method: positional placeholders, the receiver counted.
+    assert!(out.contains("virtual uint32_t w(uint32_t _arg1, uint32_t _arg2) const = 0;"), "{out}");
+    assert!(out.contains("w(_arg1, _arg2)"), "{out}");
+    // The destructuring defaults: a block slot binding the pattern off the
+    // placeholder, the tail still checked (`self.w(0, 0)` is this trait's).
+    let body = emitted_fn_body(&out, "virtual uint32_t t(uint32_t n, std::tuple<uint32_t, uint32_t> _arg2) const {");
+    assert!(body.contains("auto&& [a, b] = rusty::detail::deref_if_pointer_like(_arg2);"), "{body}");
+    assert!(body.contains("return "), "{body}");
+    let body = emitted_fn_body(&out, "virtual uint32_t s(P _arg1) const {");
+    assert!(body.contains(")._0);") && body.contains(")._1);"), "{body}");
+    // A multi-statement default stays the pure slot on a tier-2 trait.
+    assert!(out.contains("virtual uint32_t m(std::tuple<uint32_t, uint32_t> _arg1) const = 0;"), "{out}");
+    // The adapters forward the placeholders.
+    assert!(out.contains("std::move(_arg2)") && out.contains("std::move(_arg1)"), "{out}");
+    // The UFCS lane carries the same placeholder and binds the pattern.
+    assert!(out.contains("std::tuple<uint32_t, uint32_t> _arg2) {"), "{out}");
+    // The impl-side member route is untouched: a direct binding off `_arg1`.
+    let body = emitted_fn_body(&out, "uint32_t Q::s(P _arg1) const {");
+    assert!(body.contains("(_arg1)._0);") && !body.contains("_let_pat"), "{body}");
+
+    // Tier 1 (the tier-1 default, the CLI's configuration): the full-body
+    // route binds the pattern ahead of a multi-statement default, a
+    // reference pattern too, and the implementor inherits each bound body.
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub struct P(pub u32, pub u32);
+        pub trait T {
+            fn k(&self) -> u32;
+            fn t(&self, (a, b): (u32, u32)) -> u32 { let s = a + b; s * self.k() }
+            fn u(&self, &(a, b): &(u32, u32)) -> u32 { a - b }
+            fn w(&self, _: u32, _: u32) -> u32 { self.k() }
+        }
+        impl T for P { fn k(&self) -> u32 { self.0 } }
+        "#,
+    )
+    .unwrap();
+    let mut cg = test_codegen();
+    cg.set_interface_traits(true);
+    cg.set_tier1_default(true);
+    cg.emit_file(&file, None);
+    let tier1 = cg.into_output();
+    assert!(tier1.contains("struct P : public T {"), "{tier1}");
+    assert!(!tier1.contains("> _)") && !tier1.contains("uint32_t _,") && !tier1.contains("uint32_t _)"), "{tier1}");
+    let body = emitted_fn_body(&tier1, "virtual uint32_t t(std::tuple<uint32_t, uint32_t> _arg1) const {");
+    assert!(body.contains("auto&& [a, b] = rusty::detail::deref_if_pointer_like(_arg1);"), "{body}");
+    assert!(body.contains("const auto s = ") && body.contains("this->k()"), "{body}");
+    let body = emitted_fn_body(&tier1, "virtual uint32_t u(const std::tuple<uint32_t, uint32_t>& _arg1) const {");
+    assert!(body.contains("auto&& _let_pat = _arg1;") && body.contains("std::get<0>(") && body.contains("std::get<1>("), "{body}");
+    assert!(tier1.contains("virtual uint32_t w(uint32_t _arg1, uint32_t _arg2) const { return this->k(); }"), "{tier1}");
+
+    // Module mode: the same spelling.
+    let module = transpile_str_module(
+        r#"
+        pub struct P(pub u32, pub u32);
+        pub trait T { fn t(&self, (a, b): (u32, u32)) -> u32 { a + b } fn w(&self, _: u32, _: u32) -> u32; }
+        impl T for P { fn w(&self, _: u32, _: u32) -> u32 { self.0 } }
+        "#,
+        "probe",
+    );
+    assert!(!module.contains("> _)") && !module.contains("uint32_t _,"), "{module}");
+    assert!(module.contains("std::tuple<uint32_t, uint32_t> _arg1) const {"), "{module}");
+    assert!(module.contains("w(uint32_t _arg1, uint32_t _arg2) const = 0;"), "{module}");
+}

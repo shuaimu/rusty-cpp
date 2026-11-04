@@ -7452,17 +7452,22 @@ impl CodeGen {
             let method_name = escape_cpp_keyword_in_member_position(&method.sig.ident.to_string());
             let return_type = self.map_return_type(&method.sig.output);
 
+            // A non-identifier pattern is spelled `_arg{idx}` (the index
+            // counts the receiver), the convention of the adapters, the UFCS
+            // lane and the parameter pattern pre-pass: two `_` parameters
+            // must not become one C++ name twice (a redefinition in C++23).
             let params: Vec<String> = method
                 .sig
                 .inputs
                 .iter()
-                .filter_map(|arg| match arg {
+                .enumerate()
+                .filter_map(|(idx, arg)| match arg {
                     syn::FnArg::Receiver(_) => None,
                     syn::FnArg::Typed(pt) => {
                         let ty = self.map_type(&pt.ty);
                         let name = match pt.pat.as_ref() {
                             syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
-                            _ => "_".to_string(),
+                            _ => format!("_arg{}", idx),
                         };
                         Some(format!("{} {}", ty, name))
                     }
@@ -7527,37 +7532,37 @@ impl CodeGen {
                 .as_ref()
                 .filter(|_| !consuming)
                 .and_then(|body| {
-                    self.maybe_inline_trait_default_method_body(body, t, &method.sig.ident)
+                    self.maybe_inline_trait_default_method_body(body, t, &method.sig)
                 });
+            // A let-prefixed inlinable default (`let (a, b) = _arg1; a + b`,
+            // a destructuring parameter) is emitted as a block on every
+            // tier: a tier-1 implementor inherits this body.
             // Phase 0: on a tier-1 trait a multi-statement default whose
             // `self.m()` calls all name members of this interface (its own or
             // a supertrait base's) is a non-pure virtual with the FULL body —
             // `this->k()` dispatches to the implementor; a pure slot would
             // leave every tier-1 implementor abstract.
-            let full_body_default: Option<&syn::Block> = if inline_body.is_none()
-                && trait_is_member_dispatch
-                && !consuming
-                && let Some(body) = method.default.as_ref()
-            {
-                let mut members: HashSet<String> = t
-                    .items
-                    .iter()
-                    .filter_map(|item| match item {
-                        syn::TraitItem::Fn(f) => Some(f.sig.ident.to_string()),
-                        _ => None,
+            let full_body_default: Option<&syn::Block> = match &inline_body {
+                Some(TraitDefaultInline::Block) => method.default.as_ref(),
+                Some(TraitDefaultInline::Tail(_)) => None,
+                None if trait_is_member_dispatch && !consuming => {
+                    method.default.as_ref().filter(|body| {
+                        let mut members: HashSet<String> = t
+                            .items
+                            .iter()
+                            .filter_map(|item| match item {
+                                syn::TraitItem::Fn(f) => Some(f.sig.ident.to_string()),
+                                _ => None,
+                            })
+                            .collect();
+                        members.extend(self.interface_supertrait_method_names(t));
+                        let calls = Self::block_self_method_call_names(body);
+                        calls.iter().all(|c| members.contains(c))
                     })
-                    .collect();
-                members.extend(self.interface_supertrait_method_names(t));
-                let calls = Self::block_self_method_call_names(body);
-                if calls.iter().all(|c| members.contains(c)) {
-                    Some(body)
-                } else {
-                    None
                 }
-            } else {
-                None
+                None => None,
             };
-            if let Some(body_expr) = inline_body {
+            if let Some(TraitDefaultInline::Tail(body_expr)) = &inline_body {
                 self.writeln(&format!(
                     "virtual {} {}({}){} {{ return {}; }}",
                     return_type,
