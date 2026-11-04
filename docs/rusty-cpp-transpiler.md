@@ -3121,8 +3121,8 @@ a rest pattern in a tuple-struct `let` keeps the tail slots — the (ag) FOUND i
   except `_` → `_arg0` on three nested free functions with a wild parameter (either's `is_str`,
   itertools test_core's `is_esi`/`is_dei_esi`, all lambdas) and the known `is_send` conjunct-order
   nondeterminism; no method body changed; 10 inputs fail in both binaries (pre-existing). gate36 (main @ ab1762df): BASELINE — unit = the standing missing-rustc red only, matrix total=28 pass=25 fail=0 known-fail=3.
-  FOUND, NOT FOLDED: (1) a TRAIT method with two `_` parameters (`fn t(&self, _: u32, _: u32)`,
-  default body) emits `virtual uint32_t t(uint32_t _, uint32_t _)` on the trait class and its dyn
+  FOUND, NOT FOLDED: (1) — closed by (ai) below — a TRAIT method with two `_` parameters (`fn
+  t(&self, _: u32, _: u32)`, default body) emits `virtual uint32_t t(uint32_t _, uint32_t _)` on the trait class and its dyn
   adapters (`T_::t(value_, _, _)`) — the same redefinition, method-side (interface-traits emitter,
   emit_items.rs ~7465, and the adapter's forwarding list built elsewhere); the inherent-impl
   member route already spells `_argN`. (2) A `#[cpp_ctor]` free-standing factory whose body is a
@@ -3130,8 +3130,8 @@ a rest pattern in a tuple-struct `let` keeps the tail slots — the (ag) FOUND i
   regular factory emission (a strict improvement over an unbound body; not observed in the
   matrix). (3) `(a, .., z)` inside a plain tuple pattern still takes the visit route in match
   position ((ag) item 4); in let position the `_nested_tuple` route handles a leading rest only.
-  (4) A TRAIT method with a default body and a destructuring parameter (`trait T { fn t(&self,
-  (a, b): (u32, u32)) -> u32 { a + b } }`, probe `traitdef.rs`): the interface-traits emitter
+  (4) — closed by (ai) below — A TRAIT method with a default body and a destructuring parameter
+  (`trait T { fn t(&self, (a, b): (u32, u32)) -> u32 { a + b } }`, probe `traitdef.rs`): the interface-traits emitter
   inlines the default body on the trait class as `virtual uint32_t t(std::tuple<…> _) const {
   return …(a) + …(b); }` — `a`/`b` undeclared (emit_items.rs ~7465 names the parameter `_` and
   `maybe_inline_trait_default_method_body` emits the body with no binding prelude), while the
@@ -3140,6 +3140,77 @@ a rest pattern in a tuple-struct `let` keeps the tail slots — the (ag) FOUND i
   none; the crate fixture is text-only, as (ag)'s is) — the body is byte-identical to the
   single-file form and the only module-mode delta is the qualified parameter type, which the
   fixture pins.
+
+*2026-11-04 — (ai) a destructuring pattern in a trait method's parameter is a let destructure in
+every copy of the default body; two `_` parameters on a trait method are `_argN` on the interface
+class and its adapters — the (ah) FOUND items (1) and (4), closed.*
+  SYMPTOMS (probes in `st_work/probe_tdp`, clang 22 + run, expected values checked against rustc;
+  old binary `st_work/rct_before_ai`): `trait T { fn t(&self, (a, b): (u32, u32)) -> u32 { a + b } }
+  impl T for P {}` emitted `virtual uint32_t t(std::tuple<uint32_t, uint32_t> _) const { return
+  …(a) + …(b); }` on the trait class — `a`/`b` undeclared — from the one-line inline route, and the
+  same unbound body from the tier-1 full-body route for a multi-statement default (`let s = a + b;
+  s * self.k()`: `push_param_bindings` binds identifiers only). `fn w(&self, _: u32, _: u32) ->
+  u32;` emitted `virtual uint32_t w(uint32_t _, uint32_t _) const = 0;` and the adapters'
+  `T_::w(value_, _, _)` — the C++23 redefinition. The UFCS lane (mod.rs ~26689) already spelled
+  `_arg1` with a binding prelude, and a GENERIC default (`fn g<K, L>(&self, (K, _): (K, L)) -> K`,
+  skipped on the trait class) already compiled and ran. `struct P : public T` — the implementor
+  inherits the trait class's virtual, so the broken body was live code and a pure slot in its
+  place would have made `P` abstract.
+  MECHANISM: the (ah) parameter pre-pass covered `ItemFn` only; the interface-traits emitter
+  (emit_items.rs ~7465) named a non-identifier pattern `_` while the adapters, the explicit-object
+  default and the UFCS lane already said `_arg{idx}`; `maybe_inline_trait_default_method_body`
+  (mod.rs ~21523) copied a single-expression body verbatim.
+  FIX (ebc252d8): the pre-pass visits `TraitItemFn` too (`visit_trait_item_fn_mut`): a
+  default's destructuring parameter → `_argN` (N counts the receiver, so the first typed
+  parameter is `_arg1`, the member emitters' convention) plus `let <pattern> = _argN;` prepended
+  to the default body — one spelling for every copy of that body (the interface class, the tier-1
+  full-body route, the UFCS lane — probed — and the explicit-object route, which emits the block
+  by construction and was not probed); a bodiless
+  required method only has its `_` parameters renamed (a destructuring pattern there is Rust
+  E0642). Impl methods stay on the member route. The interface class spells `_arg{idx}`
+  (`enumerate()` over `inputs`). `maybe_inline_trait_default_method_body` takes the signature and
+  returns `TraitDefaultInline::Tail(expr)` — the one-liner, byte for byte as before — or `::Block`
+  when a run of `let <pat> = <param>;` statements (each init a bare path to one of the signature's
+  typed parameters) precedes the single tail expression; the same-trait check still runs on the
+  tail. `Block` takes the full-body writer (return scope, param bindings, self receiver scope,
+  `emit_block`) on EVERY tier, not only tier 1, so a tier-1 implementor inherits a bound body and
+  a tier-2 trait's multi-statement default stays the pure slot it was.
+  GUARDS: `test_a_trait_default_method_destructures_its_parameter_pattern` (tier 2: `virtual
+  uint32_t w(uint32_t _arg1, uint32_t _arg2) const = 0;`, `t(uint32_t n, std::tuple<…> _arg2)
+  const {` with `auto&& [a, b] = rusty::detail::deref_if_pointer_like(_arg2);`, `s(P _arg1)` →
+  `._0`/`._1`, the multi-statement default still `= 0;`, the adapters' `std::move(_arg2)`, the UFCS
+  lane's `_arg2) {`, the impl-side member route untouched (`Q::s(P _arg1)` binds `(_arg1)._0`, no
+  `_let_pat`); tier 1 — the tier-1 default, the CLI's configuration, `set_tier1_default(true)`:
+  `struct P : public T`, the multi-statement default bound, `u(const std::tuple<…>& _arg1)` through
+  `_let_pat` + `std::get<N>`, `w(uint32_t _arg1, uint32_t _arg2) const { return this->k(); }`;
+  module mode), the pass file's
+  `a_trait_default_is_rewritten_and_a_required_method_only_renames_its_wilds` (+ the impl-methods
+  test renamed). Runtime (clang 22, rustc as the oracle — it caught one wrong hand-computed
+  expectation): under the tier-1 default t1 (`P : public T` inherits the bound body), t2c (two `_`
+  required + destructuring defaults, called directly, through `&dyn T` and `Box<dyn T>`), t3b
+  (multi-statement + reference pattern + two `_`), t4 (generic), t5 (multi-statement default), t6
+  (a supertrait call in the tail) compile and run green, pre-fix 2–15 errors each; under
+  `RUSTY_CPP_TIER1_DEFAULT=0` (pure tier 2: no inheritance, `via_dyn(TAdapterRef<…>(p))`
+  instantiates the adapters, the default reached through the UFCS lane) t1, t2c, t5, t6 run green
+  where the old binary fails t1/t2c/t6. chain96: build ok; targeted 15/15 after one pin-text fix (the tier-1 section through the tier-1 default flag); crate_graph 7/7; the crate fixture 1/1; the full suite 2713 passed + the 2 standing reds (missing-rustc crate_mode_uses_one_cargo_selected_target_dependency_graph_atomically, cpp_name_crate_mode_rejects_opaque_expansion_before_output) + the harness flake (harness96 7/7 serially); the gate's unit phase ran the bin suite 2714 passed.
+  MATRIX REPLAY (old vs new on the 55 `expanded.rs` inputs, `st_work/replay_tdp`): 49 of 55 byte-identical, 5 fail in both binaries (pre-existing, exit 101), the one real diff is the known is_send conjunct-order nondeterminism in itertools (4 lines); serde_core — the only input with a wild-parameter trait method — byte-identical; no trait class, adapter or method body changed anywhere (prediction held exactly). gate37 (main @ ebc252d8): unit = the standing missing-rustc red only, matrix Summary: total=28 pass=25 fail=0 known-fail=3 → BASELINE.
+  FOUND, NOT FOLDED — pre-existing and pattern-independent (control probes with plain identifier
+  parameters fail identically on both binaries): (1) a trait method taking a crate struct BY VALUE
+  (`fn s(&self, p: P)`, t7; a struct that does not implement the trait too, `R`, t2b): the tier-1
+  bridges (`namespace T_::impl_`) are emitted before the struct definitions → "variable has
+  incomplete type 'P'". (2) a trait default whose body reads a crate struct's fields (`fn u(&self,
+  p: &P) -> u32 { p.0 - p.1 }`, t8, tier 1): "indirection requires pointer operand ('const P'
+  invalid)" and, through a pattern, "member access into incomplete type 'const P'" — the body sits
+  inside the trait class, before `P`, and `P : public T` cannot come first. (3) a user trait named
+  `U` collides with the adapters' `template <class U>` parameter ("no member named 'rusty_U_base'
+  in 'U'"). OBSERVED, NOT CHASED: `#[cpp_trait_member_dispatch]` on the trait alone, under the
+  test harness's `set_tier1_default(false)`, did not make the trait member-dispatch (the default
+  took the `.k()` dispatch ladder and the multi-statement default the pure slot), so the tier-1 pin
+  uses the tier-1 default flag instead. LIMITS: the matrix has no trait default with a
+  destructuring parameter and one generic trait method with a wild parameter (serde_core
+  `Visitor::__private_visit_untagged_option<D>(self, _: D)`, already `_arg1` on every lane — byte-
+  identical), so the replay proves scope and the probes and pins prove the fix; module mode is
+  text-pinned, crate mode has no trait-default pin.
 
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
