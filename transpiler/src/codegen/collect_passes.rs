@@ -5377,6 +5377,35 @@ impl CodeGen {
         )
     }
 
+    /// (aj): the crate's struct / enum / union leaf names, every module (a
+    /// `#[cfg(test)]` module is omitted from the output and from here). The
+    /// names `defined_types` comes to hold as the definitions are emitted;
+    /// see `trait_method_needs_incomplete_type`.
+    pub(super) fn collect_crate_nominal_type_names(&mut self, items: &[syn::Item]) {
+        for item in items {
+            match item {
+                syn::Item::Struct(s) => {
+                    self.crate_nominal_type_names.insert(s.ident.to_string());
+                }
+                syn::Item::Enum(e) => {
+                    self.crate_nominal_type_names.insert(e.ident.to_string());
+                }
+                syn::Item::Union(u) => {
+                    self.crate_nominal_type_names.insert(u.ident.to_string());
+                }
+                syn::Item::Mod(m) => {
+                    if Self::should_skip_cfg_attrs(&m.attrs) {
+                        continue;
+                    }
+                    if let Some((_, nested)) = &m.content {
+                        self.collect_crate_nominal_type_names(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub(super) fn collect_top_level_item_names(&mut self, items: &[syn::Item]) {
         for item in items {
             match item {

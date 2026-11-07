@@ -2434,6 +2434,83 @@ impl CodeGen {
         })
     }
 
+    /// (aj): does `toks` (a Rust or C++ type spelling, or a body) name a crate
+    /// struct / enum whose definition has not been emitted yet — a leaf of
+    /// `crate_nominal_type_names` absent from `defined_types`? A spelling that
+    /// names one of `dependent` (a template parameter in scope) is dependent:
+    /// checked at instantiation, when every type is complete, so never here.
+    fn incomplete_crate_nominal_in(&self, toks: &str, dependent: &[String]) -> bool {
+        fn ident_in(hay: &str, needle: &str) -> bool {
+            hay.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|seg| seg == needle)
+        }
+        if dependent.iter().any(|p| ident_in(toks, p)) {
+            return false;
+        }
+        self.crate_nominal_type_names
+            .iter()
+            .any(|leaf| !self.defined_types.contains(leaf) && ident_in(toks, leaf))
+    }
+
+    /// (aj): would a DEFINITION of this trait method, emitted here, need a
+    /// type that is still incomplete — a by-value parameter or the return
+    /// type naming a crate struct / enum not yet defined? With `body` (a
+    /// default whose copy carries the body) also a reference parameter naming
+    /// one (the body reads through it) or the body naming one at all (a
+    /// constructor call, a `Type::item` access). The in-class declaration is
+    /// legal with incomplete types; only the definition is deferred, as the
+    /// struct lane defers its members (method_signature_references_incomplete_
+    /// sibling). Types naming a trait or method generic are dependent.
+    pub(super) fn trait_method_needs_incomplete_type(
+        &self,
+        sig: &syn::Signature,
+        body: Option<&syn::Block>,
+        owner_generics: &syn::Generics,
+    ) -> bool {
+        fn peel(ty: &syn::Type) -> (&syn::Type, bool) {
+            match ty {
+                syn::Type::Paren(p) => peel(&p.elem),
+                syn::Type::Group(g) => peel(&g.elem),
+                syn::Type::Reference(r) => (r.elem.as_ref(), true),
+                _ => (ty, false),
+            }
+        }
+        let dependent: Vec<String> = owner_generics
+            .params
+            .iter()
+            .chain(sig.generics.params.iter())
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                syn::GenericParam::Const(cp) => Some(cp.ident.to_string()),
+                syn::GenericParam::Lifetime(_) => None,
+            })
+            .collect();
+        let toks = |ty: &syn::Type| quote::ToTokens::to_token_stream(ty).to_string();
+        if let syn::ReturnType::Type(_, ty) = &sig.output {
+            let (inner, is_reference) = peel(ty);
+            if !is_reference && self.incomplete_crate_nominal_in(&toks(inner), &dependent) {
+                return true;
+            }
+        }
+        for input in &sig.inputs {
+            let syn::FnArg::Typed(pt) = input else {
+                continue;
+            };
+            let (inner, is_reference) = peel(&pt.ty);
+            if (!is_reference || body.is_some())
+                && self.incomplete_crate_nominal_in(&toks(inner), &dependent)
+            {
+                return true;
+            }
+        }
+        body.is_some_and(|b| {
+            self.incomplete_crate_nominal_in(
+                &quote::ToTokens::to_token_stream(b).to_string(),
+                &dependent,
+            )
+        })
+    }
+
     /// Rust `[T; 0]` fields exist to force struct ALIGNMENT under repr(C)
     /// with ZERO size. `std::array<T, 0>` delivers neither: it drops T's
     /// alignment AND has sizeof 1 (libstdc++ dummy member — not an empty
@@ -2634,11 +2711,6 @@ impl CodeGen {
                 self.current_struct,
             );
         }
-        // Completeness tracking for method-body deferral: a type is COMPLETE once
-        // emit_struct reaches it (structs are emitted in definition order). A
-        // sibling whose emit_struct has NOT yet run is still incomplete here, so a
-        // class-template method statically accessing it must be deferred out-of-line.
-        self.defined_types.insert(name_str.clone());
         let name = self.named_module_root_type_decl_cpp_name(&name_str);
         let has_drop_impl = self.type_has_drop_impl(&name_str);
         let merged_impl_items = self.take_impls_for_type(&name_str);
@@ -2660,6 +2732,14 @@ impl CodeGen {
                 self.hoist_cpp_inherit_trait_interface(&trait_short, &name_str, 0);
             }
         }
+        // Completeness tracking for method-body deferral: a type is COMPLETE once
+        // emit_struct reaches it (structs are emitted in definition order). A
+        // sibling whose emit_struct has NOT yet run is still incomplete here, so a
+        // class-template method statically accessing it must be deferred out-of-line.
+        // Recorded AFTER the hoist above: while a base trait's class is emitted
+        // ahead of this struct, the struct is still incomplete to it — (aj), a
+        // slot taking it by value defers its definition.
+        self.defined_types.insert(name_str.clone());
         // Preserve the established cpp_inherit behavior: any `#[cpp_ctor]`
         // takes over construction for that path.
         let cpp_ctor_methods: Vec<&syn::ImplItemFn> = merged_impl_items
@@ -6227,7 +6307,24 @@ impl CodeGen {
         impl_param: &str,
         own_slots: &[InterfaceSlot],
         bases: &[(String, String)],
+        wrap_in_anon_ns: bool,
     ) {
+        // (aj): the forwarder class's own argument list (`A, U` for
+        // `TrAdapter<A, U>`), and the names dependent inside it.
+        let trait_generic_idents: Vec<String> = trait_generic_arglist
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let forwarder_class_args = if trait_generic_idents.is_empty() {
+            impl_param.to_string()
+        } else {
+            format!("{}, {}", trait_generic_idents.join(", "), impl_param)
+        };
+        let mut dependent: Vec<String> = trait_generic_idents.clone();
+        dependent.push(impl_param.to_string());
         // (owner short name, owner key, slot)
         let mut slots: Vec<(String, String, InterfaceSlot)> = own_slots
             .iter()
@@ -6396,14 +6493,57 @@ impl CodeGen {
                         m = slot.cpp_name
                     )
                 };
-                self.writeln(&format!(
-                    "{} {}({}){} override {{ {} }}",
-                    slot.return_type,
-                    slot.cpp_name,
-                    slot.params.join(", "),
-                    slot.const_suffix,
-                    body
-                ));
+                // (aj): an override's inline body is a DEFINITION too — a slot
+                // whose by-value parameter or return type names a crate struct
+                // or enum not yet complete here is declared in the class and
+                // defined after every type definition, as the class-template
+                // member `template <..> R TrAdapter<..>::m(..)`.
+                let defer_definition = (slot.return_type.trim() != "void"
+                    && self.incomplete_crate_nominal_in(&slot.return_type, &dependent))
+                    || slot.params.iter().any(|param| {
+                        let (ty, _) = param.rsplit_once(' ').unwrap_or(("", param.as_str()));
+                        let ty = ty.trim_end();
+                        !(ty.ends_with('&') || ty.ends_with('*'))
+                            && self.incomplete_crate_nominal_in(ty, &dependent)
+                    });
+                if defer_definition {
+                    self.writeln(&format!(
+                        "{} {}({}){} override;",
+                        slot.return_type,
+                        slot.cpp_name,
+                        slot.params.join(", "),
+                        slot.const_suffix
+                    ));
+                    let mut definition = String::new();
+                    if wrap_in_anon_ns {
+                        definition.push_str("namespace {\n");
+                    }
+                    definition.push_str(&format!(
+                        "template <{}> {} {}{}<{}>::{}({}){} {{ {} }}\n",
+                        template_args,
+                        slot.return_type,
+                        trait_name,
+                        suffix,
+                        forwarder_class_args,
+                        slot.cpp_name,
+                        slot.params.join(", "),
+                        slot.const_suffix,
+                        body
+                    ));
+                    if wrap_in_anon_ns {
+                        definition.push_str("}\n");
+                    }
+                    self.queue_deferred_method_definition(definition);
+                } else {
+                    self.writeln(&format!(
+                        "{} {}({}){} override {{ {} }}",
+                        slot.return_type,
+                        slot.cpp_name,
+                        slot.params.join(", "),
+                        slot.const_suffix,
+                        body
+                    ));
+                }
             }
             self.indent -= 1;
             self.writeln("};");
@@ -7562,23 +7702,90 @@ impl CodeGen {
                 }
                 None => None,
             };
-            if let Some(TraitDefaultInline::Tail(body_expr)) = &inline_body {
-                self.writeln(&format!(
-                    "virtual {} {}({}){} {{ return {}; }}",
-                    return_type,
-                    method_name,
-                    params.join(", "),
-                    const_suffix,
-                    body_expr
-                ));
+            let tail_expr: Option<&String> = match &inline_body {
+                Some(TraitDefaultInline::Tail(body_expr)) => Some(body_expr),
+                _ => None,
+            };
+            // (aj): a default's inline copy is a DEFINITION, and a definition
+            // needs its by-value parameter and return types complete — the
+            // body's types too. This class precedes a type it names when it is
+            // hoisted ahead of its implementor (book §3.2.16 phase 0: a base
+            // must be complete first) or simply precedes the struct in source
+            // order. Such a slot is declared here and its body defined after
+            // every type definition through the struct lane's deferral queue
+            // (`inline R Tr::m(..) const { .. }`, the class-template member
+            // for a generic trait); a pure slot needs nothing.
+            let defer_definition = (tail_expr.is_some() || full_body_default.is_some())
+                && self.trait_method_needs_incomplete_type(
+                    &method.sig,
+                    method.default.as_ref(),
+                    &t.generics,
+                );
+            let slot_head = format!(
+                "{} {}({}){}",
+                return_type,
+                method_name,
+                params.join(", "),
+                const_suffix
+            );
+            if defer_definition {
+                self.writeln(&format!("virtual {};", slot_head));
+                let definition_head = if trait_template_prefix.is_empty() {
+                    format!(
+                        "inline {} {}::{}({}){}",
+                        return_type,
+                        trait_name,
+                        method_name,
+                        params.join(", "),
+                        const_suffix
+                    )
+                } else {
+                    format!(
+                        "{}{} {}{}::{}({}){}",
+                        trait_template_prefix,
+                        return_type,
+                        trait_name,
+                        trait_generic_arglist,
+                        method_name,
+                        params.join(", "),
+                        const_suffix
+                    )
+                };
+                // Captured here, where the trait's scopes (`Self`, the
+                // receiver, the parameter bindings) are live, flushed later.
+                let saved_output = std::mem::take(&mut self.output);
+                let saved_indent = self.indent;
+                self.indent = 0;
+                if wrap_in_anon_ns {
+                    self.writeln("namespace {");
+                }
+                if let Some(body_expr) = tail_expr {
+                    self.writeln(&format!("{} {{ return {}; }}", definition_head, body_expr));
+                } else if let Some(body) = full_body_default {
+                    self.writeln(&format!("{} {{", definition_head));
+                    self.indent += 1;
+                    self.push_return_value_scope(&return_type);
+                    self.push_return_type_hint(&method.sig.output);
+                    self.push_param_bindings(&method.sig.inputs);
+                    self.push_self_receiver_ref_scope(&method.sig.inputs);
+                    self.emit_block(body);
+                    self.pop_self_receiver_ref_scope();
+                    self.pop_param_bindings();
+                    self.pop_return_type_hint();
+                    self.pop_return_value_scope();
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
+                if wrap_in_anon_ns {
+                    self.writeln("}");
+                }
+                let definition = std::mem::replace(&mut self.output, saved_output);
+                self.indent = saved_indent;
+                self.queue_deferred_method_definition(definition);
+            } else if let Some(body_expr) = tail_expr {
+                self.writeln(&format!("virtual {} {{ return {}; }}", slot_head, body_expr));
             } else if let Some(body) = full_body_default {
-                self.writeln(&format!(
-                    "virtual {} {}({}){} {{",
-                    return_type,
-                    method_name,
-                    params.join(", "),
-                    const_suffix
-                ));
+                self.writeln(&format!("virtual {} {{", slot_head));
                 self.indent += 1;
                 self.push_return_value_scope(&return_type);
                 self.push_return_type_hint(&method.sig.output);
@@ -7592,13 +7799,7 @@ impl CodeGen {
                 self.indent -= 1;
                 self.writeln("}");
             } else {
-                self.writeln(&format!(
-                    "virtual {} {}({}){} = 0;",
-                    return_type,
-                    method_name,
-                    params.join(", "),
-                    const_suffix
-                ));
+                self.writeln(&format!("virtual {} = 0;", slot_head));
             }
             // Every slot — a default's inline copy included — is overridden by
             // the forwarders: a tier-2 implementor's override of a default must
@@ -7654,6 +7855,7 @@ impl CodeGen {
             &forwarder_impl_param,
             &interface_slots,
             &base_trait_names,
+            wrap_in_anon_ns,
         );
         if wrap_in_anon_ns {
             self.writeln("}");

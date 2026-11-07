@@ -53879,3 +53879,126 @@ fn test_a_trait_default_method_destructures_its_parameter_pattern() {
     assert!(module.contains("std::tuple<uint32_t, uint32_t> _arg1) const {"), "{module}");
     assert!(module.contains("w(uint32_t _arg1, uint32_t _arg2) const = 0;"), "{module}");
 }
+
+#[test]
+fn test_a_trait_method_taking_a_crate_type_by_value_defines_its_bodies_after_the_type() {
+    // (aj) A trait method taking a crate struct BY VALUE (or returning one)
+    // failed with "variable has incomplete type" at three DEFINITIONS that
+    // precede the struct: the tier-1 bridge (the early `<Tr>_::impl_` block
+    // precedes every type), the default's inline copy on the interface class
+    // and the forwarders' overrides (the class is hoisted ahead of its
+    // implementor, or precedes the struct in source order). A declaration is
+    // legal with an incomplete type, so each is declared in place and defined
+    // after the crate's type definitions. A default body that reads through a
+    // reference parameter of such a type is deferred too.
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub struct P(pub u32, pub u32);
+        pub enum E { A(u32), B }
+        pub trait T {
+            fn k(&self) -> u32;
+            fn s(&self, p: P) -> u32 { p.0 * p.1 }
+            fn mk(&self) -> P { P(self.k(), self.k() + 1) }
+            fn u(&self, p: &P) -> u32 { p.0 - p.1 }
+            fn e(&self, e: E) -> u32 { match e { E::A(x) => x, E::B => 0 } }
+            fn r(&self, p: &P) -> u32;
+            fn n(&self, x: u32) -> u32 { x + self.k() }
+        }
+        impl T for P { fn k(&self) -> u32 { self.0 } fn r(&self, p: &P) -> u32 { p.0 } }
+        "#,
+    )
+    .unwrap();
+    let mut cg = test_codegen();
+    cg.set_interface_traits(true);
+    cg.set_tier1_default(true);
+    cg.emit_file(&file, None);
+    let out = cg.into_output();
+    let class = out.find("class T {").unwrap();
+    let implementor = out.find("struct P : public T {").unwrap();
+    assert!(class < implementor, "{out}");
+    // In the hoisted class: declarations for the slots that need `P` / `E`
+    // complete; a bodiless slot was a declaration already; a scalar default
+    // keeps its inline copy.
+    assert!(out.contains("virtual uint32_t s(P p) const;"), "{out}");
+    assert!(out.contains("virtual P mk() const;"), "{out}");
+    assert!(out.contains("virtual uint32_t u(const P& p) const;"), "{out}");
+    assert!(out.contains("virtual uint32_t e(E e) const;"), "{out}");
+    assert!(out.contains("virtual uint32_t r(const P& p) const = 0;"), "{out}");
+    assert!(out.contains("virtual uint32_t n(uint32_t x) const { return "), "{out}");
+    assert!(!out.contains("virtual uint32_t s(P p) const {") && !out.contains("virtual P mk() const {"), "{out}");
+    // Their definitions follow the implementor.
+    for head in [
+        "inline uint32_t T::s(P p) const {",
+        "inline P T::mk() const {",
+        "inline uint32_t T::u(const P& p) const {",
+        "inline uint32_t T::e(E e) const {",
+    ] {
+        let at = out.find(head).unwrap_or_else(|| panic!("{head}: {out}"));
+        assert!(at > implementor, "{head} precedes P: {out}");
+    }
+    // The three forwarders: declared in the class template, defined after `P`;
+    // a reference-only override has no body of its own to read `P` and stays.
+    assert!(out.contains("uint32_t s(P p) const override;"), "{out}");
+    assert!(out.contains("P mk() const override;"), "{out}");
+    for cls in ["TAdapter", "TAdapterRef", "TAdapterRefMut"] {
+        let head = format!("template <class U> uint32_t {cls}<U>::s(P p) const {{");
+        let at = out.find(&head).unwrap_or_else(|| panic!("{head}: {out}"));
+        assert!(at > implementor, "{head} precedes P: {out}");
+        assert!(out.contains(&format!("template <class U> P {cls}<U>::mk() const {{")), "{out}");
+    }
+    assert!(out.contains("uint32_t u(const P& p) const override { if constexpr"), "{out}");
+    assert!(out.contains("uint32_t r(const P& p) const override { if constexpr"), "{out}");
+    // The tier-1 bridges: declared in the early block, defined after the
+    // types; a bridge with reference parameters only is defined in place.
+    let decl = "template<class S> requires has_tier1_T<S> uint32_t s(T_::impl_::tag, const S& __self, P p);";
+    let def = "template<class S> requires has_tier1_T<S> uint32_t s(T_::impl_::tag, const S& __self, P p) { return __self.s(std::move(p)); }";
+    assert!(out.find(decl).unwrap_or_else(|| panic!("{out}")) < class, "{out}");
+    assert!(out.find(def).unwrap_or_else(|| panic!("{out}")) > implementor, "{out}");
+    assert!(out.contains("template<class S> requires has_tier1_T<S> P mk(T_::impl_::tag, const S& __self);"), "{out}");
+    assert!(out.contains("template<class S> requires has_tier1_T<S> uint32_t e(T_::impl_::tag, const S& __self, E e);"), "{out}");
+    assert!(out.contains("template<class S> requires has_tier1_T<S> uint32_t r(T_::impl_::tag, const S& __self, const P& p) { return __self.r(p); }"), "{out}");
+    assert!(out.contains("// Book §3.2.2 (3): tier-1 bridge definitions"), "{out}");
+
+    // Tier 2, source order: a trait ahead of the struct its default takes by
+    // value; a generic trait defines the class-template member.
+    let out = transpile_str_interface_traits(
+        r#"
+        pub trait T { fn k(&self) -> u32; fn s(&self, p: P) -> u32 { p.0 * p.1 } fn n(&self, x: u32) -> u32 { x + 1 } }
+        pub trait G<A> { fn g(&self) -> A; fn s(&self, p: P) -> u32 { p.0 } }
+        pub struct P(pub u32, pub u32);
+        pub struct Q;
+        impl T for Q { fn k(&self) -> u32 { 1 } }
+        impl G<u8> for Q { fn g(&self) -> u8 { 2 } }
+        pub fn via_dyn(d: &dyn T) -> u32 { d.s(P(2, 5)) }
+        "#,
+    );
+    let class = out.find("class T {").unwrap();
+    let p_def = out.find("struct P {").unwrap();
+    assert!(class < p_def, "{out}");
+    assert!(out.contains("virtual uint32_t s(P p) const;"), "{out}");
+    assert!(out.contains("virtual uint32_t n(uint32_t x) const { return "), "{out}");
+    for head in [
+        "inline uint32_t T::s(P p) const {",
+        "template <class U> uint32_t TAdapterRef<U>::s(P p) const {",
+        "template <class A>\nuint32_t G<A>::s(P p) const {",
+        "template <class A, class U> uint32_t GAdapter<A, U>::s(P p) const {",
+    ] {
+        let at = out.find(head).unwrap_or_else(|| panic!("{head}: {out}"));
+        assert!(at > p_def, "{head} precedes P: {out}");
+    }
+    assert!(!out.contains("tier-1 bridge definitions"), "{out}");
+
+    // Module mode: the same spelling.
+    let module = transpile_str_module(
+        r#"
+        pub trait T { fn k(&self) -> u32; fn s(&self, p: P) -> u32 { p.0 * p.1 } }
+        pub struct P(pub u32, pub u32);
+        impl T for P { fn k(&self) -> u32 { self.0 } }
+        "#,
+        "probe",
+    );
+    assert!(module.contains("virtual uint32_t s(P p) const;"), "{module}");
+    assert!(module.contains("inline uint32_t T::s(P p) const {"), "{module}");
+    assert!(module.contains("uint32_t s(P p) const override;"), "{module}");
+    assert!(module.contains("template <class U> uint32_t TAdapter<U>::s(P p) const {"), "{module}");
+}

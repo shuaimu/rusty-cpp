@@ -3519,6 +3519,17 @@ pub struct CodeGen {
     /// method-body deferral: a class-template method that statically accesses a
     /// sibling NOT yet in this set is deferred out-of-line. See `emit_struct`.
     pub(crate) defined_types: std::collections::HashSet<String>,
+    /// (aj): the crate's struct / enum / union leaf names, every module — the
+    /// names `defined_types` comes to hold as the definitions are emitted. A
+    /// trait-lane DEFINITION (a default's inline copy on the interface class, a
+    /// forwarder override, a tier-1 bridge) whose by-value parameter or return
+    /// type names one not yet defined is declared in place and defined after
+    /// the crate's type definitions (an inline definition needs the type
+    /// complete; a declaration does not).
+    pub(crate) crate_nominal_type_names: std::collections::HashSet<String>,
+    /// (aj): tier-1 bridge DEFINITIONS deferred past the type definitions, as
+    /// (`<Tr>_::impl_` namespace, lines); the early block keeps the declaration.
+    pub(crate) deferred_tier1_bridge_definitions: Vec<(String, Vec<String>)>,
     /// Skip duplicate-signature conflict registration for synthetic second-pass
     /// emissions (for example deferred out-of-line method definitions).
     pub(crate) method_emission_skip_conflict_registration: bool,
@@ -4137,6 +4148,8 @@ impl CodeGen {
             method_emission_out_of_line_owner: None,
             method_emission_out_of_line_class_template_prefix: None,
             defined_types: std::collections::HashSet::new(),
+            crate_nominal_type_names: std::collections::HashSet::new(),
+            deferred_tier1_bridge_definitions: Vec::new(),
             method_emission_skip_conflict_registration: false,
             current_emit_structural_decomp: None,
             recursive_nested_fn_self_emit_stack: Vec::new(),
@@ -8490,6 +8503,8 @@ impl CodeGen {
         self.sibling_modules_imported.clear();
         self.in_forward_decl_signature = false;
         self.declared_item_names.clear();
+        self.crate_nominal_type_names.clear();
+        self.deferred_tier1_bridge_definitions.clear();
         self.item_const_types.clear();
         self.declared_module_names.clear();
         self.declared_module_paths.clear();
@@ -8682,6 +8697,7 @@ impl CodeGen {
         // Pass 1a: collect globally declared item names for unresolved bare-import
         // filtering and impl target disambiguation.
         self.collect_top_level_item_names(&file.items);
+        self.collect_crate_nominal_type_names(&file.items);
         log_emit("collect_top_level_item_names");
         self.collect_expanded_libtest_internal_function_renames(&file.items);
         log_emit("collect_expanded_libtest_internal_function_renames");
@@ -9515,6 +9531,9 @@ impl CodeGen {
         self.ufcs_def_dedupe_seen.clear();
         self.emit_ufcs_trait_impl_free_functions(&file.items, &[]);
         log_emit("emit_ufcs_trait_impl_free_functions");
+        // (aj): tier-1 bridge DEFINITIONS the early block only declared.
+        self.emit_deferred_tier1_bridge_definitions();
+        log_emit("emit_deferred_tier1_bridge_definitions");
         // § 3.2.13: default-method template DEFINITIONS in `namespace <Tr>_`.
         self.emit_ufcs_trait_default_free_functions(&file.items, &[]);
         log_emit("emit_ufcs_trait_default_free_functions");
@@ -23130,6 +23149,7 @@ impl CodeGen {
         export: &str,
     ) {
         let mut lines: Vec<String> = Vec::new();
+        let mut deferred: Vec<String> = Vec::new();
         for item in &t.items {
             let syn::TraitItem::Fn(method) = item else {
                 continue;
@@ -23190,16 +23210,34 @@ impl CodeGen {
             let prefix = if ret.trim() == "void" { "" } else { "return " };
             let mut all: Vec<String> = vec![format!("{}_::impl_::tag", name), recv_param.to_string()];
             all.extend(params);
-            lines.push(format!(
-                "template<class S> requires {c} {ret} {m}({ps}) {{ {p}{r}.{m}({a}); }}",
+            let head = format!(
+                "template<class S> requires {c} {ret} {m}({ps})",
                 c = constraint,
                 ret = ret,
                 m = mname,
-                ps = all.join(", "),
+                ps = all.join(", ")
+            );
+            let body = format!(
+                "{{ {p}{r}.{m}({a}); }}",
                 p = prefix,
                 r = recv_expr,
+                m = mname,
                 a = args.join(", ")
-            ));
+            );
+            // (aj): this block precedes every type definition of the crate, and
+            // a DEFINITION needs its by-value parameter and return types
+            // complete (a declaration does not). A bridge naming a crate struct
+            // or enum there is declared here and defined after the types
+            // (emit_deferred_tier1_bridge_definitions), its head repeated
+            // verbatim so it stays the overload §3.2.2 ranks — a forwarding
+            // pack would lose partial ordering to the default template's exact
+            // parameters.
+            if self.trait_method_needs_incomplete_type(&method.sig, None, &t.generics) {
+                lines.push(format!("{};", head));
+                deferred.push(format!("{} {}", head, body));
+            } else {
+                lines.push(format!("{} {}", head, body));
+            }
         }
         if lines.is_empty() {
             return;
@@ -23215,6 +23253,31 @@ impl CodeGen {
         }
         self.indent -= 1;
         self.writeln("}");
+        if !deferred.is_empty() {
+            self.deferred_tier1_bridge_definitions
+                .push((format!("{}_::impl_", name), deferred));
+        }
+    }
+
+    /// (aj): the tier-1 bridge DEFINITIONS the early block only declared —
+    /// written after every type definition of the crate, where the by-value
+    /// crate types they take or return are complete. The namespace is reopened
+    /// without `export`: a redeclaration of an exported function is exported
+    /// implicitly.
+    fn emit_deferred_tier1_bridge_definitions(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_tier1_bridge_definitions);
+        for (namespace, lines) in deferred {
+            self.writeln(
+                "// Book §3.2.2 (3): tier-1 bridge definitions — deferred past the type definitions (a by-value crate type is complete here)",
+            );
+            self.writeln(&format!("namespace {} {{", namespace));
+            self.indent += 1;
+            for line in lines {
+                self.writeln(&line);
+            }
+            self.indent -= 1;
+            self.writeln("}");
+        }
     }
 
     /// Book §3.2.3 (2026-10-07): does `spelling` name a crate-declared generic
