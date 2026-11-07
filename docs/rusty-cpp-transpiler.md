@@ -3274,10 +3274,12 @@ after the crate's type definitions — the (ai) FOUND items (1) and (2), closed.
   defined after `P`, `mk`/`e` declared, the reference-only `r` bridge defined in place. Tier 2 (source
   order, trait before struct): the same for `T` and for the generic `G<A>` (`template <class
   A>\nuint32_t G<A>::s(P p) const {`, `GAdapter<A, U>::s`), no bridge block. Module mode text-pinned.
-  Runtime (clang 22, rustc oracle): under the tier-1 default t7–t17 and t19 (non-pub struct + trait:
-  the anonymous namespace reopened around each definition) compile and run green, pre-fix 1–17 errors
-  each; the (ai) probes t1–t6 still green; pure tier 2 all green including t9; module mode (`-m
-  probe`): the interface precompiles and an importing TU runs. chain98: build ok; targeted 97/97 (the trait, adapter and tier-1 test families); crate_graph 7/7; the crate fixture 1/1; the full suite 2715 passed + the 2 standing reds (missing-rustc crate_mode_uses_one_cargo_selected_target_dependency_graph_atomically, cpp_name_crate_mode_rejects_opaque_expansion_before_output) + the harness flake (harness98 7/7 serially).
+  Runtime (clang 22, rustc oracle): under the tier-1 default t7–t14, t16, t17 and t19 (non-pub struct +
+  trait: the anonymous namespace reopened around each definition) compile and run green, pre-fix 1–17
+  errors each (t15 had none); (ai)'s cited t2b (by-value `R`, a struct that does not implement the
+  trait) and t2 compile and run green on both tiers once their hand-computed expectation is corrected
+  against rustc (31 → 30, the slip t2c had); the (ai) probes t1–t6 still green; pure tier 2 all green
+  including t9; module mode (`-m probe`): the interface precompiles and an importing TU runs. chain98: build ok; targeted 97/97 (the trait, adapter and tier-1 test families); crate_graph 7/7; the crate fixture 1/1; the full suite 2715 passed + the 2 standing reds (missing-rustc crate_mode_uses_one_cargo_selected_target_dependency_graph_atomically, cpp_name_crate_mode_rejects_opaque_expansion_before_output) + the harness flake (harness98 7/7 serially).
   MATRIX REPLAY (old vs new on the 55 `expanded.rs` inputs, `st_work/replay_aj`): 50 of 55 byte-identical, 5 fail in both binaries (pre-existing, exit 101: hashbrown, indexmap, itertools ×3) — no trait class, forwarder, bridge or body changed in any single-file output, as predicted (the matrix's by-value crate types on trait slots live in dependency units). gate38 (main @ 39841376): unit phase = the bin suite 2715 passed (the new test included) then the standing missing-rustc red only; matrix total=28 pass=25 fail=0 known-fail=3 → BASELINE (the hashbrown rows, whose allocator_api2 / hashbrown units carry the by-value AllocError / Layout / Tag slots, pass).
   FOUND, NOT FOLDED (pre-existing, fail identically on both binaries): (1) a GENERIC trait as a tier-1
   base (t18, tier 1): `struct P : public T` and `: T()` without the trait's arguments ("expected class
