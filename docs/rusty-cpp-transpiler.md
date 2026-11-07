@@ -3195,11 +3195,11 @@ class and its adapters — the (ah) FOUND items (1) and (4), closed.*
   where the old binary fails t1/t2c/t6. chain96: build ok; targeted 15/15 after one pin-text fix (the tier-1 section through the tier-1 default flag); crate_graph 7/7; the crate fixture 1/1; the full suite 2713 passed + the 2 standing reds (missing-rustc crate_mode_uses_one_cargo_selected_target_dependency_graph_atomically, cpp_name_crate_mode_rejects_opaque_expansion_before_output) + the harness flake (harness96 7/7 serially); the gate's unit phase ran the bin suite 2714 passed.
   MATRIX REPLAY (old vs new on the 55 `expanded.rs` inputs, `st_work/replay_tdp`): 49 of 55 byte-identical, 5 fail in both binaries (pre-existing, exit 101), the one real diff is the known is_send conjunct-order nondeterminism in itertools (4 lines); serde_core — the only input with a wild-parameter trait method — byte-identical; no trait class, adapter or method body changed anywhere (prediction held exactly). gate37 (main @ ebc252d8): unit = the standing missing-rustc red only, matrix Summary: total=28 pass=25 fail=0 known-fail=3 → BASELINE.
   FOUND, NOT FOLDED — pre-existing and pattern-independent (control probes with plain identifier
-  parameters fail identically on both binaries): (1) a trait method taking a crate struct BY VALUE
-  (`fn s(&self, p: P)`, t7; a struct that does not implement the trait too, `R`, t2b): the tier-1
+  parameters fail identically on both binaries): (1) — closed by (aj) below — a trait method taking a
+  crate struct BY VALUE (`fn s(&self, p: P)`, t7; a struct that does not implement the trait too, `R`, t2b): the tier-1
   bridges (`namespace T_::impl_`) are emitted before the struct definitions → "variable has
-  incomplete type 'P'". (2) a trait default whose body reads a crate struct's fields (`fn u(&self,
-  p: &P) -> u32 { p.0 - p.1 }`, t8, tier 1): "indirection requires pointer operand ('const P'
+  incomplete type 'P'". (2) — closed by (aj) below — a trait default whose body reads a crate struct's
+  fields (`fn u(&self, p: &P) -> u32 { p.0 - p.1 }`, t8, tier 1): "indirection requires pointer operand ('const P'
   invalid)" and, through a pattern, "member access into incomplete type 'const P'" — the body sits
   inside the trait class, before `P`, and `P : public T` cannot come first. (3) a user trait named
   `U` collides with the adapters' `template <class U>` parameter ("no member named 'rusty_U_base'
@@ -3212,6 +3212,85 @@ class and its adapters — the (ah) FOUND items (1) and (4), closed.*
   identical), so the replay proves scope and the probes and pins prove the fix; module mode is
   text-pinned, crate mode has no trait-default pin.
 
+*2026-11-07 — (aj) a trait method taking or returning a crate type by value: the tier-1 bridge, the
+default's copy on the interface class and the forwarders' overrides are declared in place and DEFINED
+after the crate's type definitions — the (ai) FOUND items (1) and (2), closed.*
+  SYMPTOMS (probes `st_work/probe_tdp` t7–t19, clang 22 + run, expected values from rustc; old binary
+  `st_work/rct_before_aj`): `pub struct P(pub u32, pub u32); pub trait T { fn s(&self, p: P) -> u32 {
+  p.0 * p.1 } } impl T for P {}` (t7) → five "variable has incomplete type 'P'": the tier-1 bridge
+  `template<class S> requires has_tier1_T<S> uint32_t s(T_::impl_::tag, const S& __self, P p) { return
+  __self.s(std::move(p)); }` in the early `namespace T_::impl_` block — which precedes EVERY struct
+  definition (t12, struct before trait in source, implementor `Q`: the bridge is the only error) — the
+  default's inline copy `virtual uint32_t s(P p) const { … }` on the class `T` hoisted ahead of `struct
+  P : public T` (a base must be complete first), and the three forwarders' `uint32_t s(P p) const
+  override { … }`. The same for a by-value RETURN (`fn mk(&self) -> P`, t10: "incomplete result type
+  'P' in function definition"), a by-value crate ENUM (`fn s(&self, e: E)`, t13: `std::variant<E_A,
+  E_B>` of incomplete alternatives, 17 errors through `<type_traits>`), a required method only (t11:
+  bridge + forwarders, 4), a trait ahead of the struct in source order (t9 — tier 2 fails too: class +
+  forwarders, 4), a cross-module pair (t16, `a::T` / `b::P`), a non-pub trait (t17), a generic trait
+  (t18: the class template's non-dependent `P p` is checked at definition), a two-statement default
+  (t14). Item (2): `fn u(&self, p: &P) -> u32 { p.0 - p.1 }` (t8) — the inline copy reads through a
+  reference to the incomplete `P` ("indirection requires pointer operand"). Under
+  `RUSTY_CPP_TIER1_DEFAULT=0` (pure tier 2) only t9 fails: no hoist, no bridges — the lane is tier 1's.
+  MECHANISM: three DEFINITIONS precede the type they need complete. C++ accepts a function
+  DECLARATION with an incomplete by-value parameter or return type, not a definition. The UFCS default
+  lane already declares early (`emit_ufcs_trait_default_free_function_decls`) and defines at the end,
+  and the struct lane already defers a member whose signature names an incomplete sibling
+  (`method_signature_references_incomplete_sibling` → `queue_deferred_method_definition`, flushed after
+  every type definition, mod.rs ~9466); the trait lane did neither. A GENERIC default taking `P` by
+  value (t15) was green on both tiers before and after: it lives on the UFCS lane only, declared
+  early and defined late already.
+  FIX (39841376): `collect_crate_nominal_type_names` (collect_passes.rs) records the crate's struct /
+  enum / union leaf names, every module; `trait_method_needs_incomplete_type(sig, body,
+  owner_generics)` (emit_items.rs, beside the struct lane's predicates) says whether a definition
+  emitted HERE would need an incomplete one — a non-dependent by-value parameter or return type naming
+  a leaf absent from `defined_types`; with a body, also a reference parameter naming one or the body
+  naming one at all. (1) `emit_ufcs_tier1_bridges`: such a bridge is DECLARED in the early block (its
+  head + `;`) and its definition collected in `deferred_tier1_bridge_definitions`, written by
+  `emit_deferred_tier1_bridge_definitions` just before the UFCS default definitions in a reopened
+  `namespace <Tr>_::impl_` (no `export`: a redeclaration of an exported function is exported
+  implicitly — module mode measured, `--precompile` + an importing TU runs); the head is repeated
+  verbatim so the constrained template stays the overload §3.2.2 ranks (a forwarding pack would lose
+  partial ordering to the default template's exact parameters). (2) the interface class (emit_items.rs
+  ~7540): a default's copy — the one-liner `Tail` or the full-body route — whose slot needs an
+  incomplete type is `virtual R m(..) const;` in the class; its definition is captured right there
+  (the trait's scopes live: return scope, parameter bindings, self receiver) as `inline R Tr::m(..)
+  const { .. }` (`template <A…> R Tr<A…>::m(..)` for a generic trait), wrapped in `namespace {` for a
+  non-pub trait, and queued through `queue_deferred_method_definition` (which adds the module
+  namespace). (3) `emit_trait_generic_forwarders`: a slot whose by-value parameter or return type
+  string names an incomplete leaf (the trait generics and the implementor parameter are dependent) is
+  `R m(..) const override;` in the class template and `template <class U> R TrAdapter<U>::m(..) const
+  { .. }` queued the same way. (4) `emit_struct` records the struct in `defined_types` AFTER hoisting
+  its base traits — before, the implementor looked complete to the hoisted class and nothing would
+  have deferred. A bodiless slot, a reference-only bridge or override and a scalar default are byte-
+  identical to before.
+  GUARDS: `test_a_trait_method_taking_a_crate_type_by_value_defines_its_bodies_after_the_type` — tier 1
+  (`set_tier1_default(true)`, the CLI's configuration): the class precedes `struct P : public T {`;
+  `virtual uint32_t s(P p) const;`, `virtual P mk() const;`, `virtual uint32_t u(const P& p) const;`,
+  `virtual uint32_t e(E e) const;` declared, `r(const P& p) const = 0;` and `n(uint32_t x) const {
+  return` untouched; `inline uint32_t T::s(P p) const {` (+ `mk`, `u`, `e`) after `P`; `uint32_t s(P p)
+  const override;` + `template <class U> uint32_t TAdapter<U>::s(P p) const {` for the three forwarders
+  after `P`, the reference-only `u`/`r` overrides inline; the `s` bridge declared before the class and
+  defined after `P`, `mk`/`e` declared, the reference-only `r` bridge defined in place. Tier 2 (source
+  order, trait before struct): the same for `T` and for the generic `G<A>` (`template <class
+  A>\nuint32_t G<A>::s(P p) const {`, `GAdapter<A, U>::s`), no bridge block. Module mode text-pinned.
+  Runtime (clang 22, rustc oracle): under the tier-1 default t7–t17 and t19 (non-pub struct + trait:
+  the anonymous namespace reopened around each definition) compile and run green, pre-fix 1–17 errors
+  each; the (ai) probes t1–t6 still green; pure tier 2 all green including t9; module mode (`-m
+  probe`): the interface precompiles and an importing TU runs. chain98: build ok; targeted 97/97 (the trait, adapter and tier-1 test families); crate_graph 7/7; the crate fixture 1/1; the full suite 2715 passed + the 2 standing reds (missing-rustc crate_mode_uses_one_cargo_selected_target_dependency_graph_atomically, cpp_name_crate_mode_rejects_opaque_expansion_before_output) + the harness flake (harness98 7/7 serially).
+  MATRIX REPLAY (old vs new on the 55 `expanded.rs` inputs, `st_work/replay_aj`): 50 of 55 byte-identical, 5 fail in both binaries (pre-existing, exit 101: hashbrown, indexmap, itertools ×3) — no trait class, forwarder, bridge or body changed in any single-file output, as predicted (the matrix's by-value crate types on trait slots live in dependency units). gate38 (main @ 39841376): unit phase = the bin suite 2715 passed (the new test included) then the standing missing-rustc red only; matrix total=28 pass=25 fail=0 known-fail=3 → BASELINE (the hashbrown rows, whose allocator_api2 / hashbrown units carry the by-value AllocError / Layout / Tag slots, pass).
+  FOUND, NOT FOLDED (pre-existing, fail identically on both binaries): (1) a GENERIC trait as a tier-1
+  base (t18, tier 1): `struct P : public T` and `: T()` without the trait's arguments ("expected class
+  name", "member initializer 'T' does not name … base class") and an `override` with no base — the
+  tier-1 base spelling drops the generic arguments. (2) a generic trait's default called on a tier-2
+  implementor (t18, pure tier 2): spelled as the member call `P(..)->s(..)` while the implementor has
+  no such member ("no member named 's' in 'P'"). (3) (from (ai)) a user trait named `U` collides with
+  the adapters' `template <class U>` parameter. LIMITS: `defined_types` is keyed by LEAF names (two
+  same-named structs in different modules alias, as in the struct lane); an alias (`type X = P;`) is
+  not a nominal name, so a slot spelled through an alias of a later struct is not deferred; the matrix
+  rows' only by-value crate types on trait slots are allocator_api2's `Allocator` (`AllocError` in the
+  return, `Layout`) and hashbrown's `fill_tag(Tag)` — dependency units, outside the single-file replay,
+  exercised by the matrix.
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
   needs a pointer or reference-wrapper element spelling; phase 0, the `dyn` coercion family) and the
