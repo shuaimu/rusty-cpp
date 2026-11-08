@@ -3281,7 +3281,7 @@ after the crate's type definitions — the (ai) FOUND items (1) and (2), closed.
   against rustc (31 → 30, the slip t2c had); the (ai) probes t1–t6 still green; pure tier 2 all green
   including t9; module mode (`-m probe`): the interface precompiles and an importing TU runs. chain98: build ok; targeted 97/97 (the trait, adapter and tier-1 test families); crate_graph 7/7; the crate fixture 1/1; the full suite 2715 passed + the 2 standing reds (missing-rustc crate_mode_uses_one_cargo_selected_target_dependency_graph_atomically, cpp_name_crate_mode_rejects_opaque_expansion_before_output) + the harness flake (harness98 7/7 serially).
   MATRIX REPLAY (old vs new on the 55 `expanded.rs` inputs, `st_work/replay_aj`): 50 of 55 byte-identical, 5 fail in both binaries (pre-existing, exit 101: hashbrown, indexmap, itertools ×3) — no trait class, forwarder, bridge or body changed in any single-file output, as predicted (the matrix's by-value crate types on trait slots live in dependency units). gate38 (main @ 39841376): unit phase = the bin suite 2715 passed (the new test included) then the standing missing-rustc red only; matrix total=28 pass=25 fail=0 known-fail=3 → BASELINE (the hashbrown rows, whose allocator_api2 / hashbrown units carry the by-value AllocError / Layout / Tag slots, pass).
-  FOUND, NOT FOLDED (pre-existing, fail identically on both binaries): (1) a GENERIC trait as a tier-1
+  FOUND, NOT FOLDED (pre-existing, fail identically on both binaries): (1) — closed by (ak) below — a GENERIC trait as a tier-1
   base (t18, tier 1): `struct P : public T` and `: T()` without the trait's arguments ("expected class
   name", "member initializer 'T' does not name … base class") and an `override` with no base — the
   tier-1 base spelling drops the generic arguments. (2) a generic trait's default called on a tier-2
@@ -3293,6 +3293,78 @@ after the crate's type definitions — the (ai) FOUND items (1) and (2), closed.
   rows' only by-value crate types on trait slots are allocator_api2's `Allocator` (`AllocError` in the
   return, `Layout`) and hashbrown's `fill_tag(Tag)` — dependency units, outside the single-file replay,
   exercised by the matrix.
+*2026-11-08 — (ak) a generic trait as a tier-1 base: the implementor's base clause and base-subobject
+init spell the interface class's template arguments from the impl header — the (aj) FOUND item (1), closed.*
+  SYMPTOMS (probes `st_work/probe_gtb` u1–u21 + `oracle/` rustc builds, clang 22 + run; old binary
+  `st_work/rct_before_ak`): `pub trait T<A> { fn k(&self) -> A; fn s(&self, p: P) -> u32 { .. } } pub struct
+  P(pub u32, pub u32); impl T<u8> for P { .. }` (u1, the (aj) t18 shape) under the tier-1 default → `struct P
+  : public T {` for a class that is `template <class A> class T`: "expected class name"; the fieldwise ctor's
+  `: T()` ("member initializer 'T' does not name a non-static data member or base class"); `uint8_t k()
+  const override;` ("only virtual member functions can be marked 'override'"); and the default reached as
+  the member call `P(..)->s(..)` ("no member named 's' in 'P'") because nothing was inherited — 4 errors.
+  The same for two type arguments (u5 `T<u8, String>`), a lifetime parameter (u6 `L<'a, usize>`: the
+  class drops it), a crate struct as the argument (u3 `T<Q>`), the implementor itself (u18 `T<P>`, u21
+  `T<Self>`), a module-qualified trait (u13 `a::T<u8>` implemented in `b`), a plain tier-1 base beside it
+  (u8), a bounded caller (u20 `fn f<X: T<u8>>(x: &X)`), `&dyn T<u8>` / `Box<dyn T<u8>>` (u2), a trait with an
+  ASSOCIATED TYPE and no generics (u14 `trait O { type Out; .. }`: the class is `template <class Out> class
+  O`, the same three errors), both together (u15), and a generic implementor applied to its own parameter
+  list (u17 `impl<Y> T<Y> for W<Y>` inside `template<typename X> struct W`). Under `RUSTY_CPP_TIER1_DEFAULT=0`
+  none of these appears (no base): the lane is tier 1's.
+  MECHANISM: `cpp_inherit_trait` records the trait's SHORT NAME per implementor (collect_passes.rs ~3379)
+  and `cpp_inherit_base_spelling` spells the base from that name alone — the impl header's `<u8>` and
+  `type Out = u64;` were gone before the base clause was formed. The interface class of a generic trait is
+  a class template over the trait's type parameters and THEN its associated type names (emit_trait ~6959 /
+  ~7245; lifetimes and consts are dropped), so the base needs exactly that argument list. The census
+  admits one instantiation of a generic trait per type (A2 stops a second) and a generic implementor
+  applied to its own parameter list without extra bounds, so these pairs ARE tier 1 by default.
+  FIX (ba7dc998): collect_passes.rs `record_cpp_inherit_impl_args` stores, under every key of
+  `cpp_inherit_trait` plus the trait's short name (`cpp_inherit_impl_args`, mod.rs, cleared with the rest),
+  the impl's `CppInheritImplArgs`: the trait path's generic arguments as written, the impl's
+  associated-type bindings and the impl's own parameter names in the order the self type applies them; a
+  second instantiation on one type (a forced pair) keeps the first and warns. predicates.rs
+  `cpp_inherit_base_template_args(type, trait)` builds the class's argument list: the trait item's type
+  and const parameters as slots (a const slot consumes its written argument and emits nothing) zipped with
+  the written non-lifetime arguments, then the associated type names in declaration order bound from the
+  impl (the impl header alone, by argument kind, when the trait item is not at hand); the impl's parameter
+  names are renamed to the struct's positionally (`declared_type_params`, a simultaneous
+  `TypeIdentMapReplacer` so a swap cannot chain) and `Self` to the struct, each through `map_type`.
+  `cpp_inherit_base_names` appends `<…>` when the list is non-empty, so the base clause (emit_items.rs
+  ~2814), the fieldwise ctor's base init (~3552) and the struct-literal lowering's base init (mod.rs ~30898)
+  all follow; emit_struct pushes the struct's own type-parameter scope around the base-clause computation
+  (its generics were pushed only later). The inline-rust cross-block seed (`collect_file_cpp_inherit` →
+  `TranspileOptions::cross_file_cpp_inherit`) now carries the whole `ItemImpl` instead of the trait name and
+  `replay_cross_file_cpp_inherit` records the same args. A plain trait's list is empty: every pre-(ak)
+  spelling is byte-identical.
+  GUARDS: `test_a_generic_trait_as_a_tier1_base_spells_the_class_template_arguments` — tier 1
+  (`set_tier1_default(true)`): `struct P : public ::a::T<uint8_t> {` + `: ::a::T<uint8_t>(), _0(…)` +
+  `uint8_t k() const override;`; `Two<uint8_t, rusty::String>`; `L<size_t>` (lifetime dropped); `O<uint64_t>`
+  (associated type only); `GO<uint8_t, uint64_t>`; `template<typename X>\nstruct W : public G<X> {` + `W(X
+  x_init) : G<X>(), …`; `SelfArg<Z>`; `struct V : public Plain {` unchanged; no bare base left. Tier 2
+  (test_codegen): no base at all. Module mode (tier 1): `struct P : public T<uint8_t> {`. Runtime (clang 22,
+  rustc oracle): under the tier-1 default u1, u2, u3, u5, u6, u8, u12, u13, u14, u15, u17, u18, u20 and u21
+  compile and run green (pre-fix 3–5 errors each; u10/u11, excluded from tier 1 by the census's `Self::Out`
+  test, were green before); the (ai)/(aj) probes t1–t19 still green; pure tier 2 byte-identical on all 21
+  probes; module mode (`-m probe`, u2): the interface precompiles, an importing TU links and runs. chain99: build ok; targeted 98/98 (the trait, adapter and tier-1 test families plus the new test); crate_graph 7/7; the crate fixture 1/1; the full suite 2716 passed + the 2 standing reds (missing-rustc crate_mode_uses_one_cargo_selected_target_dependency_graph_atomically, cpp_name_crate_mode_rejects_opaque_expansion_before_output) + the harness flake (harness99 7/7 serially).
+  MATRIX REPLAY (old vs new on the 55 `expanded.rs` inputs, `st_work/replay_ak`): 49 of 55 byte-identical, 5 fail in both binaries (pre-existing, exit 101: hashbrown, indexmap, itertools ×3), ONE real diff — itertools (8 lines): `struct KeyValue : public ::duplicates_impl::private_::KeyXorValue<K, V> {` / `JustValue : public …KeyXorValue<V, V>` and their ctors' base inits — the matrix's one generic trait as a tier-1 base (the single-file census prints both pairs TIER1; the earlier base-clause scan missed it because the bare spelling hides that the trait is generic). `clang++ -fsyntax-only -ferror-limit=0` on that single-file output: 437 → 433 errors, exactly the two "expected class name" and the two "member initializer 'KeyXorValue'" errors gone, no other change. itertools is a known-fail row the matrix does not rebuild (its module unit dates from 2026-08-15, before the tier-1 default: the trait's by-value `self` slots are a TODO there and the structs have no base), so no compiled matrix unit changes. gate39 (main @ ba7dc998): unit phase = the bin suite then the standing missing-rustc red only; matrix total=28 pass=25 fail=0 known-fail=3 → BASELINE.
+  FOUND, NOT FOLDED (pre-existing, fail identically on both binaries): (1) a GENERIC SUPERTRAIT is skipped
+  as the interface class's base (u19 `trait T: S<u8>`; emit_items.rs ~7318 "generic traits we flagged",
+  and an assoc-type supertrait likewise), so a default calling the supertrait's method fails ("no member
+  named 'a' in 'T'"); the implementor's own clause now reads `public virtual S<uint8_t>, public T` (1 error
+  left of 4). (2) a const generic trait parameter is dropped from the class AND from its default bodies (u7
+  `trait T<const N: usize> { fn k(&self) -> usize { N } }`: "use of undeclared identifier 'N'", both tiers).
+  (3) `rusty::Vec` reached only through a trait argument (u9 `impl T<Vec<u8>> for P`) is not pulled into a
+  single-file output ("no template named 'Vec' in namespace 'rusty'", both tiers). (4) (from (aj)) a generic
+  trait's default on a TIER-2 implementor is a member call the implementor lacks (u1/u12 pure tier 2; u4/u16
+  a bounded `impl<X: Copy>` the census keeps tier 2: "no member named 'n' in 'W<unsigned short>'"; u20's
+  bounded caller on tier 2: `deref_call`). (5) (from (ai)) a user trait named `U` vs the adapters' parameter.
+  OBSERVED: a tier-1 implementor passed as `&dyn T<u8>` is still wrapped (`TAdapterRef<uint8_t, P>(p)`, u2)
+  rather than upcast — compiles and runs. LIMITS: a generic trait still gets no tier-1 BRIDGES
+  (`ufcs_tier1_interface` returns None for it): its default is reached as the inherited member, which the
+  call sites already spell on tier 1; a forced second instantiation keeps the first impl's arguments
+  (warned, not emitted twice); the matrix's one generic trait as a tier-1 base is itertools' `KeyXorValue`
+  (a known-fail row the gate does not rebuild), so the replay shows the fix on it textually, the gate proves
+  nothing new, and the probes and pins prove the fix; the earlier base-clause scan of the matrix outputs
+  missed it because the bare spelling hides that the trait is generic.
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
   needs a pointer or reference-wrapper element spelling; phase 0, the `dyn` coercion family) and the
