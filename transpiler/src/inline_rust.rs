@@ -2118,8 +2118,8 @@ fn collect_cpp_type_aliases(content: &str) -> std::collections::HashMap<String, 
 fn collect_file_cpp_inherit(
     blocks: &[ParsedBlock],
     rust_context: &InlineRustContext,
-) -> Vec<(syn::ItemStruct, String)> {
-    // (struct def, trait) for every `#[cpp_inherit] impl Trait for Type`
+) -> Vec<(syn::ItemStruct, syn::ItemImpl)> {
+    // (struct def, impl) for every `#[cpp_inherit] impl Trait for Type`
     // in any block — a sibling block constructing such a type must use
     // its fieldwise ctor (the emitted C++ struct has a base class, so
     // designated init is illegal), and needs the field order to build
@@ -2155,9 +2155,9 @@ fn collect_file_cpp_inherit(
         let Some((_, trait_path, _)) = &item_impl.trait_ else {
             continue;
         };
-        let Some(trait_seg) = trait_path.segments.last() else {
+        if trait_path.segments.last().is_none() {
             continue;
-        };
+        }
         let syn::Type::Path(tp) = &*item_impl.self_ty else {
             continue;
         };
@@ -2165,7 +2165,8 @@ fn collect_file_cpp_inherit(
             continue;
         };
         if let Some(item_struct) = structs.get(&type_seg.ident.to_string()) {
-            pairs.push((item_struct.clone(), trait_seg.ident.to_string()));
+            // (ak) the whole impl: a generic trait's base spells its arguments.
+            pairs.push((item_struct.clone(), item_impl.clone()));
         }
     }
     pairs
@@ -2190,7 +2191,7 @@ fn render_generated_region(
     block: &ParsedBlock,
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
-    file_cpp_inherit: &[(syn::ItemStruct, String)],
+    file_cpp_inherit: &[(syn::ItemStruct, syn::ItemImpl)],
     rust_context: &InlineRustContext,
 ) -> Result<String, String> {
     let generated_cpp = transpile_payload_to_cpp(
@@ -2208,7 +2209,7 @@ fn render_generated_region_prepared(
     block: &ParsedBlock,
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
-    file_cpp_inherit: &[(syn::ItemStruct, String)],
+    file_cpp_inherit: &[(syn::ItemStruct, syn::ItemImpl)],
     rust_context: &InlineRustContext,
     prepared: &crate::cpp_abi::CppAbiInlineBlockPlan,
 ) -> Result<String, String> {
@@ -2227,7 +2228,7 @@ fn transpile_payload_to_cpp(
     block: &ParsedBlock,
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
-    file_cpp_inherit: &[(syn::ItemStruct, String)],
+    file_cpp_inherit: &[(syn::ItemStruct, syn::ItemImpl)],
     rust_context: &InlineRustContext,
     prepared: Option<&crate::cpp_abi::CppAbiInlineBlockPlan>,
 ) -> Result<String, String> {
@@ -2351,7 +2352,7 @@ fn render_block_rewrite(
     block: &ParsedBlock,
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
-    file_cpp_inherit: &[(syn::ItemStruct, String)],
+    file_cpp_inherit: &[(syn::ItemStruct, syn::ItemImpl)],
     rust_context: &InlineRustContext,
 ) -> Result<String, String> {
     let mut out = String::new();
@@ -2370,7 +2371,7 @@ fn render_block_rewrite_prepared(
     block: &ParsedBlock,
     file_enums: &[syn::ItemEnum],
     cpp_aliases: &std::collections::HashMap<String, String>,
-    file_cpp_inherit: &[(syn::ItemStruct, String)],
+    file_cpp_inherit: &[(syn::ItemStruct, syn::ItemImpl)],
     rust_context: &InlineRustContext,
     prepared: &crate::cpp_abi::CppAbiInlineBlockPlan,
 ) -> Result<String, String> {

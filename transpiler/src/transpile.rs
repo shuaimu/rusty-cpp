@@ -1079,7 +1079,7 @@ pub struct TranspileOptions {
     /// emitted C++ struct has a base class, so designated init is
     /// illegal) — but the flag is registered by the collect pass of the
     /// block that CONTAINS the impl, which a sibling block never runs.
-    pub cross_file_cpp_inherit: Vec<(syn::ItemStruct, String)>,
+    pub cross_file_cpp_inherit: Vec<(syn::ItemStruct, syn::ItemImpl)>,
     /// Cross-file type-alias declarations (`pub type Foo<K> = Bar<...>;`)
     /// collected during a crate-mode pre-pass. Used to resolve orphan
     /// impl blocks targeting a type alias back to the underlying struct

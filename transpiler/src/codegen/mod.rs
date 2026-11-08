@@ -1736,6 +1736,21 @@ pub(crate) enum CfFrame {
     Switch,
 }
 
+/// (ak) The impl header behind a tier-1 base clause: the trait path's generic
+/// arguments as written (`impl Tr<u8> for P`), the impl's associated-type
+/// bindings (`type Out = u64;`) and the names the self type applies the impl's
+/// own parameters under (`impl<Y> Tr<Y> for W<Y>`: `Y` is the struct's first
+/// parameter). A generic trait's interface class is a class template over its
+/// type parameters and then its associated type names, so the base clause and
+/// the base-subobject init spell `Tr<uint8_t, uint64_t>` from these; see
+/// `cpp_inherit_base_template_args`.
+#[derive(Clone, Debug)]
+pub(crate) struct CppInheritImplArgs {
+    pub(crate) trait_args: Vec<syn::GenericArgument>,
+    pub(crate) assoc_types: Vec<(String, syn::Type)>,
+    pub(crate) self_param_names: Vec<String>,
+}
+
 /// Code generation context tracking indentation and output buffer.
 #[derive(Clone)]
 pub struct CodeGen {
@@ -3215,6 +3230,10 @@ pub struct CodeGen {
     /// traits a `#[cpp_inherit]` implementor inherits (`cpp_inherit_trait`
     /// keeps the first). Same keys. `cpp_inherit_traits_of` reads both.
     pub(crate) cpp_inherit_extra_traits: HashMap<String, Vec<String>>,
+    /// (ak) Per `(implementor key, trait short name)`, keyed like
+    /// `cpp_inherit_trait`: the impl header's trait arguments and
+    /// associated-type bindings the base clause spells for a generic trait.
+    pub(crate) cpp_inherit_impl_args: HashMap<(String, String), CppInheritImplArgs>,
     /// §3.2.16 phase 0: the trait items behind `cpp_inherit_trait`, keyed by
     /// the module-scoped trait name (`nonvtable_trait_key_here`) and by the
     /// short name. A base class must be complete where the derived class is
@@ -3675,7 +3694,7 @@ pub struct CodeGen {
     /// that set before its collect passes and only re-fills it from the
     /// file being emitted.
     pub(crate) cross_file_unit_struct_tails: HashSet<String>,
-    pub(crate) cross_file_cpp_inherit_pairs: Vec<(syn::ItemStruct, String)>,
+    pub(crate) cross_file_cpp_inherit_pairs: Vec<(syn::ItemStruct, syn::ItemImpl)>,
     /// Map from a type alias's name (e.g. "Root") to the tail of its
     /// underlying struct/type (e.g. "NodeRef"). Built from
     /// `pub type Root<K, V> = NodeRef<...>;` declarations collected
@@ -4069,6 +4088,7 @@ impl CodeGen {
             trait_declared_path_by_short_name: HashMap::new(),
             cpp_inherit_trait: HashMap::new(),
             cpp_inherit_extra_traits: HashMap::new(),
+            cpp_inherit_impl_args: HashMap::new(),
             cpp_inherit_trait_items: HashMap::new(),
             hoisted_trait_interfaces: HashSet::new(),
             visited_trait_keys: HashSet::new(),
@@ -7040,7 +7060,7 @@ impl CodeGen {
     /// from designated init (illegal on the emitted non-aggregate), and
     /// the field order lets the positional fieldwise-ctor form assemble
     /// its argument list.
-    pub fn set_cross_file_cpp_inherit(&mut self, pairs: Vec<(syn::ItemStruct, String)>) {
+    pub fn set_cross_file_cpp_inherit(&mut self, pairs: Vec<(syn::ItemStruct, syn::ItemImpl)>) {
         // Stored, not applied: emit_file's reset pass clears
         // cpp_inherit_trait before its collect passes, so the seed must be
         // REPLAYED after the clears (same pattern as
@@ -7050,13 +7070,28 @@ impl CodeGen {
 
     fn replay_cross_file_cpp_inherit(&mut self) {
         let pairs = std::mem::take(&mut self.cross_file_cpp_inherit_pairs);
-        for (item_struct, trait_name) in &pairs {
+        for (item_struct, item_impl) in &pairs {
+            let Some(trait_name) = item_impl
+                .trait_
+                .as_ref()
+                .and_then(|(_, p, _)| p.segments.last())
+                .map(|s| s.ident.to_string())
+            else {
+                continue;
+            };
             let type_name = item_struct.ident.to_string();
             let scoped = self.scoped_type_key(&type_name);
             self.cpp_inherit_trait
                 .insert(type_name.clone(), trait_name.clone());
             self.cpp_inherit_trait
                 .insert(scoped.clone(), trait_name.clone());
+            // (ak) the impl header's trait arguments: a generic trait's base
+            // spells them.
+            self.record_cpp_inherit_impl_args(
+                &[type_name.clone(), scoped.clone()],
+                &trait_name,
+                item_impl,
+            );
             if let syn::Fields::Named(fields) = &item_struct.fields {
                 let order: Vec<String> = fields
                     .named
@@ -8568,6 +8603,7 @@ impl CodeGen {
         self.trait_declared_path_by_short_name.clear();
         self.cpp_inherit_trait.clear();
         self.cpp_inherit_extra_traits.clear();
+        self.cpp_inherit_impl_args.clear();
         // Phase 0 registries: per file, like `cpp_inherit_trait` (a stale
         // `hoisted_trait_interfaces` entry would make `emit_trait` drop a
         // same-keyed trait of a later file silently).

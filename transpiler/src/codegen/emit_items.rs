@@ -2811,7 +2811,12 @@ impl CodeGen {
         } else {
             ""
         };
+        // (ak) the struct's own parameters are in scope for the base clause: a
+        // generic implementor's base spells them (`template <class X> struct W
+        // : public T<X>`).
+        self.push_type_param_scope(&s.generics);
         let cpp_inherit_bases: Vec<String> = self.cpp_inherit_base_names(&name_str);
+        self.pop_type_param_scope();
         let base_clause = if cpp_inherit_bases.is_empty() {
             String::new()
         } else {

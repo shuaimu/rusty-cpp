@@ -3373,7 +3373,7 @@ impl CodeGen {
                                 } else {
                                     format!("{}::{}", module_path.join("::"), simple_type_name)
                                 };
-                                for key in [simple_type_name.clone(), type_name.clone(), scoped.clone(), module_scoped] {
+                                for key in [simple_type_name.clone(), type_name.clone(), scoped.clone(), module_scoped.clone()] {
                                     match self.cpp_inherit_trait.get(&key) {
                                         None => {
                                             self.cpp_inherit_trait.insert(key, trait_short.clone());
@@ -3387,6 +3387,15 @@ impl CodeGen {
                                         }
                                     }
                                 }
+                                // (ak) the impl header's trait arguments and
+                                // associated-type bindings: a generic trait's
+                                // interface class is a class template, and the
+                                // base clause spells its arguments.
+                                self.record_cpp_inherit_impl_args(
+                                    &[simple_type_name.clone(), type_name.clone(), scoped.clone(), module_scoped],
+                                    trait_short,
+                                    impl_block,
+                                );
                                 // Book §3.2.2: a by-value `self` method of a
                                 // tier-1 (member-dispatch) trait is a `&&` slot;
                                 // record the implementor's such methods for the
@@ -5375,6 +5384,92 @@ impl CodeGen {
             local_operator_renames,
             local_inherent_method_names,
         )
+    }
+
+    /// (ak) Record, under every key of `cpp_inherit_trait`, the impl header a
+    /// tier-1 base clause spells for a generic trait: the trait path's
+    /// arguments as written, the impl's associated-type bindings and the
+    /// impl's own parameter names in the order the self type applies them. A
+    /// second instantiation of one trait on one type (`impl Tr<u8>` beside
+    /// `impl Tr<u16>`: a forced pair, the census stops the default) keeps the
+    /// first — one base cannot carry two argument lists — and says so.
+    pub(super) fn record_cpp_inherit_impl_args(
+        &mut self,
+        keys: &[String],
+        trait_short: &str,
+        impl_block: &syn::ItemImpl,
+    ) {
+        let Some((_, trait_path, _)) = &impl_block.trait_ else {
+            return;
+        };
+        let trait_args: Vec<syn::GenericArgument> =
+            match trait_path.segments.last().map(|s| &s.arguments) {
+                Some(syn::PathArguments::AngleBracketed(ab)) => ab.args.iter().cloned().collect(),
+                _ => Vec::new(),
+            };
+        let assoc_types: Vec<(String, syn::Type)> = impl_block
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::ImplItem::Type(t) => Some((t.ident.to_string(), t.ty.clone())),
+                _ => None,
+            })
+            .collect();
+        let self_param_names: Vec<String> = match impl_block.self_ty.as_ref() {
+            syn::Type::Path(tp) => match tp.path.segments.last().map(|s| &s.arguments) {
+                Some(syn::PathArguments::AngleBracketed(ab)) => ab
+                    .args
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        syn::GenericArgument::Type(syn::Type::Path(p)) if p.qself.is_none() => {
+                            p.path.get_ident().map(|i| i.to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        if trait_args.is_empty() && assoc_types.is_empty() {
+            return;
+        }
+        let args = CppInheritImplArgs { trait_args, assoc_types, self_param_names };
+        let written = |a: &CppInheritImplArgs| -> String {
+            let mut parts: Vec<String> = a
+                .trait_args
+                .iter()
+                .map(|g| quote::ToTokens::to_token_stream(g).to_string())
+                .collect();
+            parts.extend(
+                a.assoc_types
+                    .iter()
+                    .map(|(n, t)| format!("{} = {}", n, quote::ToTokens::to_token_stream(t))),
+            );
+            format!("<{}>", parts.join(", "))
+        };
+        let mut warned = false;
+        for key in keys {
+            let map_key = (key.clone(), trait_short.to_string());
+            match self.cpp_inherit_impl_args.get(&map_key) {
+                None => {
+                    self.cpp_inherit_impl_args.insert(map_key, args.clone());
+                }
+                Some(prev) if written(prev) == written(&args) => {}
+                Some(prev) => {
+                    if !warned {
+                        warned = true;
+                        eprintln!(
+                            "[rusty-cpp] warning: `impl {}{} for {}` is a second instantiation of a tier-1 trait on one type; the base keeps the first impl's arguments {} (book §3.2.16: one base cannot carry two argument lists)",
+                            trait_short,
+                            written(&args),
+                            key,
+                            written(prev)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// (aj): the crate's struct / enum / union leaf names, every module (a

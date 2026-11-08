@@ -1,5 +1,27 @@
 use super::*;
 
+/// (ak) Replaces every bare single-segment type path by name, all at once
+/// (`impl<X, Y> Tr<X> for W<Y, X>` renames `X` and `Y` simultaneously; a
+/// pairwise pass would chain the swap). Spells a generic implementor's tier-1
+/// base in the struct's own parameter names.
+struct TypeIdentMapReplacer<'a> {
+    map: &'a std::collections::HashMap<String, syn::Type>,
+}
+
+impl syn::visit_mut::VisitMut for TypeIdentMapReplacer<'_> {
+    fn visit_type_mut(&mut self, ty: &mut syn::Type) {
+        if let syn::Type::Path(tp) = ty
+            && tp.qself.is_none()
+            && let Some(ident) = tp.path.get_ident()
+            && let Some(to) = self.map.get(&ident.to_string())
+        {
+            *ty = to.clone();
+            return;
+        }
+        syn::visit_mut::visit_type_mut(self, ty);
+    }
+}
+
 /// The two auto traits whose derivation the transpiler restates for C++.
 /// See [`CodeGen::derived_auto_trait_expr`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1252,6 +1274,124 @@ impl CodeGen {
         }
     }
 
+    /// (ak) The impl header recorded for `(type_name, trait_short)` under any
+    /// of the implementor's keys (`record_cpp_inherit_impl_args`).
+    fn cpp_inherit_impl_args_of(&self, type_name: &str, trait_short: &str) -> Option<&CppInheritImplArgs> {
+        let scoped = self.scoped_type_key(type_name);
+        [type_name.to_string(), scoped]
+            .iter()
+            .find_map(|k| self.cpp_inherit_impl_args.get(&(k.clone(), trait_short.to_string())))
+    }
+
+    /// (ak) The template arguments of a tier-1 trait's interface class for one
+    /// implementor, in the class's parameter order: the trait's type
+    /// parameters, then its associated type names (`emit_trait` builds the
+    /// class template that way), so `impl Tr<u8> for P { type Out = u64; }`
+    /// inherits `Tr<uint8_t, uint64_t>`. Lifetime and const arguments have no
+    /// class parameter and are dropped, as the class drops those parameters. A
+    /// generic implementor's own parameter names are rewritten to the struct's
+    /// (`impl<Y> Tr<Y> for W<Y>` inside `template <class X> struct W` inherits
+    /// `Tr<X>`), and `Self` to the struct. Empty for a plain trait — its class
+    /// is no template — so every pre-(ak) spelling is unchanged.
+    pub(super) fn cpp_inherit_base_template_args(&self, type_name: &str, trait_short: &str) -> Vec<String> {
+        let Some(args) = self.cpp_inherit_impl_args_of(type_name, trait_short) else {
+            return Vec::new();
+        };
+        // The trait's declaration fixes the class's parameter list; the impl
+        // header alone (a trait declared in another file) is read by argument
+        // kind in the same order.
+        let trait_item: Option<&syn::ItemTrait> = self
+            .trait_declared_path_by_short_name
+            .get(trait_short)
+            .and_then(|key| self.cpp_inherit_trait_items.get(key))
+            .or_else(|| self.cpp_inherit_trait_items.get(trait_short));
+        let (type_param_slots, assoc_names): (Vec<bool>, Vec<String>) = match trait_item {
+            Some(t) => (
+                t.generics
+                    .params
+                    .iter()
+                    .filter_map(|p| match p {
+                        syn::GenericParam::Type(_) => Some(true),
+                        syn::GenericParam::Const(_) => Some(false),
+                        syn::GenericParam::Lifetime(_) => None,
+                    })
+                    .collect(),
+                t.items
+                    .iter()
+                    .filter_map(|i| match i {
+                        syn::TraitItem::Type(at) => Some(at.ident.to_string()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            None => (
+                args.trait_args
+                    .iter()
+                    .filter_map(|a| match a {
+                        syn::GenericArgument::Type(_) => Some(true),
+                        syn::GenericArgument::Const(_) => Some(false),
+                        _ => None,
+                    })
+                    .collect(),
+                args.assoc_types.iter().map(|(n, _)| n.clone()).collect(),
+            ),
+        };
+        // The struct's own parameter names, positionally for the impl's; the
+        // census admits a generic implementor only applied to its own
+        // parameter list, so the positions line up.
+        let struct_params: Vec<String> = self
+            .declared_type_params
+            .get(type_name)
+            .or_else(|| self.declared_type_params.get(&self.scoped_type_key(type_name)))
+            .cloned()
+            .unwrap_or_default();
+        let mut renames: std::collections::HashMap<String, syn::Type> = std::collections::HashMap::new();
+        for (i, impl_param) in args.self_param_names.iter().enumerate() {
+            if let Some(struct_param) = struct_params.get(i)
+                && struct_param != impl_param
+                && let Ok(to) = syn::parse_str::<syn::Type>(struct_param)
+            {
+                renames.insert(impl_param.clone(), to);
+            }
+        }
+        let self_spelling = if struct_params.is_empty() {
+            type_name.to_string()
+        } else {
+            format!("{}<{}>", type_name, struct_params.join(", "))
+        };
+        if let Ok(to) = syn::parse_str::<syn::Type>(&self_spelling) {
+            renames.insert("Self".to_string(), to);
+        }
+        let map_arg = |ty: &syn::Type| -> String {
+            let mut ty = ty.clone();
+            let mut replacer = TypeIdentMapReplacer { map: &renames };
+            syn::visit_mut::VisitMut::visit_type_mut(&mut replacer, &mut ty);
+            self.map_type(&ty)
+        };
+        let mut out: Vec<String> = Vec::new();
+        let mut written = args
+            .trait_args
+            .iter()
+            .filter(|a| !matches!(a, syn::GenericArgument::Lifetime(_)));
+        for is_type in type_param_slots {
+            let arg = written.next();
+            if !is_type {
+                continue;
+            }
+            out.push(match arg {
+                Some(syn::GenericArgument::Type(ty)) => map_arg(ty),
+                _ => "void /* TODO: unwritten trait argument */".to_string(),
+            });
+        }
+        for name in assoc_names {
+            out.push(match args.assoc_types.iter().find(|(n, _)| n == &name) {
+                Some((_, ty)) => map_arg(ty),
+                None => "void /* TODO: unbound associated type */".to_string(),
+            });
+        }
+        out
+    }
+
     /// Book §3.2.16 phase 0 (multiple and virtual bases): the base-class
     /// spellings of a `#[cpp_inherit]` implementor, in impl order. A trait
     /// that is also a supertrait of another trait in the list is spelled
@@ -1270,7 +1410,12 @@ impl CodeGen {
                             .iter()
                             .any(|s| s == t && s != other)
                 });
-                let spelling = self.cpp_inherit_base_spelling(t);
+                let mut spelling = self.cpp_inherit_base_spelling(t);
+                // (ak) a generic trait's class is a template: `Tr<uint8_t>`.
+                let template_args = self.cpp_inherit_base_template_args(type_name, t);
+                if !template_args.is_empty() {
+                    spelling = format!("{}<{}>", spelling, template_args.join(", "));
+                }
                 if is_super_of_another {
                     format!("virtual {}", spelling)
                 } else {

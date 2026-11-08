@@ -54002,3 +54002,93 @@ fn test_a_trait_method_taking_a_crate_type_by_value_defines_its_bodies_after_the
     assert!(module.contains("uint32_t s(P p) const override;"), "{module}");
     assert!(module.contains("template <class U> uint32_t TAdapter<U>::s(P p) const {"), "{module}");
 }
+
+#[test]
+fn test_a_generic_trait_as_a_tier1_base_spells_the_class_template_arguments() {
+    // (ak) A generic trait's interface class is a class template over its type
+    // parameters and then its associated type names, but a tier-1 implementor
+    // spelled its base as the bare trait name (`struct P : public T {` for
+    // `impl T<u8> for P`): "expected class name", then the ctor's `T()` base
+    // init and every `override` failed with it. The base clause and the base
+    // init now spell the class's arguments from the impl header. Lifetime and
+    // const arguments have no class parameter; a generic implementor's own
+    // parameter names are rewritten to the struct's, and `Self` to the struct.
+    let src = r#"
+        pub mod a { pub trait T<A> { fn k(&self) -> A; fn n(&self) -> u32 { 2 } } }
+        pub struct P(pub u32);
+        impl a::T<u8> for P { fn k(&self) -> u8 { self.0 as u8 } }
+        pub trait Two<A, B> { fn a(&self) -> A; fn b(&self) -> B; }
+        pub struct Q(pub u32);
+        impl Two<u8, String> for Q { fn a(&self) -> u8 { 1 } fn b(&self) -> String { String::new() } }
+        pub trait L<'a, A> { fn k(&self, s: &'a str) -> A; }
+        pub struct R(pub u32);
+        impl<'a> L<'a, usize> for R { fn k(&self, s: &'a str) -> usize { s.len() } }
+        pub trait O { type Out; fn k(&self) -> u32; }
+        pub struct S1(pub u32);
+        impl O for S1 { type Out = u64; fn k(&self) -> u32 { self.0 } }
+        pub trait GO<A> { type Out; fn k(&self) -> A; }
+        pub struct S2(pub u32);
+        impl GO<u8> for S2 { type Out = u64; fn k(&self) -> u8 { 1 } }
+        pub trait G<A> { fn g(&self) -> u32; }
+        pub struct W<X> { pub x: X }
+        impl<Y> G<Y> for W<Y> { fn g(&self) -> u32 { 4 } }
+        pub trait Plain { fn p(&self) -> u32; }
+        pub struct V(pub u32);
+        impl Plain for V { fn p(&self) -> u32 { self.0 } }
+        pub trait SelfArg<A> { fn s(&self) -> A; }
+        pub struct Z(pub u32);
+        impl SelfArg<Self> for Z { fn s(&self) -> Z { Z(self.0) } }
+        "#;
+    let file: syn::File = syn::parse_str(src).unwrap();
+    let mut cg = test_codegen();
+    cg.set_interface_traits(true);
+    cg.set_tier1_default(true);
+    cg.emit_file(&file, None);
+    let out = cg.into_output();
+    // The written argument, the trait's declaring module, the base init.
+    assert!(out.contains("struct P : public ::a::T<uint8_t> {"), "{out}");
+    assert!(out.contains("P(uint32_t _0_init) : ::a::T<uint8_t>(), _0(std::move(_0_init)) {}"), "{out}");
+    assert!(out.contains("uint8_t k() const override;"), "{out}");
+    // Two arguments; a lifetime argument has no class parameter.
+    assert!(out.contains("struct Q : public Two<uint8_t, rusty::String> {"), "{out}");
+    assert!(out.contains("struct R : public L<size_t> {"), "{out}");
+    // An associated type is a class parameter after the type parameters.
+    assert!(out.contains("struct S1 : public O<uint64_t> {"), "{out}");
+    assert!(out.contains("struct S2 : public GO<uint8_t, uint64_t> {"), "{out}");
+    // A generic implementor: the impl's `Y` is the struct's `X`.
+    assert!(out.contains("template<typename X>\nstruct W : public G<X> {"), "{out}");
+    assert!(out.contains("W(X x_init) : G<X>(), x(std::move(x_init)) {}"), "{out}");
+    // `Self` as the trait argument is the struct.
+    assert!(out.contains("struct Z : public SelfArg<Z> {"), "{out}");
+    // A plain trait's spelling is unchanged.
+    assert!(out.contains("struct V : public Plain {"), "{out}");
+    assert!(out.contains("V(uint32_t _0_init) : Plain(), _0(std::move(_0_init)) {}"), "{out}");
+    for bare in [": public ::a::T {", ": public Two {", ": public L {", ": public O {", ": public GO {", ": public G {", ": public SelfArg {"] {
+        assert!(!out.contains(bare), "{bare} still bare: {out}");
+    }
+
+    // Tier 2: no base at all, unchanged.
+    let tier2 = transpile_str_interface_traits(src);
+    for s in ["struct P {", "struct Q {", "struct R {", "struct S1 {", "struct S2 {", "struct W {", "struct V {", "struct Z {"] {
+        assert!(tier2.contains(s), "{s}: {tier2}");
+    }
+    assert!(!tier2.contains("struct P : public"), "{tier2}");
+
+    // Module mode, tier 1: the same spelling.
+    let module_file: syn::File = syn::parse_str(
+        r#"
+        pub trait T<A> { fn k(&self) -> A; fn s(&self, p: P) -> u32 { p.0 } }
+        pub struct P(pub u32);
+        impl T<u8> for P { fn k(&self) -> u8 { self.0 as u8 } }
+        "#,
+    )
+    .unwrap();
+    let mut cg = test_codegen();
+    cg.set_interface_traits(true);
+    cg.set_tier1_default(true);
+    cg.emit_file(&module_file, Some("probe"));
+    let module = cg.into_output();
+    assert!(module.contains("struct P : public T<uint8_t> {"), "{module}");
+    assert!(module.contains("P(uint32_t _0_init) : T<uint8_t>(), _0(std::move(_0_init)) {}"), "{module}");
+    assert!(module.contains("uint8_t k() const override;"), "{module}");
+}
