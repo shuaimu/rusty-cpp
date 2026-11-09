@@ -51517,6 +51517,46 @@ fn test_aa_consumer_impl_of_dependency_trait_without_a_crate_wrap_witnesses_in_p
 }
 
 #[test]
+fn test_aa_consumer_impl_of_a_std_trait_skips_a_dependency_synthesized_lane() {
+    // A dependency's manifest lists the std traits it synthesized a lane for
+    // (lion-executor-spec: `From`, for `impl From<PollResult<T>> for
+    // StdPoll<T>`) among declared_traits, and marks them foreign. A consumer's
+    // impl of that std trait (lion-reactor: `impl From<IoError> for
+    // std::io::Error`) is not an impl of the dependency's trait. Routed into
+    // the dependency's lane it bridged into `::lion_executor_spec::From_::impl_`
+    // and specialized `::lion_executor_spec::impls_From`, neither of which
+    // that crate declares, from a crate that does not depend on it.
+    let mut dep = aa_dependency_lane_manifest();
+    dep.declared_traits.push("From".to_string());
+    dep.declared_traits.sort();
+    dep.foreign_lane_traits = vec!["From".to_string()];
+    let file: syn::File = syn::parse_str(
+        r#"
+        pub struct IoError { pub code: i32 }
+        impl From<IoError> for String { fn from(e: IoError) -> String { e.code.to_string() } }
+        pub struct Root { pub v: i32 }
+        impl Ser for Root { fn req(&self) -> i32 { self.v } }
+    "#,
+    )
+    .unwrap();
+    let mut cg = test_codegen();
+    cg.set_dependency_ufcs_trait_manifests(vec![dep]);
+    cg.set_crate_name("consumer");
+    cg.emit_file(&file, Some("consumer"));
+    let out = cg.into_output();
+    // The dependency's own trait still rides its lane.
+    assert!(out.contains("namespace __ufcs_Ser__serde_core {"), "{out}");
+    assert!(
+        out.contains("template<> struct ::serde_core::impls_Ser<::consumer::Root> : std::true_type {};"),
+        "{out}"
+    );
+    // std's `From` does not.
+    assert!(!out.contains("__ufcs_From__serde_core"), "{out}");
+    assert!(!out.contains("serde_core::From_"), "{out}");
+    assert!(!out.contains("serde_core::impls_From"), "{out}");
+}
+
+#[test]
 fn test_aa_same_leaf_local_trait_keeps_the_dependency_impl_on_the_dependency_lane() {
     // serde_bytes's shape: the consumer declares its OWN `Ser` beside the
     // dependency's. The own impl keeps the local lane (flat `Ser_::impl_`, bare

@@ -22,6 +22,14 @@ pub struct UfcsTraitManifest {
     /// Trait names this crate DECLARES (for `use dep::Tr` recognition).
     #[serde(default)]
     pub declared_traits: Vec<String>,
+    /// The entries of `declared_traits` that are synthesized foreign lanes
+    /// (`synthesize_foreign_trait_lanes`: a std trait such as `From`,
+    /// implemented here for a non-local self type), not traits this crate
+    /// declares. A consumer's impl of that std trait is not an impl of this
+    /// crate's trait, so it does not ride this crate's lane
+    /// (`dependency_lane_for_trait`).
+    #[serde(default)]
+    pub foreign_lane_traits: Vec<String>,
     /// Trait name → `::`-joined C++-escaped declaration-module path (empty
     /// for crate root). Lets a consumer route a trait's PROVIDED STATIC
     /// (`Error::invalid_value` when the local impl lacks the override) to the
@@ -6462,6 +6470,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             trait_nonvtable_defaults: std::collections::BTreeMap::new(),
             module: "depmod".to_string(),
             declared_traits: vec!["Greet".to_string()],
+            foreign_lane_traits: Vec::new(),
             declared_trait_methods: std::collections::BTreeMap::from([(
                 "Greet".to_string(),
                 vec!["hello".to_string()],
@@ -6556,6 +6565,7 @@ epilogue_includes = [{ path = "demo.hpp", form = "quote" }]"#,
             trait_nonvtable_defaults: std::collections::BTreeMap::new(),
             module: "depmod".to_string(),
             declared_traits: vec!["Greet".to_string()],
+            foreign_lane_traits: Vec::new(),
             declared_trait_methods: std::collections::BTreeMap::from([(
                 "Greet".to_string(),
                 vec!["consume".to_string()],

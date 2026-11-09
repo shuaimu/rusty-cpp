@@ -5523,6 +5523,14 @@ impl CodeGen {
         let mut declared_traits: Vec<String> =
             self.ufcs_declared_trait_names.iter().cloned().collect();
         declared_traits.sort();
+        let mut foreign_lane_traits: Vec<String> = self
+            .foreign_lane_trait_keys
+            .iter()
+            .map(|key| key.rsplit("::").next().unwrap_or(key).to_string())
+            .filter(|leaf| self.ufcs_declared_trait_names.contains(leaf))
+            .collect();
+        foreign_lane_traits.sort();
+        foreign_lane_traits.dedup();
         let mut method_owners: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
         for (method, traits) in &self.ufcs_method_trait_owners {
@@ -5701,6 +5709,7 @@ impl CodeGen {
             version: crate::transpile::UFCS_TRAIT_MANIFEST_VERSION,
             module: module.to_string(),
             declared_traits,
+            foreign_lane_traits,
             declared_trait_modules: self
                 .ufcs_declared_trait_modules
                 .iter()
@@ -22452,14 +22461,19 @@ impl CodeGen {
     /// dependency, `("x", "::")` for an unwrapped one. `None` for a
     /// crate-declared trait (its lane is local) and for a trait no consumed
     /// manifest declares (a foreign lane, see `synthesize_foreign_trait_lanes`).
+    /// A dependency's own synthesized lane for a std trait is not a
+    /// declaration either: lion-executor-spec lists `From` because of its
+    /// `impl From<PollResult<T>> for StdPoll<T>`, and lion-reactor's
+    /// `impl From<IoError> for std::io::Error` implements std's `From`, not
+    /// that crate's internal-linkage `From_` lane.
     fn dependency_lane_for_trait(&self, trait_key: &str, leaf: &str) -> Option<(String, String)> {
         if self.trait_declared_paths.contains(trait_key) {
             return None;
         }
-        let m = self
-            .dependency_ufcs_trait_manifests
-            .iter()
-            .find(|m| m.declared_traits.iter().any(|t| t == leaf))?;
+        let m = self.dependency_ufcs_trait_manifests.iter().find(|m| {
+            m.declared_traits.iter().any(|t| t == leaf)
+                && !m.foreign_lane_traits.iter().any(|t| t == leaf)
+        })?;
         let root = if crate::transpile::crate_is_namespace_wrapped(&m.module) {
             format!("::{}::", m.module)
         } else {
