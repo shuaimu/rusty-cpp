@@ -24,3 +24,31 @@ pub trait FdBackend {
 pub fn with_fd_backend(mut backend: Box<dyn FdBackend>) -> u32 {
     backend.close(4) + backend.label()
 }
+
+/// Lion's `OsInterrupt` shape: a trait object shared through `Arc`, coerced
+/// from an implementor's own `Arc<T>`. The dependency's implementor is
+/// reached through its trait lane, a consumer's through its members.
+pub trait Signal {
+    fn signal(&self) -> u32;
+}
+
+pub struct Bell {
+    pub tone: u32,
+}
+
+impl Signal for Bell {
+    fn signal(&self) -> u32 {
+        self.tone
+    }
+}
+
+pub fn signal_twice(signal: std::sync::Arc<dyn Signal>) -> u32 {
+    let again = signal.clone();
+    signal.signal() + again.signal()
+}
+
+/// (40 + 40) for the dependency's own `Bell`.
+pub fn bell_total() -> u32 {
+    let bell = std::sync::Arc::new(Bell { tone: 40 });
+    signal_twice(bell)
+}

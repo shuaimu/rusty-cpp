@@ -7625,6 +7625,60 @@ fn owning_pointer_reborrow_keeps_payload_dereference() {
 }
 
 #[test]
+fn ufcs_lane_definitions_naming_a_later_type_by_value_compile() {
+    // lion-reactor: `mod os`'s OsBackend precedes `mod types` in source, so
+    // its dyn adapter's inline overrides took `types::interest::Interest` by
+    // value before Interest was defined ("variable has incomplete type").
+    // srpc.channel: the prologue tier-1 bridge of ChannelFactoryBase returned
+    // ConnectResult by value before any struct definition ("incomplete result
+    // type in function definition").
+    let source = r#"
+        pub trait Backend { fn register(&mut self, token: usize, interest: Interest) -> Interest; }
+        pub struct Plain;
+        impl Backend for Plain {
+            fn register(&mut self, _token: usize, interest: Interest) -> Interest { interest }
+        }
+        #[derive(Clone, Copy)]
+        pub struct Interest { pub bits: u8 }
+        pub trait Factory { fn connect(&self, address: &str) -> ConnectResult; }
+        pub struct Tcp;
+        impl Factory for Tcp {
+            fn connect(&self, _address: &str) -> ConnectResult { ConnectResult { ok: true } }
+        }
+        pub struct ConnectResult { pub ok: bool }
+    "#;
+    // Module mode under --cxx-namespace: the shape both failures had.
+    let file: syn::File = syn::parse_str(source).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_interface_traits(true);
+    cg.set_cxx_namespace(Some("probe".to_string()));
+    cg.emit_file(&file, Some("probe.lanes"));
+    let output = cg.into_output();
+    // Declared in place, defined once every type is.
+    assert!(
+        output.contains("template<class S> requires has_tier1_Factory<S> ConnectResult connect(Factory_::impl_::tag, const S& __self, std::string_view address);"),
+        "{output}"
+    );
+    assert!(output.contains("Interest register_(size_t token, Interest interest) override;"), "{output}");
+    assert!(
+        output.contains("template <class U> Interest BackendAdapter<U>::register_(size_t token, Interest interest) {"),
+        "{output}"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let cpp = temp.path().join("probe.lanes.cppm");
+    std::fs::write(&cpp, &output).unwrap();
+    let result = std::process::Command::new(std::env::var("CXX").unwrap_or_else(|_| "clang++".into()))
+        .args(["-w", "-std=c++23", "-stdlib=libc++", "--precompile"])
+        .arg("-I").arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../include"))
+        .arg(&cpp).arg("-o").arg(temp.path().join("probe.lanes.pcm")).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{output}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn user_upgrade_method_keeps_its_declared_value_type() {
     let output = transpile_str(r#"
         pub struct Value { pub value: i32 }
@@ -9180,10 +9234,17 @@ fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
     assert_eq!(module.matches("namespace Layer_::impl_ {").count(), 3, "{module}");
     assert!(module.contains("using ::marked::__ufcs_Clash::value"), "{module}");
     // Book §3.2.10: per TRAIT, three generic forwarders each — not per
-    // implementor — every slot CPO-first.
+    // implementor — every slot CPO-first. The owning one probes through
+    // `rusty_target()` (the pointee of an `Arc<U>` it shares), the reference
+    // ones through the implementor they hold.
     assert_eq!(
         module.matches("{ if constexpr (requires { RootDispatch_::root_value(value_); })").count(),
-        3,
+        2,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("{ if constexpr (requires { RootDispatch_::root_value(rusty_target()); })").count(),
+        1,
         "{module}"
     );
     assert_eq!(
@@ -9193,7 +9254,12 @@ fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
     );
     assert_eq!(
         module.matches("{ if constexpr (requires { Clash_::value(value_); })").count(),
-        9,
+        6,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("{ if constexpr (requires { Clash_::value(rusty_target()); })").count(),
+        3,
         "{module}"
     );
     assert_eq!(
@@ -9203,7 +9269,12 @@ fn test_exact_trait_member_dispatch_is_lexically_scoped_and_clang_runnable() {
     );
     assert_eq!(
         module.matches("{ if constexpr (requires { Layer_::depth(value_); })").count(),
-        6,
+        4,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("{ if constexpr (requires { Layer_::depth(rusty_target()); })").count(),
+        2,
         "{module}"
     );
 
@@ -9472,7 +9543,12 @@ pub mod external_glob {
     );
     assert_eq!(
         out.matches("{ if constexpr (requires { Clash_::value(value_); })").count(),
-        9,
+        6,
+        "{out}"
+    );
+    assert_eq!(
+        out.matches("{ if constexpr (requires { Clash_::value(rusty_target()); })").count(),
+        3,
         "{out}"
     );
 }
@@ -10133,6 +10209,44 @@ int main() {
         run.status.success(),
         "Ref-forwarder stub runtime proof failed (exit {:?}): the &mut slot through a non-const binding must trap, the RefMut forwarder must work",
         run.status.code()
+    );
+}
+
+#[test]
+fn test_owning_forwarder_reaches_an_arc_shared_implementor_through_its_pointer() {
+    // Book §3.2.10: `Arc<Bell>` -> `Arc<dyn Tone>` shares the source Arc, so
+    // the owning forwarder holds the Arc and its slots probe the pointee
+    // (Lion's `Arc<dyn OsInterrupt>` over SRPC's `Arc<SrpcEpollInterrupt>`).
+    // A boxed pointer that is itself the implementor (`impl Tone for
+    // Arc<Chime>`) keeps the pointer's own impl, as in Rust.
+    let source = r#"
+        use std::sync::Arc;
+        pub trait Tone { fn tone(&self) -> i32; }
+        pub struct Bell { pub t: i32 }
+        impl Tone for Bell { fn tone(&self) -> i32 { self.t } }
+        pub struct Chime { pub t: i32 }
+        impl Tone for Arc<Chime> { fn tone(&self) -> i32 { 1005 } }
+        pub fn exercise() -> i32 {
+            let bell = Arc::new(Bell { t: 7 });
+            let shared: Arc<dyn Tone> = bell.clone();
+            let boxed: Box<dyn Tone> = Box::new(Arc::new(Chime { t: 5 }));
+            shared.tone() * 10000 + boxed.tone() + bell.t * 100
+        }
+    "#;
+    let output = transpile_str_interface_traits(source);
+    assert!(
+        output.contains("decltype(auto) rusty_target() const { if constexpr (!has_Tone<U> && requires { value_.operator->(); *value_; }) { return (*value_); } else { return (value_); } }"),
+        "{output}"
+    );
+    assert!(
+        output.contains("int32_t tone() const override { if constexpr (requires { Tone_::tone(rusty_target()); }) { return Tone_::tone(rusty_target()); }"),
+        "{output}"
+    );
+    run_rust_and_cpp_runtime_probe(
+        source,
+        "assert_eq!(exercise(), 71705);",
+        &output,
+        "return exercise() == 71705 ? 0 : 1;",
     );
 }
 
@@ -15494,6 +15608,50 @@ fn test_sibling_file_drop_struct_literal_uses_its_constructor() {
     plain.emit_file(&file, Some("my_crate.user"));
     let plain = plain.into_output();
     assert!(plain.contains("auto g = Guard{.code = 7, .armed = true};"), "{plain}");
+}
+
+/// A tier-1 implementor in a SIBLING file (crate mode, tier 1 the default)
+/// inherits its trait's interface class there, so it is no C++ aggregate and
+/// a literal of it here must use its fieldwise constructor. The per-file
+/// collect pass saw no impl and emitted a designated initializer (SRPC's
+/// server.rs and client.rs building serializable.rs's `BufferSink { bytes }`,
+/// a `SinkBase` implementor).
+#[test]
+fn test_sibling_file_tier1_implementor_literal_uses_its_constructor() {
+    let sibling_source = "pub trait Gauge { fn reading(&self) -> u32; }\n\
+         pub struct Meter { pub level: u32, pub scale: u32 }\n\
+         impl Gauge for Meter { fn reading(&self) -> u32 { self.level * self.scale } }";
+    let sibling_file: syn::File = syn::parse_str(sibling_source).unwrap();
+    let sibling: syn::ItemStruct =
+        syn::parse_str("pub struct Meter { pub level: u32, pub scale: u32 }").unwrap();
+    let file: syn::File = syn::parse_str(
+        "use super::meters::Meter;\npub fn make() -> u32 { let m = Meter { scale: 3, level: 7 }; m.level }",
+    )
+    .unwrap();
+    let units: Vec<(Vec<String>, &syn::File)> =
+        vec![(vec!["meters".to_string()], &sibling_file), (vec!["user".to_string()], &file)];
+    let verdicts = std::sync::Arc::new(crate::tier_census::CrateTierVerdicts::from_outcome(
+        &crate::tier_census::pair_verdicts_for_units(&units),
+    ));
+    let emit = |tier1: bool, census: bool| {
+        let mut cg = test_codegen();
+        cg.set_tier1_default(tier1);
+        if census {
+            cg.set_crate_tier_verdicts(Some(verdicts.clone()));
+        }
+        cg.set_cross_file_structs(vec![sibling.clone()]);
+        cg.set_cross_file_tier1_implementors();
+        cg.emit_file(&file, Some("my_crate.user"));
+        cg.into_output()
+    };
+    let out = emit(true, true);
+    assert!(out.contains("auto m = Meter(7, 3);"), "{out}");
+    assert!(!out.contains("Meter{."), "{out}");
+    // Without the crate-wide census, or with tier 1 off (no inheritance), the
+    // literal stays an aggregate init.
+    for plain in [emit(true, false), emit(false, true)] {
+        assert!(plain.contains("auto m = Meter{.scale = 3, .level = 7};"), "{plain}");
+    }
 }
 
 /// A `pub mod` after another item used to emit its `export import` at that
@@ -49610,6 +49768,199 @@ fn test_ufcs_blanket_impl_over_crate_trait_emits_constrained_marker() {
     );
 }
 
+/// Crate-mode shape for the nested-module marker tests: a child module
+/// wrapped in `--cxx-namespace`, with a user type map (srpc's
+/// `rust-type-map.toml` spells `SerializableSharedPtrHolder` as
+/// `details::SerializableSharedPtrHolder`).
+fn transpile_str_module_with_type_map(
+    rust_code: &str,
+    module_name: &str,
+    cxx_namespace: &str,
+    mappings: &[(&str, &str)],
+) -> String {
+    let mut type_map = types::UserTypeMap::default();
+    for (rust, cpp) in mappings {
+        type_map.mappings.insert((*rust).to_string(), (*cpp).to_string());
+    }
+    let file: syn::File = syn::parse_str(rust_code).unwrap();
+    let mut cg = CodeGen::with_type_map(type_map);
+    if std::env::var_os("RUSTY_CPP_TEST_TIER1").is_none() {
+        cg.set_tier1_default(false);
+    }
+    cg.set_cxx_namespace(Some(cxx_namespace.to_string()));
+    cg.emit_file(&file, Some(module_name));
+    cg.into_output()
+}
+
+#[test]
+fn test_ufcs_nested_impl_marker_takes_a_type_mapped_crate_root_path() {
+    // srpc: `SerializableSharedPtrHolder = "details::SerializableSharedPtrHolder"`
+    // made the holder's two impls inside `mod details` reach the marker as the
+    // relative `details::Holder<T>`; the Fix B guard read the bare `details`
+    // as unresolvable and skipped both markers. The spelling is the type's
+    // crate-root path, so the marker is emitted, anchored at the namespace.
+    let out = transpile_str_module_with_type_map(
+        r#"
+        pub trait Payload { fn k(&self) -> i32; }
+        pub trait Base { fn kind(&self) -> i32; }
+        pub trait Marker {}
+        pub mod details {
+            use super::{Base, Marker, Payload};
+            pub struct Holder<T> { pub v: T }
+            impl<T: Payload> Marker for Holder<T> {}
+            impl<T: Payload> Base for Holder<T> { fn kind(&self) -> i32 { self.v.k() } }
+            pub struct Cell<T> { pub v: T }
+            impl Base for Cell<i32> { fn kind(&self) -> i32 { self.v } }
+        }
+        "#,
+        "rrr.ser",
+        "rrr",
+        &[("Holder", "details::Holder"), ("Cell", "details::Cell")],
+    );
+    assert!(
+        !out.contains("implementor marker skipped"),
+        "a type-mapped crate-root path must not be skipped:\n{out}"
+    );
+    assert!(
+        out.contains("template<class T> requires (has_Payload<T>) struct impls_Base<::rrr::details::Holder<T>> : std::true_type {};"),
+        "the generic impl's marker, anchored:\n{out}"
+    );
+    assert!(
+        out.contains("template<class T> requires (has_Payload<T>) struct impls_Marker<::rrr::details::Holder<T>> : std::true_type {};"),
+        "the method-less impl's marker, anchored:\n{out}"
+    );
+    assert!(
+        out.contains("template<> struct impls_Base<::rrr::details::Cell<int32_t>> : std::true_type {};"),
+        "the concrete impl's marker, anchored:\n{out}"
+    );
+}
+
+#[test]
+fn test_ufcs_nested_impl_marker_still_skips_an_ambiguous_type_mapped_leaf() {
+    // `Dup` is declared in two unrelated modules, so its recorded module is
+    // blanked: `a::Dup<T>` is not proven to be either impl's crate-root path.
+    let out = transpile_str_module_with_type_map(
+        r#"
+        pub trait Payload { fn k(&self) -> i32; }
+        pub trait Base { fn kind(&self) -> i32; }
+        pub mod a {
+            pub struct Dup<T> { pub v: T }
+            impl<T: super::Payload> super::Base for Dup<T> { fn kind(&self) -> i32 { 1 } }
+        }
+        pub mod b {
+            pub struct Dup<T> { pub v: T }
+            impl<T: super::Payload> super::Base for Dup<T> { fn kind(&self) -> i32 { 2 } }
+        }
+        "#,
+        "rrr.ser",
+        "rrr",
+        &[("Dup", "a::Dup")],
+    );
+    assert!(
+        out.contains("// implementor marker skipped: `impl Base for a::Dup<T>` in module `a`"),
+        "{out}"
+    );
+    assert!(!out.contains("struct impls_Base<::rrr::a::Dup"), "{out}");
+    assert!(!out.contains("struct impls_Base<a::Dup"), "{out}");
+}
+
+#[test]
+fn test_ufcs_nested_impl_marker_still_skips_a_sibling_relative_path() {
+    // The map spells `Deep` relative to `outer`, where the impl is; at the
+    // crate root `inner::Deep<T>` names nothing (alloc's
+    // `into_iter::IntoIter<T>` in `vec`).
+    let out = transpile_str_module_with_type_map(
+        r#"
+        pub trait Payload { fn k(&self) -> i32; }
+        pub trait Base { fn kind(&self) -> i32; }
+        pub mod outer {
+            pub mod inner { pub struct Deep<T> { pub v: T } }
+            use self::inner::Deep;
+            impl<T: crate::Payload> crate::Base for Deep<T> { fn kind(&self) -> i32 { self.v.k() } }
+        }
+        "#,
+        "rrr.ser",
+        "rrr",
+        &[("Deep", "inner::Deep")],
+    );
+    assert!(
+        out.contains("// implementor marker skipped: `impl Base for inner::Deep<T>` in module `outer`"),
+        "{out}"
+    );
+    assert!(!out.contains("struct impls_Base<::rrr::inner::Deep"), "{out}");
+    assert!(!out.contains("struct impls_Base<inner::Deep"), "{out}");
+}
+
+#[test]
+fn test_ufcs_nested_impl_marker_skips_a_path_that_also_reads_module_relative() {
+    // Inside `details`, `details::X` also names `details::details::X`: the
+    // registry keeps the ancestor `details` as X's module, but the spelling
+    // does not prove which type it means, so the marker stays skipped.
+    let out = transpile_str_module_with_type_map(
+        r#"
+        pub trait Payload { fn k(&self) -> i32; }
+        pub trait Base { fn kind(&self) -> i32; }
+        pub mod details {
+            pub struct X<T> { pub v: T }
+            pub mod details { pub struct X<T> { pub v: T } }
+            impl<T: crate::Payload> crate::Base for X<T> { fn kind(&self) -> i32 { self.v.k() } }
+        }
+        "#,
+        "rrr.ser",
+        "rrr",
+        &[("X", "details::X")],
+    );
+    assert!(
+        out.contains("// implementor marker skipped: `impl Base for details::X<T>` in module `details`"),
+        "{out}"
+    );
+    assert!(!out.contains("struct impls_Base<::rrr::details::X"), "{out}");
+}
+
+#[test]
+fn test_ufcs_lane_body_spells_a_generic_self_with_its_arguments() {
+    // lion-executor-spec: `impl<T> From<StdPoll<T>> for PollResult<T>` moved
+    // from a static member (where the bare `PollResult` is the injected class
+    // name) to a free `From_::impl_::from`, where it names nothing.
+    let out = transpile_str(
+        r#"
+        pub mod types {
+            use std::task::Poll as StdPoll;
+            pub enum PollResult<T> { Ready(T), Pending, Invalid }
+            impl<T> From<StdPoll<T>> for PollResult<T> {
+                fn from(poll: StdPoll<T>) -> Self {
+                    match poll {
+                        StdPoll::Ready(v) => PollResult::Ready(v),
+                        StdPoll::Pending => PollResult::Pending,
+                    }
+                }
+            }
+            impl<T> From<PollResult<T>> for StdPoll<T> {
+                fn from(poll: PollResult<T>) -> Self {
+                    match poll {
+                        PollResult::Ready(v) => StdPoll::Ready(v),
+                        PollResult::Pending => StdPoll::Pending,
+                        PollResult::Invalid => StdPoll::Pending,
+                    }
+                }
+            }
+        }
+        "#,
+    );
+    let lanes = out.split("namespace __ufcs_From {").skip(1).collect::<Vec<_>>().join("\n");
+    assert!(!lanes.is_empty(), "{out}");
+    assert!(!lanes.contains("-> PollResult {") && !lanes.contains("PollResult{"), "{lanes}");
+    assert!(!lanes.contains("-> rusty::Poll {"), "{lanes}");
+    assert!(
+        lanes.contains("-> PollResult<T> {") && lanes.contains("-> rusty::Poll<T> {"),
+        "the lambdas take the concrete self type:\n{lanes}"
+    );
+    // The module's `use std::task::Poll as StdPoll;` resolves in the lane too.
+    assert!(!lanes.contains("Poll_Ready") && !lanes.contains("Poll_Pending"), "{lanes}");
+    assert!(lanes.contains(".is_ready()") && lanes.contains("::ready_with(v)"), "{lanes}");
+    assert!(!lanes.contains("::Ready(v)") && !lanes.contains("::Pending()"), "{lanes}");
+}
+
 #[test]
 fn test_ufcs_type_param_receiver_candidates_come_from_its_bound() {
     // Regime 2: a type-parameter receiver's candidates are its bounds, even
@@ -52738,9 +53089,11 @@ fn test_no_receiver_lane_body_calls_a_sibling_trait_static_through_its_lane() {
         !out.contains("return Inner::from_iter("),
         "the sibling trait's static call is not the bare interface name: {out}"
     );
+    // The key is the impl's self type: a concrete lane's return-type hint
+    // types `Self` as it (the lane's `using Self` alias names the same type).
     assert!(
-        out.contains("Inner_::from_iter(rusty::self_tag<Self>{}, std::move(i))"),
-        "the sibling generic trait's static call is its keyed lane call on the lane's `Self` alias: {out}"
+        out.contains("Inner_::from_iter(rusty::self_tag<Vecc<T>>{}, std::move(i))"),
+        "the sibling generic trait's static call is its keyed lane call on the lane's self type: {out}"
     );
 }
 

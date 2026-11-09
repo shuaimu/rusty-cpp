@@ -12,6 +12,8 @@
 import rc_port;
 
 #include <rusty/rusty.hpp>
+// CMake builds the rc_port tests with -DNDEBUG; the checks below are asserts.
+#undef NDEBUG
 #include <cassert>
 #include <cstdio>
 
@@ -69,6 +71,46 @@ static void test_weak_clone() {
     assert(Rc<int>::weak_count(p) == 2);
 }
 
+// A payload that cannot move (deleted move operations, as the transpiler
+// lowers a `PhantomPinned` type such as SRPC's `Reactor`) and records its
+// destruction. `Rc::make_with` builds it from a factory's prvalue inside the
+// allocation; `Rc::make` forwards constructor arguments.
+static int pinned_alive = 0;
+struct Pinned {
+    int value;
+    explicit Pinned(int v) : value(v) { ++pinned_alive; }
+    Pinned(const Pinned&) = delete;
+    Pinned(Pinned&&) = delete;
+    Pinned& operator=(const Pinned&) = delete;
+    Pinned& operator=(Pinned&&) = delete;
+    ~Pinned() { --pinned_alive; }
+    static Pinned new_(int v) { return Pinned(v); }
+};
+
+static void test_make_with_builds_a_non_movable_payload_in_place() {
+    {
+        auto p = Rc<Pinned>::make_with([&] { return Pinned::new_(31); });
+        assert(p->value == 31);
+        assert(pinned_alive == 1);
+        auto p2 = p.clone();
+        assert(Rc<Pinned>::strong_count(p) == 2);
+        auto w = Rc<Pinned>::downgrade(p2);
+        assert(Rc<Pinned>::weak_count(p) == 1);
+    }
+    // Both strong handles and the weak one are gone: dropped and freed once.
+    assert(pinned_alive == 0);
+}
+
+static void test_make_forwards_constructor_arguments() {
+    {
+        auto p = Rc<Pinned>::make(47);
+        assert(p->value == 47);
+        assert(Rc<Pinned>::strong_count(p) == 1);
+        assert(pinned_alive == 1);
+    }
+    assert(pinned_alive == 0);
+}
+
 static void run(const char* name, void (*fn)()) {
     std::printf("  %s ... ", name);
     std::fflush(stdout);
@@ -84,6 +126,8 @@ int main() {
     run("move keeps refcount",         test_move_does_not_change_refcount);
     run("downgrade -> weak_count",     test_downgrade_increments_weak_count);
     run("Weak::clone",                 test_weak_clone);
+    run("make_with: non-movable payload", test_make_with_builds_a_non_movable_payload_in_place);
+    run("make: forwarded ctor args",   test_make_forwards_constructor_arguments);
     std::printf("rc_port: all tests passed\n");
     return 0;
 }

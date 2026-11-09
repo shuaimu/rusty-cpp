@@ -2144,6 +2144,10 @@ pub struct CodeGen {
     /// see TranspileOptions::cross_file_drop_types), unique among the
     /// crate's struct names.
     pub(crate) cross_file_drop_tails: HashSet<String>,
+    /// Struct tails that implement a crate trait as tier 1 (crate mode;
+    /// see `set_cross_file_tier1_implementors`), unique among the crate's
+    /// struct names.
+    pub(crate) cross_file_tier1_implementor_tails: HashSet<String>,
     /// Named-field declaration order of structs a sibling file declares
     /// (crate mode; unique struct names only), for the fieldwise-constructor
     /// form of their literals.
@@ -3855,6 +3859,7 @@ impl CodeGen {
             types_with_phantom_pinned: HashSet::new(),
             cross_file_phantom_pinned_tails: HashSet::new(),
             cross_file_drop_tails: HashSet::new(),
+            cross_file_tier1_implementor_tails: HashSet::new(),
             cross_file_struct_field_order: HashMap::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
@@ -5868,6 +5873,88 @@ impl CodeGen {
         }
     }
 
+    /// Implementor markers of a nested-module impl: anchor a RELATIVE path
+    /// `m1::…::mk::Leaf` that spells a local type by its path from the crate
+    /// root, so the marker guards below see it qualified. Such a spelling
+    /// reaches the marker through a user type-map target (srpc:
+    /// `SerializableSharedPtrHolder = "details::SerializableSharedPtrHolder"`)
+    /// and names the declared type at the crate root, where the marker sits,
+    /// but its bare head is the same token as a sibling-relative path's
+    /// (alloc: `into_iter::IntoIter<T>` inside `vec`), which does not resolve
+    /// there. A path is anchored (`::details::…`; a `--cxx-namespace` close
+    /// requalifies it like any crate-root reference) only when the registries
+    /// prove the crate-root reading: its head is a declared module, the leaf's
+    /// recorded declaration module is exactly the spelled prefix (a leaf
+    /// declared in unrelated modules is blanked and never matches), and the
+    /// same spelling read relative to the impl's module names no declared
+    /// type. Everything else is returned unchanged, so the guards still skip
+    /// what they skipped; a crate-root impl is not touched at all.
+    fn anchor_crate_root_relative_local_type_paths(&self, cpp_ty: &str) -> String {
+        if self.ufcs_impl_module_path.is_empty() || self.local_type_module_path.is_empty() {
+            return cpp_ty.to_string();
+        }
+        let impl_module_raw = self.ufcs_impl_module_path.join("::");
+        let impl_module_escaped = self
+            .ufcs_impl_module_path
+            .iter()
+            .map(|segment| escape_cpp_keyword(segment))
+            .collect::<Vec<_>>()
+            .join("::");
+        let ident_byte = |b: u8| b >= 0x80 || b.is_ascii_alphanumeric() || b == b'_';
+        let bytes = cpp_ty.as_bytes();
+        let mut out = String::with_capacity(cpp_ty.len() + 2);
+        let mut i = 0;
+        while i < bytes.len() {
+            if !(bytes[i] >= 0x80 || bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
+                let ch_len = cpp_ty[i..].chars().next().map_or(1, char::len_utf8);
+                out.push_str(&cpp_ty[i..i + ch_len]);
+                i += ch_len;
+                continue;
+            }
+            // The maximal `a::b::…::c` path starting here.
+            let start = i;
+            let mut segments: Vec<&str> = Vec::new();
+            loop {
+                let seg_start = i;
+                while i < bytes.len() && ident_byte(bytes[i]) {
+                    i += 1;
+                }
+                segments.push(&cpp_ty[seg_start..i]);
+                if i + 2 < bytes.len()
+                    && bytes[i] == b':'
+                    && bytes[i + 1] == b':'
+                    && (bytes[i + 2] >= 0x80 || bytes[i + 2].is_ascii_alphabetic() || bytes[i + 2] == b'_')
+                {
+                    i += 2;
+                } else {
+                    break;
+                }
+            }
+            let path = &cpp_ty[start..i];
+            let already_qualified = start >= 2 && &cpp_ty[start - 2..start] == "::";
+            let crate_root_path = segments.len() >= 2
+                && !already_qualified
+                && self.declared_module_names.contains(segments[0])
+                && self
+                    .local_type_module_path
+                    .get(segments[segments.len() - 1])
+                    .is_some_and(|module| {
+                        !module.is_empty() && *module == segments[..segments.len() - 1].join("::")
+                    })
+                && !self
+                    .local_declared_types
+                    .contains(&format!("{}::{}", impl_module_raw, path))
+                && !self
+                    .local_declared_types
+                    .contains(&format!("{}::{}", impl_module_escaped, path));
+            if crate_root_path {
+                out.push_str("::");
+            }
+            out.push_str(path);
+        }
+        out
+    }
+
     /// serde_core Fix B (param/return positions): qualify EVERY nested-module
     /// local type name appearing anywhere in a type string — `Result<…,
     /// I8Deserializer<E>>` → `…, de::value::I8Deserializer<E>>`. Tokenizes the
@@ -7211,6 +7298,42 @@ impl CodeGen {
             .filter(|name| self.cross_file_struct_field_types.contains_key(name.as_str()))
             .cloned()
             .collect();
+    }
+
+    /// Crate-wide tier-1 implementors (tail names), from the crate-wide tier
+    /// census: with tier 1 the default, a struct whose impl of a crate trait
+    /// passes §3.2.1 inherits that trait's interface class in the file that
+    /// declares it, so it is not a C++ aggregate there. A sibling file's
+    /// literal of it must take the fieldwise constructor, like a sibling's
+    /// Drop struct. Kept only when the crate declares the name once
+    /// (set_cross_file_structs and set_crate_tier_verdicts run first).
+    pub fn set_cross_file_tier1_implementors(&mut self) {
+        self.cross_file_tier1_implementor_tails.clear();
+        if !self.tier1_default {
+            return;
+        }
+        let Some(cv) = self.crate_tier_verdicts.clone() else {
+            return;
+        };
+        for ((_, self_written), verdict) in &cv.pairs {
+            if verdict.is_err() {
+                continue;
+            }
+            let head = self_written.split('<').next().unwrap_or(self_written);
+            let tail = head.rsplit("::").next().unwrap_or(head).trim();
+            if self.cross_file_struct_field_types.contains_key(tail) {
+                self.cross_file_tier1_implementor_tails.insert(tail.to_string());
+            }
+        }
+    }
+
+    /// A struct a SIBLING file declares that inherits a tier-1 interface
+    /// there (`set_cross_file_tier1_implementors`). A struct of this file
+    /// answers through its own collect pass (`is_cpp_inherit_type`).
+    pub(crate) fn is_cross_file_tier1_implementor(&self, struct_name: &str) -> bool {
+        let tail = struct_name.rsplit("::").next().unwrap_or(struct_name);
+        self.cross_file_tier1_implementor_tails.contains(tail)
+            && !self.local_declared_types.contains(tail)
     }
 
     /// Record the names of every C++ module produced by the current
@@ -23562,9 +23685,11 @@ impl CodeGen {
             .any(|p| matches!(p, syn::GenericParam::Const(_)));
         if type_params.is_empty() && !has_const_params {
             let self_cpp = self.qualify_import_bound_types_in_type_string(
-                &self.qualify_nested_local_type_for_global_scope(
-                    &self.rewrite_cpp_import_bound_type_spelling(
-                        &self.map_type(impl_block.self_ty.as_ref()),
+                &self.anchor_crate_root_relative_local_type_paths(
+                    &self.qualify_nested_local_type_for_global_scope(
+                        &self.rewrite_cpp_import_bound_type_spelling(
+                            &self.map_type(impl_block.self_ty.as_ref()),
+                        ),
                     ),
                 ),
             );
@@ -23578,7 +23703,8 @@ impl CodeGen {
             // Fix B ambiguity guard leaves it unqualified) cannot be named at
             // global scope; the free functions resolve it lexically inside the
             // per-module helper namespace, but an explicit specialization must
-            // sit at the primary's scope. Skip the marker, loudly.
+            // sit at the primary's scope. Skip the marker, loudly. (A relative
+            // path proven to be the type's crate-root path was anchored above.)
             let bare_local_type_inside = || -> bool {
                 // Tokens that are local type names and are not preceded by `::`
                 // (hashbrown: `std::span<const Tag>` with `Tag` in control::tag).
@@ -23705,9 +23831,11 @@ impl CodeGen {
         }
         self.push_type_param_scope(&impl_block.generics);
         let self_cpp = self.qualify_import_bound_types_in_type_string(
-            &self.qualify_nested_local_type_for_global_scope(
-                &self.rewrite_cpp_import_bound_type_spelling(
-                    &self.map_type(impl_block.self_ty.as_ref()),
+            &self.anchor_crate_root_relative_local_type_paths(
+                &self.qualify_nested_local_type_for_global_scope(
+                    &self.rewrite_cpp_import_bound_type_spelling(
+                        &self.map_type(impl_block.self_ty.as_ref()),
+                    ),
                 ),
             ),
         );
@@ -23787,6 +23915,8 @@ impl CodeGen {
             // Same hazard as the concrete path: a bare local type or module
             // name inside the spelling does not resolve at global scope
             // (alloc: `impls_SpecFromIter<Vec<T>>`, `impls_AsVecIntoIter<into_iter::IntoIter<T>>`).
+            // A crate-root path (srpc's type-mapped `details::SerializableSharedPtrHolder<T>`)
+            // was anchored above and passes.
             let bytes = self_cpp.as_bytes();
             let mut i = 0;
             let mut bare = false;
@@ -26790,7 +26920,23 @@ impl CodeGen {
             }
             out
         } else {
-            method.sig.output.clone()
+            // A concrete impl's `Self` is its self type. The body's `using Self`
+            // alias covers emitted spellings, but a literal `Self` hint is
+            // rejected as an unbound placeholder, so expected-type threading
+            // fell back to arm inference, whose variant-constructor owner is
+            // the BARE enum name: `[&]() -> PollResult { … return
+            // PollResult{…}; }` (lion-executor-spec's `impl<T> From<StdPoll<T>>
+            // for PollResult<T>`). Inside the class template that spelling was
+            // the injected class name; in this free function it names nothing.
+            let mut out = method.sig.output.clone();
+            if let syn::ReturnType::Type(_, ty) = &mut out {
+                let mut replacer = crate::codegen::collect_passes::TypeIdentReplacer {
+                    from: "Self".to_string(),
+                    to: method_spec.self_ty.clone(),
+                };
+                syn::visit_mut::VisitMut::visit_type_mut(&mut replacer, ty);
+            }
+            out
         };
         self.push_return_type_hint(&hint_output);
         self.push_param_bindings(&method.sig.inputs);

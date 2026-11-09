@@ -2884,11 +2884,12 @@ impl CodeGen {
             self.struct_field_order.get(&scoped)
         })
         .or_else(|| {
-            // A Drop struct a sibling file declares (crate mode): its literal
-            // here takes the fieldwise constructor, in declaration order.
+            // A Drop struct or a tier-1 implementor a sibling file declares
+            // (crate mode): its literal here takes the fieldwise constructor,
+            // in declaration order.
             let tail = struct_name.rsplit("::").next().unwrap_or(struct_name);
-            self.cross_file_drop_tails
-                .contains(tail)
+            (self.cross_file_drop_tails.contains(tail)
+                || self.is_cross_file_tier1_implementor(struct_name))
                 .then(|| self.cross_file_struct_field_order.get(tail))
                 .flatten()
         })

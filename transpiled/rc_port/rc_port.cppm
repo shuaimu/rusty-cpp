@@ -3602,6 +3602,14 @@ struct Rc {
             return Rc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<RcInner<T>>>((rusty::Box<RcInner<T>>::new_(RcInner<T>{.strong = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .weak = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .value = std::move(value)})).leak()));
         }
     }
+    template<typename... Args>
+    static Rc<T> make(Args&&... args) {
+        return Rc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<RcInner<T>>>((rusty::Box<RcInner<T>>::emplace_with([&] { return RcInner<T>{.strong = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .weak = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .value = T(std::forward<Args>(args)...)}; })).leak()));
+    }
+    template<typename F>
+    static Rc<T> make_with(F&& factory) {
+        return Rc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<RcInner<T>>>((rusty::Box<RcInner<T>>::emplace_with([&] { return RcInner<T>{.strong = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .weak = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .value = std::forward<F>(factory)()}; })).leak()));
+    }
     template<typename F>
     static Rc<T> new_cyclic(F data_fn) {
         return Rc<T, A>::new_cyclic_in(std::move(data_fn), rusty::alloc::Global{});

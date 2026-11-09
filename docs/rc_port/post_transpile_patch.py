@@ -1051,6 +1051,26 @@ VENDORED_RC_DEREF_SHIMS = """    // Hand-written-Arc-compatibility extensions. R
     }
 """
 
+# `Rc::make(args...)` / `Rc::make_with(factory)`: the runtime's in-place
+# constructors, which the transpiler emits for `Rc::new(T::new(..))` when T
+# cannot be moved (a `cpp_ctor` type, or a `PhantomPinned` one such as SRPC's
+# `Reactor` and `Fiber`: codegen's proven_cpp_ctor_arc_make_target and
+# proven_pinned_factory_make_with_target). `Rc::new_(T value)` moves its
+# argument into the RcInner; these build T inside the allocation instead.
+# They allocate exactly as `new_` does (`Box<RcInner<T>>`, leaked into the
+# Rc), so drop_slow frees them the same way. The aggregate's `.value` is
+# initialized from a prvalue, which C++17 elides: no move constructor is
+# involved, and neither is RcInner's.
+VENDORED_RC_IN_PLACE_FACTORIES = """    template<typename... Args>
+    static Rc<T> make(Args&&... args) {
+        return Rc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<RcInner<T>>>((rusty::Box<RcInner<T>>::emplace_with([&] { return RcInner<T>{.strong = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .weak = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .value = T(std::forward<Args>(args)...)}; })).leak()));
+    }
+    template<typename F>
+    static Rc<T> make_with(F&& factory) {
+        return Rc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<RcInner<T>>>((rusty::Box<RcInner<T>>::emplace_with([&] { return RcInner<T>{.strong = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .weak = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .value = std::forward<F>(factory)()}; })).leak()));
+    }
+"""
+
 
 def _replace_fn_body(text: str, sig_re: str, new_body: str, close: str) -> tuple[str, bool]:
     """Replace the body of the function whose signature LINE matches sig_re
@@ -1102,6 +1122,11 @@ def patch_vendored_hand_ports(cpp_out: Path) -> int:
         anchor = "    ~Rc() noexcept(false) {\n"
         if anchor in text:
             text = text.replace(anchor, VENDORED_RC_DEREF_SHIMS + anchor, 1)
+    # In-place `make` / `make_with` (non-movable payloads), beside `new_`.
+    if "static Rc<T> make_with(" not in text:
+        anchor = "    template<typename F>\n    static Rc<T> new_cyclic(F data_fn) {\n"
+        if anchor in text:
+            text = text.replace(anchor, VENDORED_RC_IN_PLACE_FACTORIES + anchor, 1)
     # try_allocate_for_layout: the counters are Cell<usize>; the emitter
     # typed `Cell::new(1)` from the literal.
     text = text.replace("std::conditional_t<true, Cell<int32_t>, T>::new_(1)",
@@ -1184,7 +1209,7 @@ def main() -> int:
         ("from_raw: ptr.byte_sub → address arithmetic", patch_from_raw_byte_sub),
         ("Cow forward-declaration stub", patch_cow_stub),
         ("RcInnerPtr: module linkage (consumers reference its vtable)", patch_rc_inner_ptr_module_linkage),
-        ("vendored hand-ports: from_box_in / UniqueRc::new_in / make_mut / clone_from_ref_in / deref shims / counters / data_ptr",
+        ("vendored hand-ports: from_box_in / UniqueRc::new_in / make_mut / clone_from_ref_in / deref shims / in-place make / counters / data_ptr",
             patch_vendored_hand_ports),
     ]
 
