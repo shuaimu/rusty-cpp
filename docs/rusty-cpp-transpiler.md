@@ -3346,7 +3346,7 @@ init spell the interface class's template arguments from the impl header — the
   test, were green before); the (ai)/(aj) probes t1–t19 still green; pure tier 2 byte-identical on all 21
   probes; module mode (`-m probe`, u2): the interface precompiles, an importing TU links and runs. chain99: build ok; targeted 98/98 (the trait, adapter and tier-1 test families plus the new test); crate_graph 7/7; the crate fixture 1/1; the full suite 2716 passed + the 2 standing reds (missing-rustc crate_mode_uses_one_cargo_selected_target_dependency_graph_atomically, cpp_name_crate_mode_rejects_opaque_expansion_before_output) + the harness flake (harness99 7/7 serially).
   MATRIX REPLAY (old vs new on the 55 `expanded.rs` inputs, `st_work/replay_ak`): 49 of 55 byte-identical, 5 fail in both binaries (pre-existing, exit 101: hashbrown, indexmap, itertools ×3), ONE real diff — itertools (8 lines): `struct KeyValue : public ::duplicates_impl::private_::KeyXorValue<K, V> {` / `JustValue : public …KeyXorValue<V, V>` and their ctors' base inits — the matrix's one generic trait as a tier-1 base (the single-file census prints both pairs TIER1; the earlier base-clause scan missed it because the bare spelling hides that the trait is generic). `clang++ -fsyntax-only -ferror-limit=0` on that single-file output: 437 → 433 errors, exactly the two "expected class name" and the two "member initializer 'KeyXorValue'" errors gone, no other change. itertools is a known-fail row the matrix does not rebuild (its module unit dates from 2026-08-15, before the tier-1 default: the trait's by-value `self` slots are a TODO there and the structs have no base), so no compiled matrix unit changes. gate39 (main @ ba7dc998): unit phase = the bin suite then the standing missing-rustc red only; matrix total=28 pass=25 fail=0 known-fail=3 → BASELINE.
-  FOUND, NOT FOLDED (pre-existing, fail identically on both binaries): (1) a GENERIC SUPERTRAIT is skipped
+  FOUND, NOT FOLDED (pre-existing, fail identically on both binaries): (1) — closed by (al) below — a GENERIC SUPERTRAIT is skipped
   as the interface class's base (u19 `trait T: S<u8>`; emit_items.rs ~7318 "generic traits we flagged",
   and an assoc-type supertrait likewise), so a default calling the supertrait's method fails ("no member
   named 'a' in 'T'"); the implementor's own clause now reads `public virtual S<uint8_t>, public T` (1 error
@@ -3365,6 +3365,95 @@ init spell the interface class's template arguments from the impl header — the
   (a known-fail row the gate does not rebuild), so the replay shows the fix on it textually, the gate proves
   nothing new, and the probes and pins prove the fix; the earlier base-clause scan of the matrix outputs
   missed it because the bare spelling hides that the trait is generic.
+*2026-11-12 — (al) a generic supertrait as the interface class's base: the sub-trait's class inherits
+`S<uint8_t>` spelled from the bound as written, its forwarders override the base's slots respelled through
+the bound, and a default is inlined on `this` only for a base that exists — the (ak) FOUND item (1), closed.*
+  SYMPTOMS (probes `st_work/probe_gst` v0–v20 + `oracle/` rustc builds, clang 22 + run; harness
+  `probe_gst.sh <bin> <prefix>`, `TIER1ENV=RUSTY_CPP_TIER1_DEFAULT=0` for pure tier 2; old binary
+  `st_work/rct_before_al` = origin/main 9fb12c15): `pub trait S<A> { fn a(&self) -> A; } pub trait T: S<u8>
+  { fn t(&self) -> u32 { self.a() as u32 + 1 } } impl S<u8> for P { .. } impl T for P {}` (v1 = (ak)'s u19)
+  → `class T {` with NO base while the implementor already read `struct P : public virtual S<uint8_t>, public
+  T {`, and T's default was inlined as `virtual uint32_t t() const { return this->a() + 1; }`: "no member
+  named 'a' in 'T'" — in BOTH tiers (the class is tier-agnostic; on pure tier 2 the same inlined body fails,
+  v1 1 error). The same for the sub-trait's own parameter passed on (v2 `trait T<B>: S<B>`), an associated
+  type bound in the bound (v3 `T: O<Out = u64>`), both (v18 `T: GO<u8, Out = u64>`), two arguments (v7
+  `S2<u8, String>`), a lifetime argument (v7b `L<'static, usize>`), a chain (v8 `T: M, M: S<u8>`; v9 `T:
+  M<u8>, M<B>: S<B>`), `&dyn T` / `Box<dyn T>` calling the super's method (v5, v6 diamond, v12 `&mut dyn
+  T` with `&mut self` slots), the super in another module (v13 `b::T: crate::a::S<u8>`), a crate struct as
+  the argument (v14 `S<Q>`), a bounded caller (v16), a generic implementor (v11 `W<u8>`), a defaulted
+  parameter left unwritten (v20 `trait S<A = u8>`, `trait T: S`, `impl S for P`: the class got the default,
+  the implementor's clause stayed the bare `S` — "expected class name", 4 errors). v0 (`trait T0: S0`, no
+  generics) was green: the plain-supertrait path.
+  MECHANISM: emit_trait's supertrait collection (emit_items.rs ~7341) skipped a bound whose trait is in
+  `interface_traits_with_generics` or has associated types — "needs trait template arguments we don't yet
+  emit on the inheritance line" — while `interface_supertrait_method_names` (~6614) counted EVERY
+  supertrait's methods as members regardless, so the sub-trait's default was emitted with its full body on
+  `this`. The forwarders enumerate a base's slots from `interface_trait_slots` as the base declared them
+  (`A a() const` for `S<A>`), so a generic base's slots could not have been overridden as written either.
+  `cpp_inherit_base_template_args` ((ak)) returned nothing when the impl recorded no arguments, so a
+  defaulted parameter was never filled on the implementor side.
+  FIX (da9a946a): predicates.rs `trait_class_template_args(trait, written args, assoc bindings,
+  renames)` is (ak)'s core factored out: per class parameter (type params, then assoc names; lifetimes
+  dropped, consts consumed) the spelled argument or None, a type parameter's declared default standing in
+  for an unwritten argument; `supertrait_base_template_args(trait, path)` reads a bound's written arguments
+  (`GenericArgument::Type/Const/Lifetime` as the list, `AssocType` as the bindings) and returns None when a
+  parameter stays unbound or an argument names `Self`. emit_items.rs `supertrait_bound_as_base(bound) ->
+  Option<InterfaceBase>` is the one decision for the collection block AND `interface_supertrait_method_names`
+  (marker / operator / skipped / foreign / unspellable → None; otherwise the escaped qualified key, the
+  spelling `::a::S<uint8_t>` and the base's parameter→argument renames); the `interface_traits_with_generics`
+  gate is gone (that flag is set in emission order — a base declared after its sub-trait would have been
+  misread; the trait item in `cpp_inherit_trait_items` is the authority). `interface_trait_bases` now holds
+  `InterfaceBase` (mod.rs) and `emit_trait_generic_forwarders` respells each base slot's return type and
+  parameters through the renames with `map_cpp_identifiers` (one pass over whole identifiers, so a swap
+  cannot chain), composing along the chain (`A` → `B` → `uint8_t` for v9), and passes the base owner's key
+  `rusty::tag<uint8_t>{}` to its CPO (previously only the trait's own). `cpp_inherit_base_template_args`
+  with no recorded impl args spells the class from the parameters' defaults when every parameter has one,
+  else the bare name as before. A plain supertrait's renames are empty and its spelling unchanged: v0 and
+  (ak)'s u1–u18/u20/u21 are byte-identical in both tiers.
+  GUARDS: `test_a_generic_supertrait_is_the_interface_class_s_virtual_base` — tier 1 and tier 2: `class T
+  : public virtual ::a::S<uint8_t> {`, `template <class B>\nclass TG : public virtual ::a::S<B> {`, `class
+  TO : public virtual O<uint64_t> {`, `class TGO : public virtual GO<uint8_t, uint64_t> {`, `class TM :
+  public virtual M<uint8_t> {` with `M<B> : public virtual ::a::S<B>`, `class TL : public virtual L<size_t>
+  {`, `class TD : public virtual D<uint8_t> {` (default), `class TU {` / `class TE {` still (unbound `Out`,
+  `E<Self>`), the inlined `this->a()` default and the pure `same()` slot, the forwarders' `uint8_t a() const
+  override { … S_::a(rusty_target(), rusty::tag<uint8_t>{}) …` / `B a() …tag<B>` / `uint64_t o()` /
+  `uint64_t go(uint8_t a) …tag<uint8_t>`, TMAdapter overriding both `m` and the grand base's `a` as
+  `uint8_t`, and the tier-1 implementor `struct P : public virtual ::a::S<uint8_t>, public T, public
+  TG<uint8_t>, public virtual D<uint8_t>, public TD {` + its base inits (O/TO stay tier 2 for P by census
+  A1's `Self::Out`); tier 2 `struct P {`; module mode `class T : public virtual S<uint8_t> {` + the
+  forwarder override. `test_map_cpp_identifiers_replaces_whole_identifiers_in_one_pass`. Runtime (clang 22,
+  rustc oracle): tier-1 default v1, v2, v3, v5, v6, v7, v7b, v8, v9, v11, v12, v13, v14, v16, v18, v19, v20
+  compile and run green (1–4 errors each before); pure tier 2 the same set plus v17 green (v2/v7 were
+  green before). (ak)'s u1–u21: tier 1 error counts unchanged except u19 1 → 0, pure tier 2 byte-identical
+  except u19; (aj)'s t1–t19 (+t2b/t2c/t3b): 22/22 green and byte-identical. Module mode (`-m probe`): v1
+  and v13 precompile, an importing TU links and runs. Census (v1): S and T both TIER1 for P. chain99 (wt_ports @ da9a946a): build ok; targeted 102/102 (the trait, adapter and tier-1 families plus the two new tests); crate_graph 7/7; the crate fixture 1/1; the full suite 2728 passed + the 2 standing reds (missing-rustc crate_mode_uses_one_cargo_selected_target_dependency_graph_atomically, cpp_name_crate_mode_rejects_opaque_expansion_before_output) + the harness flake (harness99 7/7 serially).
+  MATRIX REPLAY (old vs new on the 55 `expanded.rs` inputs, `st_work/replay_al`): 50 of 55 byte-identical, 5 fail in both binaries (pre-existing, exit 101: hashbrown, indexmap, itertools ×3), NO real diff — no replay input has a generic or assoc-type supertrait that becomes a base (the scan found bitflags' operator bounds, itertools' foreign `BorrowMut<[usize]>` and serde_core's `for<'de> Deserialize<'de>`, none admitted); an earlier run of the same replay showed itertools CHANGED by 4 lines, which two runs of the SAME old binary reproduce (found (4) below). gate40 (main @ da9a946a): unit = the bin suite 2728 passed, then the standing missing-rustc red only; matrix total=28 pass=23 fail=2 known-fail=3 — NOT the 25/0/3 baseline. The two fails are UPSTREAM regressions already on origin/main 9fb12c15 (the 2026-11-09 push; its merge commit 1fc5abb2 says "The parity matrix was not replayed"), both reproduced on the PRE-fix binary: `trait_probes_collapse` — `collapse_ref_impl_through_coercion_and_box FAILED: assertion failed` (`Box<dyn RefTr>` of `impl RefTr for &Tr2` reaches the pointee, 7 for 1007 — 5e1e5de6's owning-forwarder `rusty_target()` deref) fails identically through `parity-test --stop-after run` with `rct_before_al`; `alloc` — `alloc.cppm:30007:58: no member named 'Vec' in namespace 'rusty'` in the `SpecFromIter_::impl_` lane body (`rusty::from_into<VecDeque<T>>(rusty::Vec(rusty::collect_range(..)))`, 58376b0b's area) reproduces at the same line with `RUSTY_CPP_TRANSPILER_BIN=rct_before_al bash docs/alloc/runtest.sh` from the repo root, and the two binaries' alloc.cppm are byte-identical. This commit is neutral on both; pushed on that evidence with the regressions reported, not touched.
+  FOUND, NOT FOLDED (pre-existing, fail identically on both binaries unless said): (1) an associated type
+  a supertrait leaves UNBOUND (v4 `trait T: O` with `type Out` on O): the base stays skipped and `Self::Out`
+  in the sub-trait's own signatures is unresolved ("no type named 'Out' in 'T'", then `override` on the
+  never-declared slot in the three forwarders — 4 errors, 5 before: the inlined `o` call is gone) — the
+  sub-trait's class would have to be a template over the super's unbound names too. (2) `Self` among a
+  supertrait's arguments (v17 `trait T: E<Self>`, the `PartialOrd: PartialEq<Self>` shape): the base is
+  skipped (a CRTP base would be needed); the default calling `eq_to` is now a pure slot, so a tier-1
+  implementor without it is abstract ("allocating an object of abstract class type 'P'", 1 error, was 1 of
+  another kind); pure tier 2 compiles and runs through the CPO. (3) (from (aj)/(ak)) a generic trait's
+  default on a TIER-2 implementor is a member call it lacks (v9 `M<B>::m`, v19 `T<X>::t` on pure tier 2: "no
+  member named 'm' in 'P'"). (4) itertools' single-file output is NOT run-to-run stable: two runs of the SAME
+  binary flip the order of a struct's `is_send`/`is_sync` conjuncts (`Key`/`F`, hash-set order) — the
+  replay's 4-line itertools diff is that, not the fix. (5) a DEPENDENCY's generic trait as a consumer
+  sub-trait's base: `merge_dependency_ufcs_trait_manifests` imports supertraits but not slots
+  (`interface_trait_slots`), so the forwarders could not override the base's slots — no matrix row has the
+  shape; untested. Carried: const generic trait param dropped (u7), `rusty::Vec` only via a trait argument
+  (u9), a trait named `U`.
+  LIMITS: the base clause is tier-agnostic, so pure tier 2 changes too (v1: the base line + three forwarder
+  overrides, 5 lines); the first-declared trait of a short name is the authority for the parameter list; the
+  slot respelling is textual (an identifier map over the C++ signature strings), so a base parameter named
+  like a type in its own signature would be misrespelled — the `U` collision class; a tier-1 implementor's
+  clause spells a defaulted parameter only when EVERY class parameter has a default (else bare, as before);
+  `interface_supertrait_method_names` now finds a base's item by its first-declared path (the collection
+  block always did) where it used the current module's key — consistent, and the same for one trait name
+  declared once.
+
 - **Phase-2 residue — one list, each item with the phase that owns it.** (1) `trait_probes_census`'s two
   cells: `&[&dyn Shape]` / `Vec<&dyn Shape>` emitted as an array of references (`const Tr&` elements —
   needs a pointer or reference-wrapper element spelling; phase 0, the `dyn` coercion family) and the
