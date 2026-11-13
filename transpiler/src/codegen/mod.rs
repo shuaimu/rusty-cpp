@@ -180,6 +180,25 @@ pub(crate) struct InterfaceSlot {
     pub(crate) is_consuming: bool,
 }
 
+/// (al) One supertrait that became a C++ base of an interface (book §3.2.2):
+/// the sub-trait's forwarders override the base's slots too, respelled through
+/// `renames`, and the sub-trait's default bodies may call its methods.
+#[derive(Debug, Clone)]
+pub(crate) struct InterfaceBase {
+    /// The base trait's short name (its `interface_trait_slots` key).
+    pub(crate) short: String,
+    /// Its qualified C++ key (`a::S`, segments escaped).
+    pub(crate) key: String,
+    /// Its declared Rust path (`a::S`, the `cpp_inherit_trait_items` key).
+    pub(crate) declared_key: String,
+    /// Its spelling in the base clause (`::a::S<uint8_t>`).
+    pub(crate) spelling: String,
+    /// The base class's parameter names with the arguments the sub-trait's
+    /// bound gives them (`A` → `uint8_t` for `trait T: S<u8>`), spelled in
+    /// the sub-trait's own parameters; empty for a plain trait.
+    pub(crate) renames: Vec<(String, String)>,
+}
+
 /// Storage shape for a `--interface-traits` Adapter specialization.
 /// Determines the `value_` field type, the constructor signature, and
 /// whether `&mut self` trait methods can be delegated through the
@@ -2668,8 +2687,9 @@ pub struct CodeGen {
     /// supertrait closure's slots. Filled by `emit_trait_interface_pattern`.
     pub(crate) interface_trait_slots: HashMap<String, Vec<InterfaceSlot>>,
     /// The locally declared supertraits that became C++ bases of each
-    /// interface — `(short name, declared key)` — for the same closure.
-    pub(crate) interface_trait_bases: HashMap<String, Vec<(String, String)>>,
+    /// interface, for the same closure — (al) with the arguments the
+    /// sub-trait's bound gave a generic base's parameters.
+    pub(crate) interface_trait_bases: HashMap<String, Vec<InterfaceBase>>,
     /// Depth counter for type argument nesting.  When > 0, `impl Trait` maps
     /// to a concept/facade name instead of `const auto&` (which is invalid
     /// inside generic argument lists like `SafeFn<T(auto)>`).

@@ -6311,7 +6311,7 @@ impl CodeGen {
         trait_generic_arglist: &str,
         impl_param: &str,
         own_slots: &[InterfaceSlot],
-        bases: &[(String, String)],
+        bases: &[InterfaceBase],
         wrap_in_anon_ns: bool,
     ) {
         // (aj): the forwarder class's own argument list (`A, U` for
@@ -6330,27 +6330,50 @@ impl CodeGen {
         };
         let mut dependent: Vec<String> = trait_generic_idents.clone();
         dependent.push(impl_param.to_string());
-        // (owner short name, owner key, slot)
-        let mut slots: Vec<(String, String, InterfaceSlot)> = own_slots
+        // (owner short name, owner key, slot, the owner's parameter names →
+        // their spellings here). (al): a generic base's slots are declared in
+        // its own parameter names (`A a() const` on `S<A>`); the sub-trait's
+        // bound fixes them (`trait T: S<u8>` → `uint8_t a() const`), and a
+        // grand-base's through the chain (`M<B>: S<B>` under `T: M<u8>` →
+        // `A` → `B` → `uint8_t`), so each is respelled before it is overridden.
+        let mut slots: Vec<(String, String, InterfaceSlot, HashMap<String, String>)> = own_slots
             .iter()
-            .map(|slot| (trait_name.to_string(), trait_key.to_string(), slot.clone()))
+            .map(|slot| (trait_name.to_string(), trait_key.to_string(), slot.clone(), HashMap::new()))
             .collect();
         let mut seen: HashSet<String> = own_slots.iter().map(|s| s.cpp_name.clone()).collect();
-        let mut stack: Vec<(String, String)> = bases.iter().rev().cloned().collect();
+        let mut stack: Vec<(InterfaceBase, HashMap<String, String>)> = bases
+            .iter()
+            .rev()
+            .map(|b| (b.clone(), b.renames.iter().cloned().collect()))
+            .collect();
         let mut visited: HashSet<String> = HashSet::new();
-        while let Some((base, base_key)) = stack.pop() {
-            if !visited.insert(base.clone()) {
+        while let Some((base, renames)) = stack.pop() {
+            if !visited.insert(base.short.clone()) {
                 continue;
             }
-            if let Some(base_slots) = self.interface_trait_slots.get(&base) {
+            if let Some(base_slots) = self.interface_trait_slots.get(&base.short) {
                 for slot in base_slots {
                     if seen.insert(slot.cpp_name.clone()) {
-                        slots.push((base.clone(), base_key.clone(), slot.clone()));
+                        let mut slot = slot.clone();
+                        slot.return_type = map_cpp_identifiers(&slot.return_type, &renames);
+                        slot.params = slot
+                            .params
+                            .iter()
+                            .map(|p| map_cpp_identifiers(p, &renames))
+                            .collect();
+                        slots.push((base.short.clone(), base.key.clone(), slot, renames.clone()));
                     }
                 }
             }
-            if let Some(grand) = self.interface_trait_bases.get(&base) {
-                stack.extend(grand.iter().rev().cloned());
+            if let Some(grand) = self.interface_trait_bases.get(&base.short) {
+                stack.extend(grand.iter().rev().map(|g| {
+                    let composed: HashMap<String, String> = g
+                        .renames
+                        .iter()
+                        .map(|(from, to)| (from.clone(), map_cpp_identifiers(to, &renames)))
+                        .collect();
+                    (g.clone(), composed)
+                }));
             }
         }
         // A `cpp_trait_member_dispatch` owner (tier-1 fast path) has no UFCS
@@ -6437,7 +6460,7 @@ impl CodeGen {
                     p = impl_param
                 )),
             }
-            for (owner, owner_key, slot) in &slots {
+            for (owner, owner_key, slot, owner_renames) in &slots {
                 let args: Vec<String> = slot
                     .params
                     .iter()
@@ -6508,13 +6531,18 @@ impl CodeGen {
                         };
                         call_args.push(format!("rusty::self_tag<{}>{{}}", self_ty));
                     }
-                    if owner == trait_name
-                        && let Some(gparams) = self.ufcs_trait_generic_params.get(owner)
+                    // (al): a generic BASE owner's key is spelled through the
+                    // sub-trait's bound (`rusty::tag<uint8_t>` for `T: S<u8>`).
+                    if let Some(gparams) = self.ufcs_trait_generic_params.get(owner)
                         && !gparams.is_empty()
                     {
                         call_args.push(format!(
                             "rusty::tag<{}>{{}}",
-                            gparams.iter().map(|g| escape_cpp_keyword(g)).collect::<Vec<_>>().join(", ")
+                            gparams
+                                .iter()
+                                .map(|g| map_cpp_identifiers(&escape_cpp_keyword(g), owner_renames))
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ));
                     }
                     let call = format!("{}_::{}({})", owner, slot.cpp_name, call_args.join(", "));
@@ -6610,27 +6638,25 @@ impl CodeGen {
 
     /// The method names declared by the trait's (transitive) supertraits that
     /// are emitted as bases of its interface (phase 0: supertraits are virtual
-    /// bases), read from the kept trait items.
+    /// bases), read from the kept trait items. (al): exactly the bounds
+    /// `supertrait_bound_as_base` admits — a skipped supertrait's methods are
+    /// not members here, so a default calling one is not inlined on `this`.
     pub(super) fn interface_supertrait_method_names(&self, t: &syn::ItemTrait) -> HashSet<String> {
         let mut out = HashSet::new();
-        let mut stack: Vec<String> = t
+        let mut stack: Vec<InterfaceBase> = t
             .supertraits
             .iter()
-            .filter_map(|b| match b {
-                syn::TypeParamBound::Trait(tb) => tb.path.segments.last().map(|s| s.ident.to_string()),
-                _ => None,
-            })
+            .filter_map(|b| self.supertrait_bound_as_base(b))
             .collect();
         let mut seen: HashSet<String> = HashSet::new();
-        while let Some(name) = stack.pop() {
-            if !seen.insert(name.clone()) {
+        while let Some(base) = stack.pop() {
+            if !seen.insert(base.short.clone()) {
                 continue;
             }
-            let key = self.nonvtable_trait_key_here(&name);
             let Some(st) = self
                 .cpp_inherit_trait_items
-                .get(&key)
-                .or_else(|| self.cpp_inherit_trait_items.get(&name))
+                .get(&base.declared_key)
+                .or_else(|| self.cpp_inherit_trait_items.get(&base.short))
             else {
                 continue;
             };
@@ -6639,15 +6665,66 @@ impl CodeGen {
                     out.insert(f.sig.ident.to_string());
                 }
             }
-            for b in &st.supertraits {
-                if let syn::TypeParamBound::Trait(tb) = b
-                    && let Some(seg) = tb.path.segments.last()
-                {
-                    stack.push(seg.ident.to_string());
-                }
-            }
+            stack.extend(st.supertraits.iter().filter_map(|b| self.supertrait_bound_as_base(b)));
         }
         out
+    }
+
+    /// (al) The C++ base a supertrait bound of an interface becomes, if any.
+    /// None for a bound that is no base: a marker trait
+    /// (Send/Sync/Sized/Copy/Clone/Unpin lower to concepts, not classes), an
+    /// operator trait (no class form), a skipped trait (had assoc consts etc.;
+    /// no class to inherit), a foreign trait (not in `trait_declared_paths`:
+    /// no C++ spelling here — inheriting from a missing class is a hard error,
+    /// dropping the bound loses some semantic info but lets the rest compile),
+    /// or a class template whose arguments the bound does not fully spell
+    /// (`supertrait_base_template_args`: an unbound associated type, `Self`
+    /// among the arguments). A locally declared trait is qualified with the
+    /// namespace recorded in `trait_declared_paths`, each segment escaped
+    /// (`private::Sealed` → `::private_::Sealed`), so `class X : public
+    /// virtual ::Outer::Sub` works from any namespace; a generic trait's class
+    /// is a template and takes the bound's written arguments (`trait T<B>:
+    /// S<B, Out = u64>` → `::S<B, uint64_t>`).
+    pub(super) fn supertrait_bound_as_base(&self, b: &syn::TypeParamBound) -> Option<InterfaceBase> {
+        let syn::TypeParamBound::Trait(tb) = b else {
+            return None;
+        };
+        let name = tb.path.segments.last()?.ident.to_string();
+        if matches!(
+            name.as_str(),
+            "Send" | "Sync" | "Copy" | "Clone" | "Sized" | "Unpin"
+        ) {
+            return None;
+        }
+        if self.trait_path_is_cpp_marker(&tb.path) {
+            return None;
+        }
+        if map_operator_trait(&name).is_some() {
+            return None;
+        }
+        if self.skipped_interface_traits.contains(&name) {
+            return None;
+        }
+        // The qualified path among declared paths via the short-name index
+        // (built when each trait was declared); a foreign supertrait has none.
+        let declared_key = self.trait_declared_path_by_short_name.get(&name).cloned()?;
+        let (template_args, renames) = self.supertrait_base_template_args(&name, &tb.path)?;
+        let escaped = self.escape_and_rename_qualified_name(&declared_key);
+        let mut spelling = if escaped.contains("::") {
+            format!("::{}", escaped)
+        } else {
+            escaped.clone()
+        };
+        if !template_args.is_empty() {
+            spelling = format!("{}<{}>", spelling, template_args.join(", "));
+        }
+        Some(InterfaceBase {
+            short: escaped.rsplit("::").next().unwrap_or(&escaped).to_string(),
+            key: escaped,
+            declared_key,
+            spelling,
+            renames,
+        })
     }
 
     /// Book §3.2.13: a generic default, and every default that transitively
@@ -7322,93 +7399,13 @@ impl CodeGen {
         let prev_struct = self.current_struct.clone();
         self.current_struct = Some(trait_name_str.clone());
 
-        // Collect supertraits — they become public bases of the interface.
-        // Filter out:
-        //   - Marker traits (Send/Sync/Sized/Copy/Clone/Unpin): lower to
-        //     concepts, not classes.
-        //   - Operator traits (PartialEq, BitAnd, etc.): no class form.
-        //   - Skipped traits (had assoc consts, etc.): no class to inherit.
-        //   - Generic traits we flagged: needs trait template arguments
-        //     we don't yet emit on the inheritance line.
-        //   - Foreign traits (not in trait_declared_paths): we don't have
-        //     a C++ class spelling for them. Inheriting from a missing
-        //     class is a hard compile error; dropping the constraint
-        //     loses some semantic info but lets the rest compile.
-        //
-        // For locally-declared traits, qualify with the namespace recorded
-        // in trait_declared_paths so `class X : public Outer::Sub` works
-        // even when X is in a different namespace than Sub.
-        let supertraits: Vec<String> = t
+        // Collect supertraits — they become public bases of the interface
+        // (`supertrait_bound_as_base`: which bounds, and how each is spelled;
+        // (al) a generic supertrait's class takes the bound's arguments).
+        let supertraits: Vec<InterfaceBase> = t
             .supertraits
             .iter()
-            .filter_map(|b| {
-                if let syn::TypeParamBound::Trait(tb) = b {
-                    let name = tb.path.segments.last()?.ident.to_string();
-                    if matches!(
-                        name.as_str(),
-                        "Send" | "Sync" | "Copy" | "Clone" | "Sized" | "Unpin"
-                    ) {
-                        return None;
-                    }
-                    if self.trait_path_is_cpp_marker(&tb.path) {
-                        return None;
-                    }
-                    if map_operator_trait(&name).is_some() {
-                        return None;
-                    }
-                    if self.skipped_interface_traits.contains(&name) {
-                        return None;
-                    }
-                    if self.interface_traits_with_generics.contains(&name) {
-                        return None;
-                    }
-                    // Also skip when the supertrait has associated types
-                    // (which become C++ template params via the assoc-type
-                    // machinery). Without propagating matching params from
-                    // the child trait through to the parent, the emitted
-                    // inheritance `class Child : public Parent` rejects
-                    // with "expected class name" — Parent is a template
-                    // and can't appear without args. The Phase 3a comment
-                    // upstream says assoc-types-only traits "proceed
-                    // through adapter emit"; that's the right path for
-                    // the impl side, but the inheritance side has no
-                    // analogous machinery yet. Skip so the child trait
-                    // emits at least as a standalone class. Surfaced by
-                    // itertools' `trait HomogeneousTuple: TupleCollect`
-                    // (itertools.cppm:10969).
-                    if self
-                        .trait_associated_type_names
-                        .get(&name)
-                        .is_some_and(|v| !v.is_empty())
-                    {
-                        return None;
-                    }
-                    // Find the qualified path for this trait among
-                    // declared paths via the short-name index (built when
-                    // each trait was declared).
-                    let Some(qualified) = self
-                        .trait_declared_path_by_short_name
-                        .get(&name)
-                        .cloned()
-                    else {
-                        // Foreign supertrait — skip.
-                        return None;
-                    };
-                    // Escape each segment so C++ keywords used as Rust
-                    // module names (e.g. `private::Sealed`) become
-                    // `private_::Sealed` to match the namespace declaration.
-                    let escaped = self.escape_and_rename_qualified_name(&qualified);
-                    // Use leading `::` to make the path absolute,
-                    // independent of current emission scope.
-                    if escaped.contains("::") {
-                        Some(format!("::{}", escaped))
-                    } else {
-                        Some(escaped)
-                    }
-                } else {
-                    None
-                }
-            })
+            .filter_map(|b| self.supertrait_bound_as_base(b))
             .collect();
 
         let bases = if supertraits.is_empty() {
@@ -7420,7 +7417,7 @@ impl CodeGen {
             // and an unambiguous upcast (measured §3.2.17).
             let supers = supertraits
                 .iter()
-                .map(|s| format!("public virtual {}", s))
+                .map(|s| format!("public virtual {}", s.spelling))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(" : {}", supers)
@@ -7870,13 +7867,7 @@ impl CodeGen {
         // the class). Same anonymous namespace as the trait when it is
         // non-`pub` (contracts 4/10). Register this trait's slots and bases so
         // a sub-trait's forwarders can enumerate the supertrait closure.
-        let base_trait_names: Vec<(String, String)> = supertraits
-            .iter()
-            .map(|path| {
-                let key = path.trim_start_matches("::").to_string();
-                (key.rsplit("::").next().unwrap_or(&key).to_string(), key)
-            })
-            .collect();
+        let base_trait_names: Vec<InterfaceBase> = supertraits.clone();
         let trait_key = if self.module_stack.is_empty() {
             trait_name_str.clone()
         } else {
@@ -13631,4 +13622,33 @@ fn cpp_by_value_param_is_scalar(ty: &str) -> bool {
                 | "char8_t" | "char16_t" | "char32_t" | "wchar_t" | "std::string_view"
                 | "std::byte"
         )
+}
+
+/// (al) Replace every identifier of `text` that `map` names, in one pass (so
+/// `{A → B, B → A}` swaps rather than chains); an identifier is a maximal run
+/// of alphanumerics and `_`. For respelling a base trait's slot signatures in
+/// the sub-trait's forwarders.
+pub(crate) fn map_cpp_identifiers(text: &str, map: &HashMap<String, String>) -> String {
+    if map.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let ident_len: usize = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .map(|c| c.len_utf8())
+            .sum();
+        if ident_len > 0 {
+            let ident = &rest[..ident_len];
+            out.push_str(map.get(ident).map(|s| s.as_str()).unwrap_or(ident));
+            rest = &rest[ident_len..];
+        } else {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    out
 }

@@ -54485,3 +54485,159 @@ fn test_a_generic_trait_as_a_tier1_base_spells_the_class_template_arguments() {
     assert!(module.contains("P(uint32_t _0_init) : T<uint8_t>(), _0(std::move(_0_init)) {}"), "{module}");
     assert!(module.contains("uint8_t k() const override;"), "{module}");
 }
+
+#[test]
+fn test_a_generic_supertrait_is_the_interface_class_s_virtual_base() {
+    // (al) A supertrait becomes a virtual base of the sub-trait's interface
+    // class, but a GENERIC supertrait (and one with associated types) was
+    // skipped — its class is a template and the base clause spelled no
+    // arguments — while the sub-trait's defaults were still inlined on `this`
+    // as if its methods were members (`no member named 'a' in 'T'`). The base
+    // clause now spells the class's arguments from the bound as written (type
+    // parameters, then associated names; lifetimes dropped), the sub-trait's
+    // forwarders override the base's slots respelled through the bound —
+    // through a chain of generic bases too — and the default-inlining decision
+    // agrees with the base decision: a bound that stays skipped (an unbound
+    // associated type, `Self` among the arguments) contributes no members.
+    let src = r#"
+        pub mod a { pub trait S<A> { fn a(&self) -> A; } }
+        pub trait T: a::S<u8> { fn t(&self) -> u32 { self.a() as u32 + 1 } }
+        pub trait TG<B>: a::S<B> { fn tg(&self) -> B { self.a() } }
+        pub trait O { type Out; fn o(&self) -> Self::Out; }
+        pub trait TO: O<Out = u64> { fn to(&self) -> u64 { self.o() + 1 } }
+        pub trait GO<A> { type Out; fn go(&self, a: A) -> Self::Out; }
+        pub trait TGO: GO<u8, Out = u64> { fn tgo(&self) -> u64 { self.go(1) + 1 } }
+        pub trait M<B>: a::S<B> { fn m(&self) -> B { self.a() } }
+        pub trait TM: M<u8> { fn tm(&self) -> u32 { self.m() as u32 + 1 } }
+        pub trait L<'a, A> { fn l(&self) -> A; }
+        pub trait TL: L<'static, usize> { fn tl(&self) -> usize { self.l() + 1 } }
+        pub trait TU: O { fn tu(&self) -> u32 { 1 } }
+        pub trait E<A: ?Sized> { fn eq_to(&self, other: &A) -> bool; }
+        pub trait TE: E<Self> { fn same(&self) -> bool { self.eq_to(self) } }
+        pub trait D<A = u8> { fn d(&self) -> A; }
+        pub trait TD: D { fn td(&self) -> u32 { self.d() as u32 } }
+        pub struct P(pub u32);
+        impl a::S<u8> for P { fn a(&self) -> u8 { self.0 as u8 } }
+        impl T for P {}
+        impl TG<u8> for P {}
+        impl O for P { type Out = u64; fn o(&self) -> u64 { self.0 as u64 } }
+        impl TO for P {}
+        impl D for P { fn d(&self) -> u8 { 1 } }
+        impl TD for P {}
+        "#;
+    let file: syn::File = syn::parse_str(src).unwrap();
+    let mut cg = test_codegen();
+    cg.set_interface_traits(true);
+    cg.set_tier1_default(true);
+    cg.emit_file(&file, None);
+    let out = cg.into_output();
+    // The base clause: the bound's argument, the base's declaring module.
+    for s in [
+        "class T : public virtual ::a::S<uint8_t> {",
+        // The sub-trait's own parameter passed on.
+        "template <class B>\nclass TG : public virtual ::a::S<B> {",
+        // An associated type bound in the bound; a generic trait with one.
+        "class TO : public virtual O<uint64_t> {",
+        "class TGO : public virtual GO<uint8_t, uint64_t> {",
+        // A chain: the middle trait is itself a generic sub-trait.
+        "template <class B>\nclass M : public virtual ::a::S<B> {",
+        "class TM : public virtual M<uint8_t> {",
+        // A lifetime argument has no class parameter.
+        "class TL : public virtual L<size_t> {",
+        // A parameter's declared default stands in for an unwritten argument,
+        // on the implementor's clause too (the impl recorded no arguments).
+        "class TD : public virtual D<uint8_t> {",
+        // An unbound associated type, `Self` as an argument: no base (still).
+        "class TU {",
+        "class TE {",
+        // The default calling the base's method is inlined on `this`.
+        "virtual uint32_t t() const { return (static_cast<uint32_t>(this->a())) + 1; }",
+        // ... and a default calling a SKIPPED bound's method is a pure slot.
+        "virtual bool same() const = 0;",
+        // The forwarders override the base's slot respelled through the bound,
+        // keyed with the base's argument.
+        "uint8_t a() const override { if constexpr (requires { S_::a(rusty_target(), rusty::tag<uint8_t>{}); })",
+        "B a() const override { if constexpr (requires { S_::a(rusty_target(), rusty::tag<B>{}); })",
+        "uint64_t o() const override { if constexpr (requires { O_::o(rusty_target()); })",
+        "uint64_t go(uint8_t a) const override { if constexpr (requires { GO_::go(rusty_target(), a, rusty::tag<uint8_t>{}); })",
+        // The tier-1 implementor: the shared supertrait virtual, the generic
+        // ones with their arguments ((ak)). `O`'s `Self::Out` keeps `O` and
+        // `TO` on tier 2 for `P` (census A1), so neither is a base here.
+        "struct P : public virtual ::a::S<uint8_t>, public T, public TG<uint8_t>, public virtual D<uint8_t>, public TD {",
+        "P(uint32_t _0_init) : ::a::S<uint8_t>(), T(), TG<uint8_t>(), D<uint8_t>(), TD(), _0(std::move(_0_init)) {}",
+    ] {
+        assert!(out.contains(s), "{s}: {out}");
+    }
+    // The chain: TM's forwarder overrides M's slot and, through M's bound,
+    // S's — `A` → `B` → `uint8_t`.
+    let tm_adapter = &out[out.find("template <class U> class TMAdapter final : public TM {").unwrap()..];
+    let tm_adapter = &tm_adapter[..tm_adapter.find("\n};").unwrap()];
+    assert!(
+        tm_adapter.contains("uint8_t m() const override { if constexpr (requires { M_::m(rusty_target(), rusty::tag<uint8_t>{}); })"),
+        "{tm_adapter}"
+    );
+    assert!(
+        tm_adapter.contains("uint8_t a() const override { if constexpr (requires { S_::a(rusty_target(), rusty::tag<uint8_t>{}); })"),
+        "{tm_adapter}"
+    );
+    assert!(!out.contains("class T {"), "{out}");
+    assert!(!out.contains("class TM {"), "{out}");
+
+    // Tier 2: the interface class is the same; the implementor has no base.
+    let tier2 = transpile_str_interface_traits(src);
+    for s in [
+        "class T : public virtual ::a::S<uint8_t> {",
+        "template <class B>\nclass TG : public virtual ::a::S<B> {",
+        "class TM : public virtual M<uint8_t> {",
+        "class TGO : public virtual GO<uint8_t, uint64_t> {",
+        "uint8_t a() const override { if constexpr (requires { S_::a(value_, rusty::tag<uint8_t>{}); })",
+        "struct P {",
+    ] {
+        assert!(tier2.contains(s), "{s}: {tier2}");
+    }
+    assert!(!tier2.contains("struct P : public"), "{tier2}");
+
+    // Module mode, tier 1: the same spelling.
+    let module_file: syn::File = syn::parse_str(
+        r#"
+        pub trait S<A> { fn a(&self) -> A; }
+        pub trait T: S<u8> { fn t(&self) -> u32 { self.a() as u32 + 1 } }
+        pub struct P(pub u32);
+        impl S<u8> for P { fn a(&self) -> u8 { self.0 as u8 } }
+        impl T for P {}
+        "#,
+    )
+    .unwrap();
+    let mut cg = test_codegen();
+    cg.set_interface_traits(true);
+    cg.set_tier1_default(true);
+    cg.emit_file(&module_file, Some("probe"));
+    let module = cg.into_output();
+    assert!(module.contains("class T : public virtual S<uint8_t> {"), "{module}");
+    assert!(
+        module.contains("uint8_t a() const override { if constexpr (requires { S_::a(value_, rusty::tag<uint8_t>{}); })"),
+        "{module}"
+    );
+    assert!(module.contains("struct P : public virtual S<uint8_t>, public T {"), "{module}");
+}
+
+#[test]
+fn test_map_cpp_identifiers_replaces_whole_identifiers_in_one_pass() {
+    // (al) The respelling of a base's slot signatures: whole identifiers only,
+    // simultaneously (a swap does not chain).
+    let map: std::collections::HashMap<String, String> = [
+        ("A".to_string(), "B".to_string()),
+        ("B".to_string(), "A".to_string()),
+        ("Out".to_string(), "uint64_t".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        super::emit_items::map_cpp_identifiers("rusty::Vec<A> f(const B& b, Out o, AB ab, Out_ x)", &map),
+        "rusty::Vec<B> f(const A& b, uint64_t o, AB ab, Out_ x)"
+    );
+    assert_eq!(
+        super::emit_items::map_cpp_identifiers("void", &std::collections::HashMap::new()),
+        "void"
+    );
+}

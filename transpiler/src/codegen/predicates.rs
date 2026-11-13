@@ -56,6 +56,58 @@ impl AutoTrait {
     }
 }
 
+/// (al) The interface class's argument list for one base clause, per class
+/// parameter (see `CodeGen::trait_class_template_args`).
+pub(super) struct TraitClassArgs {
+    /// The trait's type parameters: (name, spelled argument, or None when the
+    /// base clause writes none and the parameter has no default).
+    pub(super) type_params: Vec<(String, Option<String>)>,
+    /// The trait's associated type names: (name, bound type, or None when the
+    /// base clause leaves it unbound).
+    pub(super) assoc_params: Vec<(String, Option<String>)>,
+}
+
+impl TraitClassArgs {
+    /// The full argument list, in class parameter order — None when any class
+    /// parameter is unbound.
+    pub(super) fn all_bound(&self) -> Option<Vec<String>> {
+        self.type_params
+            .iter()
+            .chain(self.assoc_params.iter())
+            .map(|(_, a)| a.clone())
+            .collect()
+    }
+
+    /// `(class parameter name, spelled argument)` for every named, bound
+    /// parameter.
+    pub(super) fn renames(&self) -> Vec<(String, String)> {
+        self.type_params
+            .iter()
+            .chain(self.assoc_params.iter())
+            .filter_map(|(n, a)| match a {
+                Some(a) if !n.is_empty() => Some((n.clone(), a.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// (al) Does the type name `Self` as a path segment?
+fn type_names_self(ty: &syn::Type) -> bool {
+    struct V(bool);
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_path(&mut self, p: &'ast syn::Path) {
+            if p.segments.iter().any(|s| s.ident == "Self") {
+                self.0 = true;
+            }
+            syn::visit::visit_path(self, p);
+        }
+    }
+    let mut v = V(false);
+    syn::visit::Visit::visit_type(&mut v, ty);
+    v.0
+}
+
 impl CodeGen {
     /// Recognize only the compiler-owned inactive trait-dispatch marker.
     /// Keeping the entire shape exact prevents an active, qualified,
@@ -1283,6 +1335,151 @@ impl CodeGen {
             .find_map(|k| self.cpp_inherit_impl_args.get(&(k.clone(), trait_short.to_string())))
     }
 
+    /// (al) One argument list of a trait's interface class, in the class's
+    /// parameter order — the trait's type parameters, then its associated type
+    /// names (`emit_trait` builds the class template that way) — each `(class
+    /// parameter name, spelled argument)`; the argument is `None` when nothing
+    /// written binds that parameter. `trait_args` is the argument list as
+    /// written after the trait name (an impl header's or a supertrait bound's);
+    /// a lifetime argument has no class parameter and is dropped, a const
+    /// argument is consumed by its (dropped) parameter and spelled nowhere, as
+    /// the class drops those parameters; a type parameter's declared default
+    /// stands in for an unwritten argument. `assoc_types` binds the associated
+    /// names (an impl's `type Out = u64;`, a bound's `Out = u64`). `renames`
+    /// rewrites identifiers inside the written arguments before mapping (a
+    /// generic implementor's own parameter names to the struct's, `Self` to
+    /// the struct). Without the trait's declaration (a trait of another file)
+    /// the written arguments are read by kind in the same order and the
+    /// parameter names are unknown (empty).
+    pub(super) fn trait_class_template_args(
+        &self,
+        trait_short: &str,
+        trait_args: &[syn::GenericArgument],
+        assoc_types: &[(String, syn::Type)],
+        renames: &std::collections::HashMap<String, syn::Type>,
+    ) -> TraitClassArgs {
+        let trait_item: Option<&syn::ItemTrait> = self
+            .trait_declared_path_by_short_name
+            .get(trait_short)
+            .and_then(|key| self.cpp_inherit_trait_items.get(key))
+            .or_else(|| self.cpp_inherit_trait_items.get(trait_short));
+        // Per non-lifetime parameter: (name, is a type parameter, its default).
+        let (param_slots, assoc_names): (Vec<(String, bool, Option<syn::Type>)>, Vec<String>) =
+            match trait_item {
+                Some(t) => (
+                    t.generics
+                        .params
+                        .iter()
+                        .filter_map(|p| match p {
+                            syn::GenericParam::Type(tp) => {
+                                Some((tp.ident.to_string(), true, tp.default.clone()))
+                            }
+                            syn::GenericParam::Const(_) => Some((String::new(), false, None)),
+                            syn::GenericParam::Lifetime(_) => None,
+                        })
+                        .collect(),
+                    t.items
+                        .iter()
+                        .filter_map(|i| match i {
+                            syn::TraitItem::Type(at) => Some(at.ident.to_string()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                None => (
+                    trait_args
+                        .iter()
+                        .filter_map(|a| match a {
+                            syn::GenericArgument::Type(_) => Some((String::new(), true, None)),
+                            syn::GenericArgument::Const(_) => Some((String::new(), false, None)),
+                            _ => None,
+                        })
+                        .collect(),
+                    assoc_types.iter().map(|(n, _)| n.clone()).collect(),
+                ),
+            };
+        let map_arg = |ty: &syn::Type| -> String {
+            let mut ty = ty.clone();
+            let mut replacer = TypeIdentMapReplacer { map: renames };
+            syn::visit_mut::VisitMut::visit_type_mut(&mut replacer, &mut ty);
+            self.map_type(&ty)
+        };
+        let mut type_params: Vec<(String, Option<String>)> = Vec::new();
+        let mut written = trait_args
+            .iter()
+            .filter(|a| !matches!(a, syn::GenericArgument::Lifetime(_)));
+        for (name, is_type, default) in param_slots {
+            let arg = written.next();
+            if !is_type {
+                continue;
+            }
+            let spelled = match arg {
+                Some(syn::GenericArgument::Type(ty)) => Some(map_arg(ty)),
+                _ => default.as_ref().map(&map_arg),
+            };
+            type_params.push((name, spelled));
+        }
+        let assoc_params: Vec<(String, Option<String>)> = assoc_names
+            .into_iter()
+            .map(|name| {
+                let bound = assoc_types
+                    .iter()
+                    .find(|(n, _)| n == &name)
+                    .map(|(_, ty)| map_arg(ty));
+                (name, bound)
+            })
+            .collect();
+        TraitClassArgs { type_params, assoc_params }
+    }
+
+    /// (al) The template arguments a sub-trait's interface class spells for a
+    /// supertrait base, from the bound as written — `trait T<B>: S<B, Out = u64>`
+    /// inherits `S<B, uint64_t>` — with the base class's parameter names each
+    /// argument binds (the sub-trait's forwarders respell the base's slots
+    /// through them). `None` when the base cannot be spelled here: a class
+    /// parameter the bound leaves unbound (an associated type it does not
+    /// name) or an argument naming `Self`, the implementor the interface does
+    /// not know — the base is skipped, as before (al). Empty for a plain trait,
+    /// whose class is no template.
+    pub(super) fn supertrait_base_template_args(
+        &self,
+        trait_short: &str,
+        path: &syn::Path,
+    ) -> Option<(Vec<String>, Vec<(String, String)>)> {
+        let mut trait_args: Vec<syn::GenericArgument> = Vec::new();
+        let mut assoc_types: Vec<(String, syn::Type)> = Vec::new();
+        if let Some(seg) = path.segments.last()
+            && let syn::PathArguments::AngleBracketed(ab) = &seg.arguments
+        {
+            for a in &ab.args {
+                match a {
+                    syn::GenericArgument::AssocType(at) => {
+                        assoc_types.push((at.ident.to_string(), at.ty.clone()))
+                    }
+                    syn::GenericArgument::Type(_)
+                    | syn::GenericArgument::Const(_)
+                    | syn::GenericArgument::Lifetime(_) => trait_args.push(a.clone()),
+                    _ => {}
+                }
+            }
+        }
+        let names_self = trait_args
+            .iter()
+            .any(|a| matches!(a, syn::GenericArgument::Type(ty) if type_names_self(ty)))
+            || assoc_types.iter().any(|(_, ty)| type_names_self(ty));
+        if names_self {
+            return None;
+        }
+        let spelled = self.trait_class_template_args(
+            trait_short,
+            &trait_args,
+            &assoc_types,
+            &std::collections::HashMap::new(),
+        );
+        let args = spelled.all_bound()?;
+        Some((args, spelled.renames()))
+    }
+
     /// (ak) The template arguments of a tier-1 trait's interface class for one
     /// implementor, in the class's parameter order: the trait's type
     /// parameters, then its associated type names (`emit_trait` builds the
@@ -1292,50 +1489,20 @@ impl CodeGen {
     /// generic implementor's own parameter names are rewritten to the struct's
     /// (`impl<Y> Tr<Y> for W<Y>` inside `template <class X> struct W` inherits
     /// `Tr<X>`), and `Self` to the struct. Empty for a plain trait — its class
-    /// is no template — so every pre-(ak) spelling is unchanged.
+    /// is no template — so every pre-(ak) spelling is unchanged. (al): the
+    /// argument list itself comes from `trait_class_template_args`, shared with
+    /// the supertrait base clause.
     pub(super) fn cpp_inherit_base_template_args(&self, type_name: &str, trait_short: &str) -> Vec<String> {
-        let Some(args) = self.cpp_inherit_impl_args_of(type_name, trait_short) else {
-            return Vec::new();
+        // (al) No impl header recorded — the impl wrote no arguments and bound
+        // no associated type — leaves the class's parameters to their declared
+        // defaults (`trait S<A = u8>` implemented as `impl S for P`), below.
+        let recorded = self.cpp_inherit_impl_args_of(type_name, trait_short);
+        let empty = CppInheritImplArgs {
+            trait_args: Vec::new(),
+            assoc_types: Vec::new(),
+            self_param_names: Vec::new(),
         };
-        // The trait's declaration fixes the class's parameter list; the impl
-        // header alone (a trait declared in another file) is read by argument
-        // kind in the same order.
-        let trait_item: Option<&syn::ItemTrait> = self
-            .trait_declared_path_by_short_name
-            .get(trait_short)
-            .and_then(|key| self.cpp_inherit_trait_items.get(key))
-            .or_else(|| self.cpp_inherit_trait_items.get(trait_short));
-        let (type_param_slots, assoc_names): (Vec<bool>, Vec<String>) = match trait_item {
-            Some(t) => (
-                t.generics
-                    .params
-                    .iter()
-                    .filter_map(|p| match p {
-                        syn::GenericParam::Type(_) => Some(true),
-                        syn::GenericParam::Const(_) => Some(false),
-                        syn::GenericParam::Lifetime(_) => None,
-                    })
-                    .collect(),
-                t.items
-                    .iter()
-                    .filter_map(|i| match i {
-                        syn::TraitItem::Type(at) => Some(at.ident.to_string()),
-                        _ => None,
-                    })
-                    .collect(),
-            ),
-            None => (
-                args.trait_args
-                    .iter()
-                    .filter_map(|a| match a {
-                        syn::GenericArgument::Type(_) => Some(true),
-                        syn::GenericArgument::Const(_) => Some(false),
-                        _ => None,
-                    })
-                    .collect(),
-                args.assoc_types.iter().map(|(n, _)| n.clone()).collect(),
-            ),
-        };
+        let args = recorded.unwrap_or(&empty);
         // The struct's own parameter names, positionally for the impl's; the
         // census admits a generic implementor only applied to its own
         // parameter list, so the positions line up.
@@ -1362,33 +1529,24 @@ impl CodeGen {
         if let Ok(to) = syn::parse_str::<syn::Type>(&self_spelling) {
             renames.insert("Self".to_string(), to);
         }
-        let map_arg = |ty: &syn::Type| -> String {
-            let mut ty = ty.clone();
-            let mut replacer = TypeIdentMapReplacer { map: &renames };
-            syn::visit_mut::VisitMut::visit_type_mut(&mut replacer, &mut ty);
-            self.map_type(&ty)
-        };
-        let mut out: Vec<String> = Vec::new();
-        let mut written = args
-            .trait_args
-            .iter()
-            .filter(|a| !matches!(a, syn::GenericArgument::Lifetime(_)));
-        for is_type in type_param_slots {
-            let arg = written.next();
-            if !is_type {
-                continue;
-            }
-            out.push(match arg {
-                Some(syn::GenericArgument::Type(ty)) => map_arg(ty),
-                _ => "void /* TODO: unwritten trait argument */".to_string(),
-            });
+        let spelled =
+            self.trait_class_template_args(trait_short, &args.trait_args, &args.assoc_types, &renames);
+        if recorded.is_none() {
+            // Only a class whose every parameter has a default is spelled from
+            // them; any other keeps the bare pre-(ak) spelling.
+            return spelled.all_bound().unwrap_or_default();
         }
-        for name in assoc_names {
-            out.push(match args.assoc_types.iter().find(|(n, _)| n == &name) {
-                Some((_, ty)) => map_arg(ty),
-                None => "void /* TODO: unbound associated type */".to_string(),
-            });
-        }
+        let mut out: Vec<String> = spelled
+            .type_params
+            .into_iter()
+            .map(|(_, a)| a.unwrap_or_else(|| "void /* TODO: unwritten trait argument */".to_string()))
+            .collect();
+        out.extend(
+            spelled
+                .assoc_params
+                .into_iter()
+                .map(|(_, a)| a.unwrap_or_else(|| "void /* TODO: unbound associated type */".to_string())),
+        );
         out
     }
 
